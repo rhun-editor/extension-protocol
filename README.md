@@ -8,13 +8,14 @@ versions, a Go package that speaks it, and the conformance tools.
 | --- | --- |
 | `v1/v1.md` | the specification, written to be read by people and by coding agents |
 | `v1/v1.abnf` | the grammar of every line |
+| `v1/v1.json` | the manifest (`extension.ini`) as a JSON Schema, with every key, pattern and default |
 | `go/rhunext` | a Go package: framing, ids, bodies, requests that block until their reply |
 | `conformance/ext` | `rhun-ext-check DIR`: plays rhun against an extension and reports what it gets wrong |
 | `conformance/host` | scripted extensions and headless scripts that check rhun itself against the spec |
 
-Status: v1 is a draft while rhun 0.18.0 is built; it freezes when the first five extensions
-work and the spec says so at its top. Everything in `v1/v1.md` is implemented in rhun's 0.18.0
-branch except the kernel sandbox behind `[needs]`, which the spec marks.
+Status: **v1 is frozen** (2026-10-16, rhun 0.18.0). Later versions add messages announced
+after `hello 1`; nothing in v1 changes. The kernel sandbox behind `[needs]` lands with
+rhun 0.18.0's confinement work.
 
 ## Writing an extension
 

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -36,8 +37,9 @@ type manifest struct {
 	name, owner, title, version string
 	protocol                    int
 	run                         map[string]string // target -> program
-	runtime, script, args       string
+	runtime, script, args, on   string
 	commands                    []string // NAME.key
+	cmdValues                   map[string]string
 	needs                       map[string]string
 	subscribe                   map[string]string
 }
@@ -84,9 +86,15 @@ func readManifest(dir string) (*manifest, error) {
 				m.script = v
 			case k == "args":
 				m.args = v
+			case k == "on":
+				m.on = v
 			}
 		case "commands":
 			m.commands = append(m.commands, k)
+			if m.cmdValues == nil {
+				m.cmdValues = map[string]string{}
+			}
+			m.cmdValues[k] = v
 		case "needs":
 			m.needs[k] = v
 		case "subscribe":
@@ -1040,6 +1048,67 @@ func main() {
 	}
 	if len(m.commands) == 0 {
 		h.fail("manifest", "no [commands]: the extension can never be started on a command")
+	}
+	// the rules of v1/v1.json
+	schemaFails := 0
+	bad := func(why string) { schemaFails++; h.fail("manifest schema", why) }
+	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(m.name) {
+		bad(fmt.Sprintf("name %q is not [a-z0-9][a-z0-9-]*", m.name))
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*$`).MatchString(m.owner) {
+		bad(fmt.Sprintf("owner %q is not [A-Za-z0-9][A-Za-z0-9-]*", m.owner))
+	}
+	if len(m.title) > 80 {
+		bad(fmt.Sprintf("title is %d bytes (80 at most)", len(m.title)))
+	}
+	for t := range m.run {
+		switch t {
+		case "linux-x86_64", "macos-arm64", "windows-x64":
+		default:
+			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64)", t))
+		}
+	}
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") {
+		bad("no run.TARGET entry and no runtime with run")
+	}
+	for _, w := range strings.Fields(m.on) {
+		if w != "startup" && w != "command" && w != "project" && !strings.HasPrefix(w, "lang:") && !strings.HasPrefix(w, "open:") {
+			bad(fmt.Sprintf("on: %q is not startup, command, project, lang:LANG or open:PATTERN", w))
+		}
+	}
+	for _, c := range m.commands {
+		if !regexp.MustCompile(`^[a-z0-9_]{1,40}$`).MatchString(c) {
+			bad(fmt.Sprintf("[commands] key %q is not [a-z0-9_]{1,40}", c))
+		}
+		if title, _, _ := strings.Cut(m.cmdValues[c], "|"); strings.TrimSpace(title) == "" {
+			bad(fmt.Sprintf("[commands] %s has no title", c))
+		}
+	}
+	for k := range m.subscribe {
+		switch k {
+		case "opened", "saved", "changed", "cursor", "selection", "edits", "hover":
+		default:
+			bad(fmt.Sprintf("[subscribe] %s is not an event with a subscription", k))
+		}
+	}
+	for k, v := range m.needs {
+		ok := false
+		switch k {
+		case "documents", "project":
+			ok = v == "none" || v == "read" || v == "write"
+		case "home":
+			ok = v == "none" || v == "read"
+		case "network", "terminal":
+			ok = v == "no" || v == "yes"
+		case "run":
+			ok = true
+		}
+		if !ok {
+			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
+		}
+	}
+	if schemaFails == 0 {
+		h.ok("manifest follows v1.json")
 	}
 	work, _ := os.MkdirTemp("", "rhun-ext-check-")
 	defer os.RemoveAll(work)
