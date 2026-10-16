@@ -824,9 +824,18 @@ func (h *host) handle(msg message) {
 			rerr("syntax", "cannot parse the line")
 			return
 		}
-		if !cmdAllowed[args[0]] {
+		needsCap, listed := cmdAllowed[args[0]]
+		if !listed {
 			h.fail("verbs", fmt.Sprintf("cmd %s is not a command an extension may run (section 8a)", args[0]))
 			rerr("refused", "not a command an extension may run")
+			return
+		}
+		if needsCap == "write" && !need("write") {
+			return
+		}
+		if needsCap == "terminal" && h.m.needs["terminal"] != "yes" {
+			h.fail("needs", fmt.Sprintf("cmd %s needs terminal=yes but the manifest does not say so", args[0]))
+			rerr("needs", "terminal=yes")
 			return
 		}
 		h.cmds = append(h.cmds, args[0])
@@ -895,15 +904,20 @@ func (h *host) activate(d int64) {
 	}
 }
 
-// cmdAllowed lists the commands of section 8a.
-var cmdAllowed = func() map[string]bool {
-	m := map[string]bool{}
-	for _, n := range strings.Fields(`undo redo cut copy paste select_all select_line select_next duplicate_line
-		delete_line move_line_up move_line_down indent outdent toggle_comment newline_below newline_above
-		find replace find_next find_prev find_in_files goto_line quick_open command_palette next_tab prev_tab
-		reveal_file focus_explorer toggle_sidebar toggle_agents toggle_terminal new_terminal clear_terminal
+// cmdAllowed lists the commands of section 8a with the capability each needs ("" for none).
+var cmdAllowed = func() map[string]string {
+	m := map[string]string{}
+	for _, n := range strings.Fields(`undo redo duplicate_line delete_line move_line_up move_line_down indent outdent
+		toggle_comment newline_below newline_above`) {
+		m[n] = "write"
+	}
+	for _, n := range strings.Fields(`toggle_terminal new_terminal clear_terminal`) {
+		m[n] = "terminal"
+	}
+	for _, n := range strings.Fields(`select_all select_line select_next find replace find_next find_prev find_in_files
+		goto_line quick_open command_palette next_tab prev_tab reveal_file focus_explorer toggle_sidebar toggle_agents
 		toggle_word_wrap toggle_whitespace toggle_line_numbers zoom_in zoom_out zoom_reset`) {
-		m[n] = true
+		m[n] = ""
 	}
 	return m
 }()

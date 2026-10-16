@@ -2659,7 +2659,9 @@ def chk_term_empty(r):
 
 
 plain('term.empty-line-cancels', ['conf/term'], ops=[WR, WR, ["req", "term", "{LEN}", "xy"], DONE],
-      script=TRIGT2 + ['key BackSpace', 'key BackSpace', 'wait 300'] + pal('p1') + ['key Return', 'wait 300', 'wait 300'] + pal('p2') + ['quit'],
+      # the field shows the command from its start (the cursor is at 0), and the prompt ignores
+      # Enter during its first half second
+      script=TRIGT2 + ['key Delete', 'key Delete', 'wait 300'] + pal('p1') + ['wait 600', 'key Return', 'wait 300', 'wait 300'] + pal('p2') + ['quit'],
       check=chk_term_empty)
 
 
@@ -2708,15 +2710,16 @@ def cmd_edit_scn(name, ops, want_doc, selects):
         r.eq('the-command-ran-as-if-the-user-had-invoked-it', r.doc('d'), want_doc)
         if selects:
             r.ok('select_all-selected', r.state('after').get('sel') not in (None, '0'), 'print-state %r' % r.state('after'))
-    plain('cmd.' + name, ['conf/nocap'], ops=[WR] + ops + [DONE],
-          script=['open {P}/a.txt', 'cmd nocap.go', 'wait-ext nocap running', 'wait 300'] + ps('before') + ['wait 600', 'wait 600'] + ps('after') + pd('d') + ['quit'],
+    # the editing commands need documents = write (conf/full has it)
+    plain('cmd.' + name, ['conf/full'], ops=[WR] + ops + [DONE],
+          script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running', 'wait 300'] + ps('before') + ['wait 600', 'wait 600'] + ps('after') + pd('d') + ['quit'],
           check=chk)
 
 
 for _n, (_ops, _doc, _sel) in CMD_EDIT.items():
     cmd_edit_scn(_n, _ops, _doc, _sel)
 
-CMD_LISTED = ('undo redo cut copy paste select_all select_line select_next duplicate_line delete_line move_line_up move_line_down '
+CMD_LISTED = ('undo redo select_all select_line select_next duplicate_line delete_line move_line_up move_line_down '
               'indent outdent toggle_comment newline_below newline_above find replace find_next find_prev find_in_files goto_line '
               'quick_open command_palette next_tab prev_tab reveal_file focus_explorer toggle_sidebar toggle_agents toggle_terminal '
               'new_terminal clear_terminal toggle_word_wrap toggle_whitespace toggle_line_numbers zoom_in zoom_out zoom_reset').split()
@@ -2728,12 +2731,36 @@ def chk_cmd_listed(r):
         r.eq('cmd-%s' % n, ln_of(r.reply(i)), 'ok %d' % i)
     st = r.state('s')
     r.ok('the-editor-is-still-there', bool(st), 'print-state after: %r' % r.seg('s'))
-    e = r.ext('e', 'conf/nocap')
+    e = r.ext('e', 'conf/term')
     r.ok('extension-still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
 
 
-plain('cmd.every-listed-command-is-ok', ['conf/nocap'], ops=[WR] + [["req", "cmd", n] for n in CMD_LISTED] + [DONE],
-      script=['open {P}/a.txt', 'cmd nocap.go', 'wait-ext nocap running', 'wait 2500'] + ps('s') + pe('e') + ['quit'], check=chk_cmd_listed)
+# the whole list needs documents = write (the editing commands) and terminal = yes (the panel's)
+plain('cmd.every-listed-command-is-ok', ['conf/term'], ops=[WR] + [["req", "cmd", n] for n in CMD_LISTED] + [DONE],
+      script=['open {P}/a.txt', 'cmd term.go', 'wait-ext term running', 'wait 2500'] + ps('s') + pe('e') + ['quit'], check=chk_cmd_listed)
+
+CMD_NEEDS_STEPS = [
+    ('undo-needs-documents-write', ["req", "cmd", "undo"], ('err', 'needs')),
+    ('delete_line-needs-documents-write', ["req", "cmd", "delete_line"], ('err', 'needs')),
+    ('toggle_terminal-needs-terminal-yes', ["req", "cmd", "toggle_terminal"], ('err', 'needs')),
+    ('select_all-needs-nothing', ["req", "cmd", "select_all"], ('ok',)),
+    ('paste-is-not-listed', ["req", "cmd", "paste"], ('err', 'refused')),
+    ('copy-is-not-listed', ["req", "cmd", "copy"], ('err', 'refused')),
+    ('cut-is-not-listed', ["req", "cmd", "cut"], ('err', 'refused')),
+    DONE,
+]
+CMD_NEEDS_OPS, CMD_NEEDS_CASES = split_steps(CMD_NEEDS_STEPS)
+
+
+def chk_cmd_needs(r):
+    r.finished()
+    check_steps(r, CMD_NEEDS_STEPS)
+    r.eq('nothing-changed-the-document', r.doc('d'), A_TXT)
+
+
+plain('cmd.capabilities-gate-the-list', ['conf/nocap'], ops=[WR] + CMD_NEEDS_OPS,
+      script=['open {P}/a.txt', 'cmd nocap.go', 'wait-ext nocap running', 'wait 1500'] + pd('d') + ['quit'],
+      check=chk_cmd_needs)
 
 CMD_REFUSED_STEPS = [
     ('quit-is-refused', ["req", "cmd", "quit"], ('err', 'refused')),
