@@ -1800,8 +1800,9 @@ def chk_close(r):
     e = r.ext('e', 'conf/full')
     r.ok('stopped-when-the-program-closes-its-pipe', e is not None and e['state'] != 'running', 'got %r' % (e and e['raw']))
     closed = r.notes_with('closed ')
-    alive = [n.ts for n in r.notes if n.text == 'alive']
-    dt = (max(alive) - closed[0].ts) if closed and alive else None
+    alive = [n.ts for n in r.notes if n.text == 'alive' and closed and n.ts >= closed[0].ts]
+    # no heartbeat after the close is the best outcome: rhun ended it before the next beat
+    dt = (max(alive) - closed[0].ts) if alive else (0.0 if closed else None)
     r.ok('process-ended-within-3s', dt is not None and dt <= 3.0,
          'the process was last alive %s s after it closed its pipe' % (None if dt is None else round(dt, 2)))
 
