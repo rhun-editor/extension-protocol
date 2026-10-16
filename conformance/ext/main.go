@@ -867,16 +867,31 @@ func (h *host) afterEdit(d *doc, recs ...edit) {
 		h.write(fmt.Sprintf("0 changed %d %d\n", d.id, d.version))
 	}
 	if h.sub("cursor") {
-		line, col := 1, 1
-		for i := 0; i < d.cur && i < len(d.text); i++ {
-			if d.text[i] == '\n' {
-				line++
-				col = 1
-			} else {
-				col++
-			}
+		h.sendCursor(d)
+	}
+}
+
+// sendCursor reports the document's cursor, as rhun does after a move and when a document
+// becomes active.
+func (h *host) sendCursor(d *doc) {
+	line, col := 1, 1
+	for i := 0; i < d.cur && i < len(d.text); i++ {
+		if d.text[i] == '\n' {
+			line++
+			col = 1
+		} else {
+			col++
 		}
-		h.write(fmt.Sprintf("0 cursor %d %d %d\n", d.id, line, col))
+	}
+	h.write(fmt.Sprintf("0 cursor %d %d %d\n", d.id, line, col))
+}
+
+// activate makes a document active, with its cursor for subscribers, as rhun does.
+func (h *host) activate(d int64) {
+	h.active = d
+	h.write(fmt.Sprintf("0 active %d\n", d))
+	if h.sub("cursor") {
+		h.sendCursor(h.docs[d])
 	}
 }
 
@@ -1046,8 +1061,7 @@ func main() {
 	for _, c := range m.commands {
 		for _, d := range []int64{1, 2, 3, 4} {
 			before := len(h.requests)
-			h.active = d
-			h.write(fmt.Sprintf("0 active %d\n", d))
+			h.activate(d)
 			h.write(fmt.Sprintf("0 run %s.%s %d\n", m.name, c, d))
 			h.serve(700 * time.Millisecond)
 			did := h.requests[before:]
@@ -1073,8 +1087,7 @@ func main() {
 	// 2b. the user types into main.go: the edits stream for subscribers; then the pointer rests
 	if h.sub("edits") || h.sub("hover") {
 		d := h.docs[2]
-		h.active = d.id
-		h.write(fmt.Sprintf("0 active %d\n", d.id))
+		h.activate(d.id)
 		h.serve(200 * time.Millisecond)
 		typed := []byte("\n// typed\n")
 		at := len("package main\n")
