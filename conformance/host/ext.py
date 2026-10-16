@@ -14,6 +14,7 @@ Standard library only.  One program, many behaviours, driven by the environment:
   CONF_IGNORE_BYE=1   do not leave on `0 bye`
   CONF_IGNORE_TERM=1  ignore SIGTERM
   CONF_IGNORE_EOF=1   keep running when standard input ends
+  CONF_HEARTBEAT=1    log "alive" every 100 ms, so the runner can tell when the process died
   CONF_SLOT_EXIT=SUF  scenario "slot": the extension whose name ends in SUF exits after 1.5 s
 
 Log record format: "<epoch-seconds> <KIND> <text>" where KIND is
@@ -266,9 +267,13 @@ class Ext:
             if self.pump(idle) is None:
                 break
 
-    def wait_reply(self, rid, timeout=20.0):
+    def wait_reply(self, rid, timeout=8.0):
         end = time.time() + timeout
         while rid not in self.replies:
+            if 0 in self.replies:       # `error 0 ...`: the host could not tie the error to this request
+                log('X', 'error-0 taken as the reply to %d' % rid)
+                self.pending.pop(rid, None)
+                return self.replies.pop(0)
             left = end - time.time()
             if left <= 0:
                 log('X', 'timeout waiting for reply %d' % rid)
@@ -303,8 +308,12 @@ class Ext:
 
     def sub(self, s):
         if isinstance(s, str):
-            return (s.replace('{PROJECT}', self.project or '-')
-                     .replace('{STATE}', ENV.get('RHUN_STATE', '')))
+            s = (s.replace('{PROJECT}', self.project or '-')
+                  .replace('{STATE}', ENV.get('RHUN_STATE', '')))
+            while '{DOC:' in s:
+                i = s.index('{DOC:')
+                j = s.index('}', i)
+                s = s[:i] + str(self.doc(s[i + 5:j])) + s[j + 1:]
         return s
 
     def body(self, b):
@@ -369,7 +378,11 @@ class Ext:
         log('>', esc('%d %s' % (rid, head)))
         if body:
             body_record('S', body)
-        self.write_bytes(self.message_bytes(built), frag=opts.get('frag'), split=opts.get('split'))
+        split = opts.get('split')
+        if split and len(split) == 3 and split[2] == 'body':      # [bytes into the body, pause, "body"]
+            head_len = len(('%d %s' % (rid, head)).encode('utf-8') + self.eol().encode())
+            split = (head_len + split[0], split[1])
+        self.write_bytes(self.message_bytes(built), frag=opts.get('frag'), split=split)
 
     # ---- operations
     def run_ops(self, ops):
@@ -425,6 +438,10 @@ class Ext:
             data = self.body(op[1])
             log('>', 'raw %d bytes %s' % (len(data), esc(data[:80])))
             self.write_bytes(data)
+        elif name == 'writefile':       # the extension edits a file behind rhun's back
+            with open(self.sub(op[1]), 'wb') as f:
+                f.write(self.body(op[2]))
+            log('X', 'wrote %s' % self.sub(op[1]))
         elif name == 'ignore':
             if op[1] == 'bye':
                 self.ignore_bye = True
@@ -537,6 +554,8 @@ def main():
     x = Ext()
     log_env()
     os.write(2, b'ext-stderr-marker\n')
+    if ENV.get('CONF_HEARTBEAT') == '1':
+        x.do_op(['heartbeat'])
     sc = ENV.get('CONF_SCENARIO', 'ops')
     if ENV.get('CONF_HELLO_DELAY'):
         time.sleep(float(ENV['CONF_HELLO_DELAY']))
