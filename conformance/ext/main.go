@@ -195,8 +195,8 @@ func (h *host) start() error {
 		"RHUN_EXTENSION=" + h.m.owner + "/" + h.m.name, "RHUN_TARGET=" + *target, "RHUN_STATE=" + h.state,
 		"RHUN_PROJECT=" + h.project,
 	}
-	for _, k := range []string{"LANG", "LC_ALL", "TZ", "GOROOT", "GOPATH", "GOCACHE", "GOMODCACHE"} {
-		if v := os.Getenv(k); v != "" && !strings.HasPrefix(k, "GO") {
+	for _, k := range []string{"LANG", "LC_ALL", "TZ"} {
+		if v := os.Getenv(k); v != "" {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 	}
@@ -1032,6 +1032,7 @@ func main() {
 	h.state = filepath.Join(work, "state")
 	h.project = filepath.Join(work, "project")
 	os.MkdirAll(h.project, 0o755)
+	// the documents every command runs on: plain text, Go, JSON, and a two-byte character
 	os.WriteFile(filepath.Join(h.project, "a.txt"), []byte("hello world\nsecond line\n"), 0o644)
 	os.WriteFile(filepath.Join(h.project, "main.go"), []byte("package main\n\nfunc  main( ) {\n}\n"), 0o644)
 	os.WriteFile(filepath.Join(h.project, "data.json"), []byte("{\"a\":1,\"b\":[1,2]}"), 0o644)

@@ -13,14 +13,17 @@ versions, a Go package that speaks it, and the conformance tools.
 | `conformance/host` | scripted extensions and headless scripts that check rhun itself against the spec |
 
 Status: v1 is a draft while rhun 0.18.0 is built; it freezes when the first five extensions
-work. Changes until then are listed at the top of `v1/v1.md`.
+work and the spec says so at its top. Everything in `v1/v1.md` is implemented in rhun's 0.18.0
+branch except the kernel sandbox behind `[needs]`, which the spec marks.
 
 ## Writing an extension
 
 Start from [rhun-editor/extension-template](https://github.com/rhun-editor/extension-template):
 a Go program on `go/rhunext`, with the release workflow that builds Linux, macOS and Windows
-binaries and attests them. Test with `go run github.com/rhun-editor/extension-protocol/conformance/ext@latest DIR`
-where `DIR` holds your `extension.ini` and the built program, then headlessly against rhun:
+binaries and attests them. Test with the checker, `rhun-ext-check DIR` (`go build -o rhun-ext-check ./conformance/ext`
+here, or `go run github.com/rhun-editor/extension-protocol/conformance/ext@latest DIR`), where
+`DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` and `bin/`), then
+headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
 
 ## Checking a host

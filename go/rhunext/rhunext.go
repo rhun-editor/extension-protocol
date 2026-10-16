@@ -102,11 +102,16 @@ type Diagnostic struct {
 	Message  string
 }
 
-// Handler receives events. Methods are called on one goroutine, in order.
+// Handler receives events. Methods are called on one goroutine, in order, so an extension's
+// own state needs no locking when only the handler touches it. A request made inside a handler
+// (including a prompt the user takes time over) blocks the handler until rhun answers; events
+// that arrive meanwhile wait in a queue without bound. Do slow work on a goroutine of your own.
 type Handler interface {
 	// Ready is the first event: the project folder, or "" without one.
 	Ready(ext *Ext, project string)
-	// Run is one of the extension's commands, with the active document or 0.
+	// Run is one of the extension's commands, by its full name (NAME.command, as the run
+	// event carries it: "format.format_document", not the manifest key), with the active
+	// document or 0.
 	Run(ext *Ext, command string, doc Doc)
 	// Event is any other event, including the ones with dedicated accessors below.
 	Event(ext *Ext, ev Event)
@@ -120,7 +125,8 @@ type Opened struct {
 	Path    string // "" for an untitled document
 }
 
-// Error is a reply with an error code.
+// Error is a reply with an error code: syntax, unknown, needs, nodoc, nofile, readonly, stale,
+// badpos, toobig, busy, cancelled, refused (section 3 of the protocol).
 type Error struct {
 	Code string // syntax, unknown, needs, nodoc, nofile, readonly, stale, badpos, busy, cancelled, refused
 	Text string
@@ -164,10 +170,13 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 		return err
 	}
 	br := bufio.NewReaderSize(r, 1<<16)
-	events := make(chan Event, 64)
+	// the reader never blocks on the handler: events queue without bound, so a reply can be
+	// read while the handler waits for it (a prompt inside an event handler)
+	raw := make(chan Event)
+	events := make(chan Event)
 	errc := make(chan error, 1)
 	go func() {
-		defer close(events)
+		defer close(raw)
 		for {
 			ev, err := ext.readMessage(br)
 			if err != nil {
@@ -175,7 +184,28 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 				return
 			}
 			if ev != nil {
-				events <- *ev
+				raw <- *ev
+			}
+		}
+	}()
+	go func() {
+		defer close(events)
+		var queue []Event
+		for raw != nil || len(queue) > 0 {
+			var out chan Event
+			var next Event
+			if len(queue) > 0 {
+				out, next = events, queue[0]
+			}
+			select {
+			case ev, ok := <-raw:
+				if !ok {
+					raw = nil
+					continue
+				}
+				queue = append(queue, ev)
+			case out <- next:
+				queue = queue[1:]
 			}
 		}
 	}()
@@ -430,8 +460,12 @@ func (e *Ext) Open(path string, at Pos) (Doc, error) {
 	return Doc(argInt(r, 0)), nil
 }
 
-// Diagnostics replaces this extension's marks on the document, if version is current.
+// Diagnostics replaces this extension's marks on the document, if version is current. rhun
+// keeps 2000 marks per document per extension: more are cut here (the first 2000 are sent).
 func (e *Ext) Diagnostics(doc Doc, version int64, ds []Diagnostic) error {
+	if len(ds) > 2000 {
+		ds = ds[:2000]
+	}
 	var body bytes.Buffer
 	for _, d := range ds {
 		msg := strings.ReplaceAll(strings.ReplaceAll(d.Message, "\n", " "), "\r", " ")
@@ -520,6 +554,60 @@ func Busy(err error) bool {
 
 func oneLine(s string) string {
 	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+}
+
+// ParseDoc reads the document id of an event whose first field is one: active, saved,
+// changed, cursor, selection, closed, edits, resync, hover.
+func ParseDoc(ev Event) (Doc, bool) {
+	if len(ev.Args) < 1 {
+		return 0, false
+	}
+	d, err := strconv.ParseInt(ev.Args[0], 10, 64)
+	return Doc(d), err == nil
+}
+
+// ParseVersion reads a saved, changed, edits or resync event: the document and its version.
+func ParseVersion(ev Event) (Doc, int64, bool) {
+	if len(ev.Args) < 2 {
+		return 0, 0, false
+	}
+	d, err1 := strconv.ParseInt(ev.Args[0], 10, 64)
+	v, err2 := strconv.ParseInt(ev.Args[1], 10, 64)
+	return Doc(d), v, err1 == nil && err2 == nil
+}
+
+// ParseCursor reads a cursor event: the document and the cursor position.
+func ParseCursor(ev Event) (Doc, Pos, bool) {
+	if ev.Name != "cursor" {
+		return 0, Pos{}, false
+	}
+	return parseDocPos(ev)
+}
+
+// ParseSelection reads a selection event: the document and the range (anchor to cursor).
+func ParseSelection(ev Event) (Doc, Range, bool) {
+	if ev.Name != "selection" || len(ev.Args) < 5 {
+		return 0, Range{}, false
+	}
+	d, err := strconv.ParseInt(ev.Args[0], 10, 64)
+	a, ok1 := parsePos(ev.Args[1], ev.Args[2])
+	b, ok2 := parsePos(ev.Args[3], ev.Args[4])
+	return Doc(d), Range{Start: a, End: b}, err == nil && ok1 && ok2
+}
+
+func parseDocPos(ev Event) (Doc, Pos, bool) {
+	if len(ev.Args) < 3 {
+		return 0, Pos{}, false
+	}
+	d, err := strconv.ParseInt(ev.Args[0], 10, 64)
+	p, ok := parsePos(ev.Args[1], ev.Args[2])
+	return Doc(d), p, err == nil && ok
+}
+
+func parsePos(line, col string) (Pos, bool) {
+	l, err1 := strconv.Atoi(line)
+	c, err2 := strconv.Atoi(col)
+	return Pos{Line: l, Col: c}, err1 == nil && err2 == nil
 }
 
 // ParseHover reads a hover event: the document and the position the pointer rests on.

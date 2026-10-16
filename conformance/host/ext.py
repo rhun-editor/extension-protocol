@@ -6,6 +6,7 @@ Standard library only.  One program, many behaviours, driven by the environment:
   CONF_LOG            file that receives one record per line (required for checks)
   CONF_SCENARIO       "ops" (default) runs CONF_OPS; others are named below
   CONF_OPS            JSON list of operations (see run_ops) used by scenario "ops"
+  CONF_OPS_NAME       the same for the extension called NAME (upper case), when several run at once
   CONF_HELLO          first bytes to write instead of "hello 1\\n" (backslash escapes allowed)
   CONF_HELLO_DELAY    seconds to wait before the hello
   CONF_NOHELLO=1      never say hello
@@ -221,6 +222,9 @@ class Ext:
             if f[0] == 'ok' and verb in ('text', 'range') and len(f) >= 4:
                 body = self.conn.readexact(int(f[3]))
                 body_record('B', body)
+            elif f[0] == 'ok' and verb == 'ask' and len(f) >= 3:       # ok ID LEN + the answer
+                body = self.conn.readexact(int(f[2]))
+                body_record('B', body)
             r = Reply(text.rstrip('\r'), body)
             if r.ok and verb in ('text', 'range', 'replace', 'insert') and r.args:
                 d = self.docs.get(self.req_doc.get(rid))
@@ -361,6 +365,7 @@ class Ext:
             head = op[1] + ((' ' + self.sub(op[2])) if len(op) > 2 and op[2] != '' else '')
             if len(op) > 3:
                 body = self.body(op[3])
+            head = head.replace('{LEN}', str(len(body)))        # the real length of the body, after substitutions
         else:
             raise ValueError('unknown op ' + name)
         verb = head.split(' ')[0]
@@ -580,7 +585,7 @@ def main():
             finish('exit-after-hello', int(ENV['CONF_EXIT_AFTER_HELLO']))
         if ENV.get('CONF_NOSETTLE') != '1':
             x.settle()
-        ops = json.loads(ENV.get('CONF_OPS', '[]'))
+        ops = json.loads(ENV.get('CONF_OPS_' + ENV.get('RHUN_EXTENSION', '').split('/')[-1].upper()) or ENV.get('CONF_OPS', '[]'))
         x.run_ops(ops)
         x.hold()
     except EOFError:

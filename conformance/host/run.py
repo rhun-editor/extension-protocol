@@ -327,7 +327,10 @@ def run_scenario(scn, rhun, keep=False):
            'XDG_CONFIG_HOME': d['cfg'], 'XDG_STATE_HOME': d['state'],
            'LANG': 'en_US.UTF-8', 'LC_ALL': 'en_US.UTF-8', 'TZ': 'UTC',
            'CONF_LOG': d['log'], 'CONF_MARK': 'inherited'}
-    if scn.ops is not None:
+    if isinstance(scn.ops, dict):           # {extension name: ops} when several extensions run at once
+        for k, v in scn.ops.items():
+            env['CONF_OPS_' + k.upper()] = json.dumps(v)
+    elif scn.ops is not None:
         env['CONF_OPS'] = json.dumps(scn.ops)
     for k, v in scn.env.items():
         env[k] = v.format(P=d['proj'], S=base) if isinstance(v, str) else v
@@ -1987,6 +1990,88 @@ def chk_reload(r):
 plain('ev.reload-keeps-the-id', ['conf/full'],
       ops=[["text", "a.txt"], ["writefile", "{PROJECT}/a.txt", "fresh from disk\n"], ["sleep", 3.0], ["text", "a.txt"], DONE],
       script=std(pre=[OPEN_A], wait=5200), check=chk_reload)
+
+# ================================================================ gate 4: register, option, prompts, term, cmd
+# The scripted extension is started by `cmd full.go`; its ops begin with `waitrun`, which takes that
+# first `run`.  A second `waitrun` makes it wait for `cmd full.go2`, so the script decides when the
+# next request is sent instead of guessing with sleeps.
+
+W2 = ['wait 300', 'wait 300']
+TRIG1 = ['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + W2
+TRIG2 = ['open {P}/a.txt', 'cmd full.go', 'wait-ext full running', 'wait 300', 'cmd full.go2'] + W2
+WAIT_RUN = ["waitrun"]
+
+
+def prompt_req(verb, *lines):
+    """["req", "choose", "LEN", body]: the LEN field counts the body's bytes."""
+    b = '\n'.join(lines)
+    return ["req", verb, str(len(b.encode('utf-8'))), b]
+
+
+def pal(label):
+    return ['echo @' + label, 'print-palette']
+
+
+def popt(label):
+    return ['echo @' + label, 'print-options']
+
+
+def pterm(label):
+    return ['echo @' + label, 'print-term']
+
+
+def palette(r, label):
+    """(first line, field text, rows, selected row) of a print-palette segment; the first line is
+    `none` when nothing is open.  Rows are the text after the two-character marker."""
+    seg = [ln for ln in r.seg(label) if ln != '' and not ln.startswith('ext=')]
+    if not seg:
+        return (None, None, [], None)
+    if seg[0] == 'none':
+        return ('none', None, [], None)
+    field, rows, sel = None, [], None
+    for ln in seg[1:]:
+        if ln.startswith('field='):
+            field = ln[6:]
+        elif ln.startswith('> '):
+            sel = ln[2:]
+            rows.append(ln[2:])
+        elif ln.startswith('  '):
+            rows.append(ln[2:])
+    return (seg[0], field, rows, sel)
+
+
+def opts_of(r, label):
+    """print-options as {key: value}; the booleans as bool."""
+    for ln in r.seg(label):
+        if ln.startswith('tab_width='):
+            d = dict(kv.split('=', 1) for kv in ln.split(' ') if '=' in kv)
+            return {k: (int(v) if k == 'tab_width' else v in ('1', 'true', 'yes')) for k, v in d.items()}
+    return None
+
+
+def is_err(m, rid, code):
+    return m is not None and re.match(r'^error %d %s( .*)?$' % (rid, re.escape(code)), m.line) is not None
+
+
+def chk_choose_a(r):
+    r.finished()
+    head, field, rows, sel = palette(r, 'p0')
+    r.eq('prompt-is-shown', head, 'choose=Pick one')
+    r.eq('items-in-order', rows, ['alpha', 'beta', 'gamma'])
+    r.eq('first-item-selected', sel, 'alpha')
+    r.eq('filter-starts-empty', field, '')
+    head, field, rows, sel = palette(r, 'p1')
+    r.eq('typing-filters-the-items', rows, ['gamma'])
+    r.eq('field-shows-what-was-typed', field, 'ga')
+    m = r.reply(1)
+    r.eq('enter-answers-with-the-number-in-the-original-list', m and m.line, 'ok 1 3')
+    r.eq('prompt-closed-after-the-answer', palette(r, 'p2')[0], 'none')
+
+
+plain('choose.filter-and-enter', ['conf/full'],
+      ops=[WAIT_RUN, WAIT_RUN, prompt_req('choose', 'Pick one', 'alpha', 'beta', 'gamma'), DONE],
+      script=TRIG2 + pal('p0') + ['type ga', 'wait 300'] + pal('p1') + ['key Return', 'wait 300', 'wait 300'] + pal('p2') + ['quit'],
+      check=chk_choose_a)
 
 # @@SCENARIOS-END@@
 
