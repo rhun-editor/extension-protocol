@@ -1994,18 +1994,18 @@ plain('ev.reload-keeps-the-id', ['conf/full'],
 # ================================================================ gate 4: register, option, prompts, term, cmd
 # The scripted extension is started by `cmd full.go`; its ops begin with `waitrun`, which takes that
 # first `run`.  A second `waitrun` makes it wait for `cmd full.go2`, so the script decides when the
-# next request is sent instead of guessing with sleeps.
+# next request is sent instead of guessing with sleeps.  A body's "LEN" is written `{LEN}` in `req`.
 
 W2 = ['wait 300', 'wait 300']
 TRIG1 = ['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + W2
 TRIG2 = ['open {P}/a.txt', 'cmd full.go', 'wait-ext full running', 'wait 300', 'cmd full.go2'] + W2
-WAIT_RUN = ["waitrun"]
+TRIGT2 = ['open {P}/a.txt', 'cmd term.go', 'wait-ext term running', 'wait 300', 'cmd term.go2'] + W2
+WR = ["waitrun"]
 
 
-def prompt_req(verb, *lines):
-    """["req", "choose", "LEN", body]: the LEN field counts the body's bytes."""
-    b = '\n'.join(lines)
-    return ["req", verb, str(len(b.encode('utf-8'))), b]
+def preq(verb, *lines):
+    """A prompt request whose body is the lines joined by LF (no trailing LF)."""
+    return ["req", verb, "{LEN}", '\n'.join(lines)]
 
 
 def pal(label):
@@ -2022,7 +2022,7 @@ def pterm(label):
 
 def palette(r, label):
     """(first line, field text, rows, selected row) of a print-palette segment; the first line is
-    `none` when nothing is open.  Rows are the text after the two-character marker."""
+    `none` when no prompt is open.  Rows are the text after the two-character marker."""
     seg = [ln for ln in r.seg(label) if ln != '' and not ln.startswith('ext=')]
     if not seg:
         return (None, None, [], None)
@@ -2053,7 +2053,317 @@ def is_err(m, rid, code):
     return m is not None and re.match(r'^error %d %s( .*)?$' % (rid, re.escape(code)), m.line) is not None
 
 
-def chk_choose_a(r):
+def ln_of(m):
+    return m.line if m is not None else None
+
+
+# ---------------------------------------------------------------- register (section 8, 3, 4.5)
+
+def chk_register_runs(r):
+    r.finished()
+    r.eq('register-name-title', ln_of(r.reply(1)), 'ok 1')
+    r.eq('register-with-a-key', ln_of(r.reply(2)), 'ok 2')
+    e = r.ext('e', 'conf/full')
+    cmds = set((e['cmds'] or '').split(',')) if e else set()
+    r.ok('listed-with-the-manifest-commands', {'full.go', 'full.go2', 'full.hello', 'full.keyed'} <= cmds, 'got %r' % (e and e['raw']))
+    doc = r.docid('a.txt')
+    runs = [m.line for m in r.events('run')]
+    r.eq('cmd-and-the-palette-both-give-the-run-event', runs.count('0 run full.hello %d' % doc), 2)
+    r.eq('default-key-gives-the-run-event', runs.count('0 run full.keyed %d' % doc), 1)
+    head, field, rows, sel = palette(r, 'p')
+    r.ok('palette-shows-the-title-with-the-extension', any(re.match(r'^Say Hello \(.*full.*\)', x, re.I) for x in rows),
+         'palette rows after typing "say hello": %r' % rows)
+
+
+plain('register.runs', ['conf/full'],
+      ops=[WR, ["req", "register", "hello - Say Hello"], ["req", "register", "keyed ctrl+shift+alt+8 Keyed Thing"], DONE],
+      script=TRIG1 + pe('e') + ['cmd full.hello', 'wait 300', 'wait 300', 'key ctrl+shift+alt+8', 'wait 300', 'wait 300',
+                                'key ctrl+shift+p', 'wait 300', 'type say hello', 'wait 300'] + ['echo @p', 'print-palette', 'key Return', 'wait 300', 'wait 300', 'quit'],
+      check=chk_register_runs)
+
+REG_STEPS = [
+    ('register', ["req", "register", "hello - Say Hello"], ('ok',)),
+    ('name-in-use-by-an-earlier-register-is-refused', ["req", "register", "hello - Again"], ('err', 'refused')),
+    ('name-in-use-by-a-manifest-command-is-refused', ["req", "register", "go - Mine"], ('err', 'refused')),
+    ('after-refused-1', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('upper-case-name-is-syntax', ["req", "register", "Bad - Title"], ('err', 'syntax')),
+    ('after-syntax-1', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('dash-in-name-is-syntax', ["req", "register", "a-b - Title"], ('err', 'syntax')),
+    ('after-syntax-2', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('name-of-only-a-dash-is-syntax', ["req", "register", "- - Title"], ('err', 'syntax')),
+    ('after-syntax-3', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('missing-title-is-syntax', ["req", "register", "onlyname -"], ('err', 'syntax')),
+    ('after-syntax-4', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('no-arguments-is-syntax', ["req", "register"], ('err', 'syntax')),
+    ('after-syntax-5', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('name-of-41-bytes-is-syntax', ["req", "register", "a" * 41 + " - Title"], ('err', 'syntax')),
+    ('after-syntax-6', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('name-of-40-bytes-is-ok', ["req", "register", "b" * 40 + " - Title"], ('ok',)),
+    ('title-of-100-bytes-is-cut-not-an-error', ["req", "register", "longtitle - " + "T" * 100], ('ok',)),
+    ('title-of-100-bytes-in-2-byte-characters-is-cut-not-an-error', ["req", "register", "mbtitle - " + "é" * 50], ('ok',)),
+    ('digits-and-underscore-are-fine', ["req", "register", "a_1_9 - Title"], ('ok',)),
+    DONE,
+]
+REG_OPS, REG_CASES = split_steps(REG_STEPS)
+
+
+def chk_register_refused(r):
+    r.finished()
+    check_steps(r, REG_STEPS)
+    e = r.ext('e', 'conf/full')
+    cmds = set((e['cmds'] or '').split(',')) if e else set()
+    want = {'full.go', 'full.go2', 'full.hello', 'full.' + 'b' * 40, 'full.longtitle', 'full.mbtitle', 'full.a_1_9'}
+    r.eq('only-the-accepted-names-are-commands', cmds, want)
+    r.ok('extension-still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('register.refused-or-malformed', ['conf/full'], ops=REG_OPS,
+      script=std(pre=[OPEN_A], wait=1500, post=pe('e')), check=chk_register_refused)
+
+
+def chk_register_bound_key(r):
+    r.finished()
+    r.eq('register-with-a-bound-key-is-still-ok', ln_of(r.reply(1)), 'ok 1')
+    r.eq('the-built-in-key-did-not-run-the-extension-command', [m.line for m in r.events('run') if 'fake' in m.line], [])
+    with open(os.path.join(r.dirs['proj'], 'a.txt'), 'rb') as f:
+        r.eq('the-built-in-command-kept-the-key-it-saved', f.read(), A_TXT.encode() + b'X\n')
+    r.eq('the-command-itself-exists', 'full.fake' in ((r.ext('e', 'conf/full') or {}).get('cmds') or '').split(','), True)
+
+
+plain('register.keys-already-bound-stay-with-their-command', ['conf/full'],
+      ops=[WR, ["req", "register", "fake ctrl+s Fake Save"], DONE],
+      script=TRIG1 + ['key ctrl+End', 'type X', 'key ctrl+s', 'wait 400', 'wait 400'] + pe('e') + ['quit'], check=chk_register_bound_key)
+
+def chk_register_vanish(r):
+    b, a, c = r.ext('b', 'conf/full'), r.ext('a', 'conf/full'), r.ext('c', 'conf/full')
+    r.ok('registered-while-running', b is not None and b['state'] == 'running' and 'full.hello' in (b['cmds'] or '').split(','), 'got %r' % (b and b['raw']))
+    r.ok('exit-is-a-crash', a is not None and a['state'] == 'crashed', 'got %r' % (a and a['raw']))
+    r.eq('manifest-commands-stay-the-registered-one-goes', sorted((a['cmds'] or '').split(',')) if a else None, ['full.go', 'full.go2'])
+    r.eq('invoking-the-removed-command-starts-nothing', r.hello_count(), 1)
+    r.eq('invoking-the-removed-command-sends-no-run', [m.line.split(' ')[2] for m in r.events('run')], ['full.go', 'full.go2'])
+    r.ok('still-crashed', c is not None and c['state'] == 'crashed', 'got %r' % (c and c['raw']))
+
+
+plain('register.vanish-when-the-extension-exits', ['conf/full'],
+      ops=[WR, ["req", "register", "hello - Say Hello"], WR, ["exit", 0]],
+      script=TRIG1 + pe('b') + ['cmd full.go2', 'wait-ext full crashed'] + pe('a') + ['cmd full.hello', 'wait 600'] + pe('c') + ['quit'],
+      check=chk_register_vanish)
+
+
+def chk_register_vanish_stop(r):
+    b, a = r.ext('b', 'conf/full'), r.ext('a', 'conf/full')
+    r.ok('registered-while-running', b is not None and b['state'] == 'running' and 'full.hello' in (b['cmds'] or '').split(','), 'got %r' % (b and b['raw']))
+    r.ok('three-syntax-errors-stop-it', a is not None and a['state'] == 'stopped', 'got %r' % (a and a['raw']))
+    r.eq('registered-command-is-removed-when-it-is-stopped', sorted((a['cmds'] or '').split(',')) if a else None, ['full.go', 'full.go2'])
+
+
+plain('register.vanish-when-the-extension-is-stopped', ['conf/full'],
+      ops=[WR, ["req", "register", "hello - Say Hello"], ["sleep", 1.0], ["raw", "garbage one\n"], ["raw", "garbage two\n"],
+           ["raw", "garbage three\n"], ["sleep", 5]],
+      script=TRIG1 + pe('b') + ['wait 2500'] + pe('a') + ['quit'], check=chk_register_vanish_stop)
+
+# ---------------------------------------------------------------- option (section 6c)
+
+OPT_SET = [WR,
+           ["req", "option", "{DOC:a.txt} tab_width 7"],
+           ["req", "option", "{DOC:a.txt} insert_spaces no"],
+           ["req", "option", "{DOC:a.txt} trim_trailing_whitespace yes"],
+           ["req", "option", "{DOC:a.txt} final_newline no"]]
+OPT_A = {'tab_width': 7, 'insert_spaces': False, 'trim_trailing_whitespace': True, 'final_newline': False}
+
+
+def config_has_no(r, text):
+    p = os.path.join(r.dirs['cfg'], 'rhun', 'config')
+    try:
+        with open(p) as f:
+            data = f.read()
+    except OSError:
+        return True, ''
+    bad = [ln for ln in data.splitlines() if 'tab_width' in ln and text in ln]
+    return not bad, 'config line %r' % bad
+
+
+def chk_opt_one_document(r):
+    r.finished()
+    for i in (1, 2, 3, 4):
+        r.eq('option-%d-ok' % i, ln_of(r.reply(i)), 'ok %d' % i)
+    base = opts_of(r, 'before')
+    a, b, a2 = opts_of(r, 'a'), opts_of(r, 'b'), opts_of(r, 'a2')
+    r.ok('baseline-printed', base is not None, 'no print-options line in %r' % r.seg('before'))
+    r.eq('the-document-has-the-four-overrides', a, OPT_A)
+    r.eq('the-other-document-keeps-the-users-settings', b, base)
+    r.eq('the-overridden-document-keeps-them-when-it-is-active-again', a2, OPT_A)
+    r.eq('the-other-document-was-active', r.state('s').get('active'), 'main.go')
+    ok, msg = config_has_no(r, '7')
+    r.ok('options-never-reach-the-config-file', ok, msg)
+
+
+plain('option.per-document', ['conf/full'], ops=[["sleep", 0.6]] + OPT_SET + [DONE],
+      script=['open {P}/main.go', 'open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + W2 + W2 + popt('a') +
+             ['key ctrl+Tab', 'wait 300'] + ps('s') + popt('b') + ['key ctrl+Tab', 'wait 300'] + popt('a2') + ['quit'],
+      check=chk_opt_one_document)
+
+
+def chk_opt_typing(r):
+    r.finished()
+    r.ok('Tab-inserts-a-tab-when-insert_spaces-is-no', '\t' in (r.doc('d') or ''), 'document %r' % r.doc('d'))
+
+
+plain('option.insert_spaces-changes-what-Tab-types', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:a.txt} insert_spaces no"], DONE],
+      script=TRIG1 + W2 + ['key ctrl+End', 'key Tab'] + pd('d') + ['quit'], check=chk_opt_typing)
+
+
+def chk_opt_save(r):
+    r.finished()
+    with open(os.path.join(r.dirs['proj'], 'a.txt'), 'rb') as f:
+        data = f.read()
+    r.eq('saved-trimmed-and-without-a-final-newline', data, b'alpha\nbeta\ngamma\nx')
+
+
+plain('option.save-options', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:a.txt} trim_trailing_whitespace yes"],
+           ["req", "option", "{DOC:a.txt} final_newline no"], DONE],
+      script=TRIG1 + W2 + ['key ctrl+End', 'type x', 'key space', 'key space', 'cmd save', 'wait 400', 'wait 400', 'quit'], check=chk_opt_save)
+
+
+def chk_opt_inactive(r):
+    r.finished()
+    r.eq('option-ok', ln_of(r.reply(1)), 'ok 1')
+    base, a, b = opts_of(r, 'before'), opts_of(r, 'a'), opts_of(r, 'b')
+    r.eq('the-active-document-is-untouched', a, base)
+    r.eq('the-document-that-was-not-active-has-the-override', b and b['tab_width'], 9)
+    r.eq('the-other-document-was-switched-to', r.state('s').get('active'), 'main.go')
+
+
+plain('option.document-that-is-not-active', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:main.go} tab_width 9"], DONE],
+      script=['open {P}/main.go', 'open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + W2 + W2 + popt('a') +
+             ['key ctrl+Tab', 'wait 300'] + ps('s') + popt('b') + ['quit'], check=chk_opt_inactive)
+
+
+def chk_opt_dash(r):
+    r.finished()
+    base, s, rm = opts_of(r, 'before'), opts_of(r, 'set'), opts_of(r, 'removed')
+    r.ok('set', s is not None and s['tab_width'] == 7 and s['insert_spaces'] is False, 'got %r' % s)
+    r.eq('dash-removes-the-override-of-that-key', rm and rm['tab_width'], base and base['tab_width'])
+    r.eq('the-other-override-stays', rm and rm['insert_spaces'], False)
+    r.eq('dash-is-ok', ln_of(r.reply(3)), 'ok 3')
+
+
+plain('option.dash-removes', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:a.txt} tab_width 7"], ["req", "option", "{DOC:a.txt} insert_spaces no"],
+           WR, ["req", "option", "{DOC:a.txt} tab_width -"], DONE],
+      script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + W2 + W2 + popt('set') + ['cmd full.go2'] + W2 + popt('removed') + ['quit'],
+      check=chk_opt_dash)
+
+OPT_BAD_STEPS = [
+    ('unknown-key-is-syntax', ["req", "option", "{DOC:a.txt} tabwidth 4"], ('err', 'syntax')),
+    ('ok-1', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('tab_width-0-is-syntax', ["req", "option", "{DOC:a.txt} tab_width 0"], ('err', 'syntax')),
+    ('ok-2', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('tab_width-17-is-syntax', ["req", "option", "{DOC:a.txt} tab_width 17"], ('err', 'syntax')),
+    ('ok-3', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('tab_width-negative-is-syntax', ["req", "option", "{DOC:a.txt} tab_width -3"], ('err', 'syntax')),
+    ('ok-4', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('tab_width-not-a-number-is-syntax', ["req", "option", "{DOC:a.txt} tab_width abc"], ('err', 'syntax')),
+    ('ok-5', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('insert_spaces-maybe-is-syntax', ["req", "option", "{DOC:a.txt} insert_spaces maybe"], ('err', 'syntax')),
+    ('ok-6', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('final_newline-1-is-syntax-only-yes-and-no-are-values', ["req", "option", "{DOC:a.txt} final_newline 1"], ('err', 'syntax')),
+    ('ok-7', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('trim_trailing_whitespace-true-is-syntax', ["req", "option", "{DOC:a.txt} trim_trailing_whitespace true"], ('err', 'syntax')),
+    ('ok-8', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('missing-value-is-syntax', ["req", "option", "{DOC:a.txt} tab_width"], ('err', 'syntax')),
+    ('ok-9', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('non-numeric-DOC-is-syntax', ["req", "option", "abc tab_width 4"], ('err', 'syntax')),
+    ('ok-10', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('no-such-document-is-nodoc', ["req", "option", "424242 tab_width 4"], ('err', 'nodoc')),
+    ('tab_width-1-is-ok', ["req", "option", "{DOC:a.txt} tab_width 1"], ('ok',)),
+    ('tab_width-16-is-ok', ["req", "option", "{DOC:a.txt} tab_width 16"], ('ok',)),
+    DONE,
+]
+OPT_BAD_OPS, OPT_BAD_CASES = split_steps(OPT_BAD_STEPS)
+
+
+def chk_opt_bad(r):
+    r.finished()
+    check_steps(r, OPT_BAD_STEPS)
+    base, after = opts_of(r, 'before'), opts_of(r, 'after')
+    want = dict(base or {})
+    want['tab_width'] = 16
+    r.eq('only-the-good-requests-changed-anything', after, want)
+    e = r.ext('e', 'conf/full')
+    r.ok('extension-still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('option.bad-keys-and-values', ['conf/full'], ops=[["sleep", 0.6], WR] + OPT_BAD_OPS,
+      script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + ['wait 1500'] + popt('after') + pe('e') + ['quit'],
+      check=chk_opt_bad)
+
+
+def chk_opt_exit(r):
+    base, s, after = opts_of(r, 'before'), opts_of(r, 'set'), opts_of(r, 'after')
+    r.ok('set-while-running', s is not None and s['tab_width'] == 7 and s['insert_spaces'] is False, 'got %r' % s)
+    e = r.ext('e', 'conf/full')
+    r.ok('the-extension-exited', e is not None and e['state'] == 'crashed', 'got %r' % (e and e['raw']))
+    r.eq('the-users-settings-return', after, base)
+
+
+plain('option.users-settings-return-when-the-extension-exits', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:a.txt} tab_width 7"], ["req", "option", "{DOC:a.txt} insert_spaces no"], WR, ["exit", 0]],
+      script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + W2 + W2 + popt('set') +
+             ['cmd full.go2', 'wait-ext full crashed', 'wait 300'] + popt('after') + pe('e') + ['quit'], check=chk_opt_exit)
+
+
+def chk_opt_stopped(r):
+    base, s, after = opts_of(r, 'before'), opts_of(r, 'set'), opts_of(r, 'after')
+    r.ok('set-while-running', s is not None and s['tab_width'] == 7, 'got %r' % s)
+    e = r.ext('e', 'conf/full')
+    r.ok('the-extension-was-stopped', e is not None and e['state'] == 'stopped', 'got %r' % (e and e['raw']))
+    r.eq('the-users-settings-return', after, base)
+
+
+plain('option.users-settings-return-when-the-extension-is-stopped', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:a.txt} tab_width 7"], ["sleep", 2.5], ["raw", "garbage one\n"],
+           ["raw", "garbage two\n"], ["raw", "garbage three\n"], ["sleep", 5]],
+      script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + W2 + W2 + popt('set') +
+             ['wait 3000'] + popt('after') + pe('e') + ['quit'], check=chk_opt_stopped)
+
+
+def chk_opt_close(r):
+    r.finished()
+    base, s, again = opts_of(r, 'before'), opts_of(r, 'set'), opts_of(r, 'again')
+    r.ok('set-while-open', s is not None and s['tab_width'] == 7, 'got %r' % s)
+    r.eq('reopened-document-has-the-users-settings', again, base)
+
+
+plain('option.removed-when-the-document-closes', ['conf/full'],
+      ops=[["sleep", 0.6], WR, ["req", "option", "{DOC:a.txt} tab_width 7"], DONE],
+      script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running'] + popt('before') + W2 + W2 + popt('set') +
+             ['cmd close_tab', 'wait 300', 'open {P}/a.txt', 'wait 300'] + popt('again') + ['quit'], check=chk_opt_close)
+
+
+def chk_opt_two(r):
+    base, both, f, t = opts_of(r, 'before'), opts_of(r, 'both'), opts_of(r, 'after-full'), opts_of(r, 'after-term')
+    r.eq('the-last-writer-wins', both and both['tab_width'], 6)
+    r.eq('one-extension-removing-its-override-leaves-the-others', f and f['tab_width'], 6)
+    r.eq('the-last-override-removed-the-users-setting-applies', t and t['tab_width'], base and base['tab_width'])
+
+
+plain('option.two-extensions-last-writer-wins', ['conf/full', 'conf/term'],
+      ops={'full': [["sleep", 0.3], WR, ["req", "option", "{DOC:a.txt} tab_width 5"], WR, ["req", "option", "{DOC:a.txt} tab_width -"], DONE],
+           'term': [["sleep", 1.5], WR, ["req", "option", "{DOC:a.txt} tab_width 6"], WR, ["req", "option", "{DOC:a.txt} tab_width -"], DONE]},
+      script=['open {P}/a.txt', 'cmd full.go', 'cmd term.go', 'wait-ext full running', 'wait-ext term running'] + popt('before') +
+             ['wait 600', 'wait 600', 'wait 600', 'wait 600'] + popt('both') + ['cmd full.go2', 'wait 300', 'wait 300'] + popt('after-full') +
+             ['cmd term.go2', 'wait 300', 'wait 300'] + popt('after-term') + ['quit'], check=chk_opt_two)
+
+# ---------------------------------------------------------------- choose
+
+CHOOSE3 = preq('choose', 'Pick one', 'alpha', 'beta', 'gamma')
+
+
+def chk_choose_filter(r):
     r.finished()
     head, field, rows, sel = palette(r, 'p0')
     r.eq('prompt-is-shown', head, 'choose=Pick one')
@@ -2063,15 +2373,398 @@ def chk_choose_a(r):
     head, field, rows, sel = palette(r, 'p1')
     r.eq('typing-filters-the-items', rows, ['gamma'])
     r.eq('field-shows-what-was-typed', field, 'ga')
-    m = r.reply(1)
-    r.eq('enter-answers-with-the-number-in-the-original-list', m and m.line, 'ok 1 3')
+    r.eq('enter-answers-with-the-number-in-the-original-list', ln_of(r.reply(1)), 'ok 1 3')
     r.eq('prompt-closed-after-the-answer', palette(r, 'p2')[0], 'none')
 
 
-plain('choose.filter-and-enter', ['conf/full'],
-      ops=[WAIT_RUN, WAIT_RUN, prompt_req('choose', 'Pick one', 'alpha', 'beta', 'gamma'), DONE],
+plain('choose.filter-and-enter', ['conf/full'], ops=[WR, WR, CHOOSE3, DONE],
       script=TRIG2 + pal('p0') + ['type ga', 'wait 300'] + pal('p1') + ['key Return', 'wait 300', 'wait 300'] + pal('p2') + ['quit'],
-      check=chk_choose_a)
+      check=chk_choose_filter)
+
+
+def chk_choose_arrows(r):
+    r.finished()
+    r.eq('enter-on-the-first-item', ln_of(r.reply(1)), 'ok 1 1')
+    head, field, rows, sel = palette(r, 'p1')
+    r.eq('second-prompt-is-open', head, 'choose=Pick one')
+    r.eq('down-moves-the-selection', palette(r, 'p2')[3], 'beta')
+    r.eq('enter-on-the-second-item', ln_of(r.reply(2)), 'ok 2 2')
+
+
+plain('choose.enter-and-arrow-keys', ['conf/full'], ops=[WR, WR, CHOOSE3, CHOOSE3, DONE],
+      script=TRIG2 + ['key Return', 'wait 300', 'wait 300'] + pal('p1') + ['key Down', 'wait 300'] + pal('p2') + ['key Return', 'wait 300', 'wait 300', 'quit'],
+      check=chk_choose_arrows)
+
+
+def chk_choose_esc(r):
+    r.finished()
+    r.eq('prompt-is-shown', palette(r, 'p0')[0], 'choose=Pick one')
+    r.ok('escape-answers-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    r.eq('prompt-closed', palette(r, 'p1')[0], 'none')
+    r.ok('extension-still-running', (r.ext('e', 'conf/full') or {}).get('state') == 'running', 'got %r' % (r.ext('e', 'conf/full') or {}).get('raw'))
+
+
+plain('choose.escape-cancels', ['conf/full'], ops=[WR, WR, CHOOSE3, DONE],
+      script=TRIG2 + pal('p0') + ['key Escape', 'wait 300', 'wait 300'] + pal('p1') + pe('e') + ['quit'], check=chk_choose_esc)
+
+
+def chk_busy(r):
+    r.finished()
+    r.eq('first-prompt-stays-open', palette(r, 'p0')[0], 'choose=Pick one')
+    r.ok('second-choose-is-busy', is_err(r.reply(2), 2, 'busy'), 'got %r' % ln_of(r.reply(2)))
+    r.ok('ask-is-busy', is_err(r.reply(3), 3, 'busy'), 'got %r' % ln_of(r.reply(3)))
+    r.ok('first-prompt-is-cancelled-by-escape', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    head = palette(r, 'p1')[0]
+    r.eq('after-the-prompt-closes-a-new-one-opens', head, 'choose=Again')
+    r.ok('and-is-cancelled-by-escape', is_err(r.reply(4), 4, 'cancelled'), 'got %r' % ln_of(r.reply(4)))
+    r.eq('nothing-open-at-the-end', palette(r, 'p2')[0], 'none')
+
+
+plain('choose.second-prompt-is-busy', ['conf/full'],
+      ops=[WR, WR, ["batch", [CHOOSE3, preq('ask', 'Your name?'), preq('choose', 'Other', 'x', 'y')]], preq('choose', 'Again', 'x', 'y'), DONE],
+      script=TRIG2 + pal('p0') + ['key Escape', 'wait 300', 'wait 300'] + pal('p1') + ['key Escape', 'wait 300'] + pal('p2') + ['quit'],
+      check=chk_busy)
+
+
+def chk_busy_palette(r):
+    r.finished()
+    r.ok('choose-while-the-palette-is-open-is-busy', is_err(r.reply(1), 1, 'busy'), 'got %r' % ln_of(r.reply(1)))
+    r.ok('the-palette-was-still-the-palette', not (palette(r, 'p0')[0] or '').startswith('choose='), 'print-palette first line %r' % palette(r, 'p0')[0])
+    r.eq('after-the-palette-closes-the-prompt-opens', palette(r, 'p1')[0], 'choose=Pick one')
+
+
+plain('choose.busy-while-the-palette-is-open', ['conf/full'],
+      ops=[WR, ["sleep", 1.0], CHOOSE3, WR, CHOOSE3, DONE],
+      script=['open {P}/a.txt', 'cmd full.go', 'wait-ext full running', 'key ctrl+shift+p'] + ['wait 300'] * 8 + pal('p0') +
+             ['key Escape', 'wait 300', 'cmd full.go2', 'wait 300', 'wait 300'] + pal('p1') + ['key Escape', 'wait 300', 'quit'],
+      check=chk_busy_palette)
+
+
+def chk_cancel_request(r):
+    r.finished()
+    r.eq('prompt-was-open', palette(r, 'p0')[0], 'choose=Pick one')
+    r.eq('cancel-is-ok', ln_of(r.reply(2)), 'ok 2')
+    r.ok('the-prompt-request-is-answered-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    r.eq('prompt-closed', palette(r, 'p1')[0], 'none')
+
+
+plain('choose.cancel-request', ['conf/full'],
+      ops=[WR, WR, ["send", [CHOOSE3]], ["sleep", 1.5], ["cancel", 1], ["drain", 0.4], DONE],
+      script=TRIG2 + pal('p0') + ['wait 600'] * 4 + pal('p1') + ['quit'], check=chk_cancel_request)
+
+
+def chk_prompt_stop(r):
+    r.eq('prompt-was-open', palette(r, 'p0')[0], 'choose=Pick one')
+    e = r.ext('e', 'conf/full')
+    r.ok('the-extension-exited', e is not None and e['state'] == 'crashed', 'got %r' % (e and e['raw']))
+    r.eq('open-prompt-removed-when-the-extension-stops', palette(r, 'p1')[0], 'none')
+
+
+plain('choose.removed-when-the-extension-stops', ['conf/full'],
+      ops=[WR, WR, ["send", [CHOOSE3]], ["sleep", 1.5], ["exit", 0]],
+      script=TRIG2 + pal('p0') + ['wait-ext full crashed', 'wait 300'] + pal('p1') + pe('e') + ['quit'], check=chk_prompt_stop)
+
+
+def chk_palette_cancels(r):
+    r.finished()
+    r.eq('prompt-was-open', palette(r, 'p0')[0], 'choose=Pick one')
+    r.ok('opening-the-palette-answers-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    r.ok('the-prompt-is-gone', not (palette(r, 'p1')[0] or '').startswith('choose='), 'print-palette first line %r' % palette(r, 'p1')[0])
+
+
+plain('choose.opening-the-palette-cancels', ['conf/full'], ops=[WR, WR, CHOOSE3, DONE],
+      script=TRIG2 + pal('p0') + ['key ctrl+shift+p', 'wait 300', 'wait 300'] + pal('p1') + ['key Escape', 'wait 300', 'quit'], check=chk_palette_cancels)
+
+# ---------------------------------------------------------------- ask
+
+def ask_scn(name, keys, want_line, want_body, want_field=None):
+    def chk(r):
+        r.finished()
+        head, field, rows, sel = palette(r, 'p0')
+        r.eq('prompt-label', head, 'prompt=Your name?')
+        r.eq('field-starts-empty', field, '')
+        if want_field is not None:
+            r.eq('field-shows-what-was-typed', palette(r, 'p1')[1], want_field)
+        m = r.reply(1)
+        if want_line is None:
+            r.ok('escape-answers-cancelled', is_err(m, 1, 'cancelled'), 'got %r' % ln_of(m))
+        else:
+            r.eq('reply-is-ok-LEN', ln_of(m), want_line)
+            r.eq('reply-body-is-the-text', m.body if m else None, want_body)
+            r.eq('reply-body-length', getattr(m, 'blen', None), len(want_body))
+        r.eq('prompt-closed', palette(r, 'p2')[0], 'none')
+    plain('ask.' + name, ['conf/full'], ops=[WR, WR, preq('ask', 'Your name?'), DONE],
+          script=TRIG2 + pal('p0') + keys + ['wait 300'] + pal('p1') + [KEYEND, 'wait 300', 'wait 300'] + pal('p2') + ['quit'], check=chk)
+
+
+KEYEND = 'key Return'
+ask_scn('typed-text-comes-back', ['type Bob'], 'ok 1 3', b'Bob', 'Bob')
+ask_scn('spaces-and-multibyte-characters', ['type héllo wörld'], 'ok 1 13', 'héllo wörld'.encode(), 'héllo wörld')
+ask_scn('empty-answer', [], 'ok 1 0', b'', '')
+# Escape instead of Enter: the cancelled variant uses its own end key
+plain('ask.escape-cancels', ['conf/full'], ops=[WR, WR, preq('ask', 'Your name?'), DONE],
+      script=TRIG2 + pal('p0') + ['type Bob', 'wait 300', 'key Escape', 'wait 300', 'wait 300'] + pal('p2') + ['quit'],
+      check=lambda r: (r.finished(), r.eq('prompt-label', palette(r, 'p0')[0], 'prompt=Your name?'),
+                       r.ok('escape-answers-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1))),
+                       r.eq('prompt-closed', palette(r, 'p2')[0], 'none')))
+
+
+def chk_ask_busy(r):
+    r.finished()
+    r.ok('choose-while-ask-is-open-is-busy', is_err(r.reply(2), 2, 'busy'), 'got %r' % ln_of(r.reply(2)))
+    r.eq('ask-prompt-stays', palette(r, 'p0')[0], 'prompt=Your name?')
+    r.eq('the-ask-is-answered-by-Enter', ln_of(r.reply(1)), 'ok 1 2')
+
+
+plain('ask.second-prompt-is-busy', ['conf/full'], ops=[WR, WR, ["batch", [preq('ask', 'Your name?'), CHOOSE3]], DONE],
+      script=TRIG2 + ['type ok', 'wait 300'] + pal('p0') + ['key Return', 'wait 300', 'wait 300', 'quit'], check=chk_ask_busy)
+
+# ---------------------------------------------------------------- limits of the prompts (section 7)
+
+
+def chk_prompt_cut(r):
+    r.finished()
+    head, field, rows, sel = palette(r, 'p0')
+    r.eq('choose-prompt-cut-at-200-bytes-on-a-character-boundary', head, 'choose=a' + 'é' * 99)
+    r.eq('items-cut-at-200-bytes', rows, ['b' * 200, 'c' + 'é' * 99])
+    r.ok('first-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    head, field, rows, sel = palette(r, 'p1')
+    r.eq('ask-prompt-cut-at-200-bytes-on-a-character-boundary', head, 'prompt=a' + 'é' * 99)
+
+
+plain('lim.prompt-and-item-text-is-cut-at-200-bytes', ['conf/full'],
+      ops=[WR, WR, preq('choose', 'a' + 'é' * 100, 'b' * 250, 'c' + 'é' * 100), preq('ask', 'a' + 'é' * 100), DONE],
+      script=TRIG2 + pal('p0') + ['key Escape', 'wait 300', 'wait 300'] + pal('p1') + ['key Escape', 'wait 300', 'quit'], check=chk_prompt_cut)
+
+
+def chk_choose_limit(r):
+    r.finished()
+    r.ok('1001-items-is-toobig', is_err(r.reply(1), 1, 'toobig'), 'got %r' % ln_of(r.reply(1)))
+    head, field, rows, sel = palette(r, 'p0')
+    r.eq('1000-items-is-accepted', head, 'choose=P')
+    r.eq('first-of-the-1000-items-is-selected', sel, 'x')
+    r.ok('and-can-be-dismissed', is_err(r.reply(2), 2, 'cancelled'), 'got %r' % ln_of(r.reply(2)))
+
+
+plain('lim.choose-over-1000-items', ['conf/full'],
+      ops=[WR, WR, ["req", "choose", "{LEN}", {"pre": "P\n", "rep": "x\n", "n": 1000, "suf": "x"}],
+           ["req", "choose", "{LEN}", {"pre": "P\n", "rep": "x\n", "n": 999, "suf": "x"}], DONE],
+      script=TRIG2 + pal('p0') + ['key Escape', 'wait 300', 'quit'], check=chk_choose_limit)
+
+
+def chk_register_limit(r):
+    r.finished()
+    bad = [i for i in range(1, 65) if ln_of(r.reply(i)) != 'ok %d' % i]
+    r.ok('the-first-64-registers-are-ok', not bad, 'not ok: %r' % [(i, ln_of(r.reply(i))) for i in bad[:5]])
+    r.ok('the-65th-is-toobig', is_err(r.reply(65), 65, 'toobig'), 'got %r' % ln_of(r.reply(65)))
+    r.ok('and-so-is-the-66th', is_err(r.reply(66), 66, 'toobig'), 'got %r' % ln_of(r.reply(66)))
+    e = r.ext('e', 'conf/full')
+    cmds = (e['cmds'] or '').split(',') if e else []
+    r.eq('the-extension-has-2-manifest-and-64-registered-commands', len(cmds), 66)
+    r.ok('extension-still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('lim.register-65th-is-toobig', ['conf/full'],
+      ops=[WR] + [["req", "register", "c%02d - Command %d" % (i, i)] for i in range(1, 67)] + [DONE],
+      script=std(pre=[OPEN_A], wait=1800, post=pe('e')), check=chk_register_limit)
+
+# ---------------------------------------------------------------- term
+
+TERM_RUN = "printf 'ext-%s-ok\\n' ran && touch {PROJECT}/term-ran.txt"
+
+
+def chk_term_needs(r):
+    r.finished()
+    r.eq('term-needs-terminal', ln_of(r.reply(1)), 'error 1 needs terminal=yes')
+    r.eq('the-body-of-the-refused-request-is-skipped', r.reply(2) is not None and r.reply(2).f[0], 'ok')
+    r.eq('no-prompt-was-shown', palette(r, 'p')[0], 'none')
+    r.ok('extension-still-running', (r.ext('e', 'conf/full') or {}).get('state') == 'running', 'got %r' % (r.ext('e', 'conf/full') or {}).get('raw'))
+
+
+plain('term.refused-without-terminal-yes', ['conf/full'],
+      ops=[WR, ["req", "term", "{LEN}", "echo hi"], ["text", "a.txt"], DONE],
+      script=TRIG1 + pal('p') + pe('e') + ['quit'], check=chk_term_needs)
+
+CTRL_STEPS = [
+    ('tab-is-syntax', ["req", "term", "{LEN}", "echo a\tb"], ('err', 'syntax')),
+    ('ok-1', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('line-feed-inside-is-syntax', ["req", "term", "{LEN}", "echo a\necho b"], ('err', 'syntax')),
+    ('ok-2', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('trailing-line-feed-is-syntax', ["req", "term", "{LEN}", "echo a\n"], ('err', 'syntax')),
+    ('ok-3', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('carriage-return-is-syntax', ["req", "term", "{LEN}", "echo a\rb"], ('err', 'syntax')),
+    ('ok-4', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('escape-is-syntax', ["req", "term", "{LEN}", "echo \x1b[31mred"], ('err', 'syntax')),
+    ('ok-5', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('NUL-is-syntax', ["req", "term", "{LEN}", "echo a\x00b"], ('err', 'syntax')),
+    ('ok-6', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('bell-is-syntax', ["req", "term", "{LEN}", "echo \x07"], ('err', 'syntax')),
+    ('ok-7', ["text", "a.txt"], ('body', A_TXT.encode())),
+    ('DEL-is-syntax', ["req", "term", "{LEN}", "echo a\x7fb"], ('err', 'syntax')),
+    ('ok-8', ["text", "a.txt"], ('body', A_TXT.encode())),
+    DONE,
+]
+CTRL_OPS, CTRL_CASES = split_steps(CTRL_STEPS)
+
+
+def chk_term_ctrl(r):
+    r.finished()
+    check_steps(r, CTRL_STEPS)
+    r.eq('no-prompt-was-shown', palette(r, 'p')[0], 'none')
+    e = r.ext('e', 'conf/term')
+    r.ok('extension-still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('term.control-characters-are-syntax', ['conf/term'], ops=[WR] + CTRL_OPS,
+      script=['open {P}/a.txt', 'cmd term.go', 'wait-ext term running', 'wait 1500'] + pal('p') + pe('e') + ['quit'], check=chk_term_ctrl)
+
+
+def chk_term_run(r):
+    r.finished()
+    head, field, rows, sel = palette(r, 'p0')
+    r.ok('prompt-is-shown-with-the-command', head is not None and head.startswith('prompt=') and head != 'prompt=', 'first line %r' % head)
+    cmd = TERM_RUN.replace('{PROJECT}', r.dirs['proj'])
+    r.eq('field-holds-the-command', field, cmd)
+    r.ok('nothing-ran-before-Enter', not any('ext-ran-ok' in ln for ln in r.seg('t0')), 'terminal before Enter: %r' % r.seg('t0'))
+    r.eq('field-shows-the-edit', palette(r, 'p1')[1], cmd + " && printf 'edit-%s-ok\\n' done")
+    r.eq('answered-ok', ln_of(r.reply(1)), 'ok 1')
+    r.ok('the-terminal-shows-the-output-of-the-command', any('ext-ran-ok' in ln for ln in r.seg('t1')), 'terminal after Enter: %r' % r.seg('t1')[-8:])
+    r.ok('the-edited-command-ran-too', any('edit-done-ok' in ln for ln in r.seg('t1')), 'terminal after Enter: %r' % r.seg('t1')[-8:])
+    r.ok('the-command-ran', os.path.exists(os.path.join(r.dirs['proj'], 'term-ran.txt')), 'term-ran.txt does not exist')
+    r.eq('prompt-closed', palette(r, 'p2')[0], 'none')
+
+
+plain('term.shows-edits-and-runs', ['conf/term'], ops=[WR, WR, ["req", "term", "{LEN}", TERM_RUN], DONE],
+      script=TRIGT2 + pal('p0') + ['key End', 'key space', "type && printf 'edit-%s-ok\\n' done", 'wait 300'] + pal('p1') + pterm('t0') +
+             ['wait 500', 'key Return', 'wait-term edit-done-ok', 'wait 300'] + pterm('t1') + pal('p2') + ['quit'], check=chk_term_run)
+
+
+def chk_term_esc(r):
+    r.finished()
+    r.ok('prompt-is-shown', (palette(r, 'p0')[0] or '').startswith('prompt='), 'first line %r' % palette(r, 'p0')[0])
+    r.ok('escape-answers-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    r.ok('the-command-did-not-run', not os.path.exists(os.path.join(r.dirs['proj'], 'term-esc.txt')), 'term-esc.txt exists')
+    r.eq('prompt-closed', palette(r, 'p1')[0], 'none')
+
+
+plain('term.escape-cancels', ['conf/term'], ops=[WR, WR, ["req", "term", "{LEN}", "touch {PROJECT}/term-esc.txt"], DONE],
+      script=TRIGT2 + pal('p0') + ['key Escape', 'wait 300', 'wait 1000'] + pal('p1') + ['quit'], check=chk_term_esc)
+
+
+def chk_term_empty(r):
+    r.finished()
+    r.eq('field-was-emptied', palette(r, 'p1')[1], '')
+    r.ok('an-empty-line-answers-cancelled', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    r.eq('prompt-closed', palette(r, 'p2')[0], 'none')
+
+
+plain('term.empty-line-cancels', ['conf/term'], ops=[WR, WR, ["req", "term", "{LEN}", "xy"], DONE],
+      script=TRIGT2 + ['key BackSpace', 'key BackSpace', 'wait 300'] + pal('p1') + ['key Return', 'wait 300', 'wait 300'] + pal('p2') + ['quit'],
+      check=chk_term_empty)
+
+
+def chk_term_busy(r):
+    r.finished()
+    for rid in (2, 3, 4):
+        r.ok('prompt-%d-while-term-is-open-is-busy' % rid, is_err(r.reply(rid), rid, 'busy'), 'got %r' % ln_of(r.reply(rid)))
+    r.ok('term-is-cancelled-by-escape', is_err(r.reply(1), 1, 'cancelled'), 'got %r' % ln_of(r.reply(1)))
+    r.ok('term-while-choose-is-open-is-busy', is_err(r.reply(6), 6, 'busy'), 'got %r' % ln_of(r.reply(6)))
+    r.ok('choose-is-cancelled-by-escape', is_err(r.reply(5), 5, 'cancelled'), 'got %r' % ln_of(r.reply(5)))
+
+
+plain('term.second-prompt-is-busy', ['conf/term'],
+      ops=[WR, WR, ["batch", [preq('term', 'echo one'), CHOOSE3, preq('ask', 'Your name?'), preq('term', 'echo two')]],
+           ["batch", [CHOOSE3, preq('term', 'echo three')]], DONE],
+      script=TRIGT2 + ['key Escape', 'wait 300', 'wait 300', 'key Escape', 'wait 300', 'wait 300', 'quit'], check=chk_term_busy)
+
+
+def chk_term_limit(r):
+    r.finished()
+    r.ok('4097-bytes-is-toobig', is_err(r.reply(1), 1, 'toobig'), 'got %r' % ln_of(r.reply(1)))
+    head, field, rows, sel = palette(r, 'p0')
+    r.ok('4096-bytes-is-accepted', head is not None and head.startswith('prompt='), 'first line %r' % head)
+    r.eq('field-holds-all-4096-bytes', len(field or ''), 4096)
+    r.ok('and-can-be-dismissed', is_err(r.reply(2), 2, 'cancelled'), 'got %r' % ln_of(r.reply(2)))
+
+
+plain('lim.term-over-4096-bytes', ['conf/term'],
+      ops=[WR, WR, ["req", "term", "{LEN}", {"rep": "x", "n": 4097}], ["req", "term", "{LEN}", {"rep": "x", "n": 4096}], DONE],
+      script=TRIGT2 + pal('p0') + ['key Escape', 'wait 300', 'quit'], check=chk_term_limit)
+
+# ---------------------------------------------------------------- cmd (section 8a)
+
+CMD_EDIT = {
+    'duplicate-line-and-select-all': ([["req", "cmd", "duplicate_line"], ["req", "cmd", "select_all"]], 'alpha\nalpha\nbeta\ngamma\n', True),
+    'undo-takes-it-back': ([["req", "cmd", "duplicate_line"], ["req", "cmd", "undo"]], A_TXT, False),
+    'redo-does-it-again': ([["req", "cmd", "duplicate_line"], ["req", "cmd", "undo"], ["req", "cmd", "redo"]], 'alpha\nalpha\nbeta\ngamma\n', False),
+}
+
+
+def cmd_edit_scn(name, ops, want_doc, selects):
+    def chk(r):
+        r.finished()
+        for i in range(1, len(ops) + 1):
+            r.eq('reply-%d-is-ok' % i, ln_of(r.reply(i)), 'ok %d' % i)
+        r.eq('the-command-ran-as-if-the-user-had-invoked-it', r.doc('d'), want_doc)
+        if selects:
+            r.ok('select_all-selected', r.state('after').get('sel') not in (None, '0'), 'print-state %r' % r.state('after'))
+    plain('cmd.' + name, ['conf/nocap'], ops=[WR] + ops + [DONE],
+          script=['open {P}/a.txt', 'cmd nocap.go', 'wait-ext nocap running', 'wait 300'] + ps('before') + ['wait 600', 'wait 600'] + ps('after') + pd('d') + ['quit'],
+          check=chk)
+
+
+for _n, (_ops, _doc, _sel) in CMD_EDIT.items():
+    cmd_edit_scn(_n, _ops, _doc, _sel)
+
+CMD_LISTED = ('undo redo cut copy paste select_all select_line select_next duplicate_line delete_line move_line_up move_line_down '
+              'indent outdent toggle_comment newline_below newline_above find replace find_next find_prev find_in_files goto_line '
+              'quick_open command_palette next_tab prev_tab reveal_file focus_explorer toggle_sidebar toggle_agents toggle_terminal '
+              'new_terminal clear_terminal toggle_word_wrap toggle_whitespace toggle_line_numbers zoom_in zoom_out zoom_reset').split()
+
+
+def chk_cmd_listed(r):
+    r.finished()
+    for i, n in enumerate(CMD_LISTED, 1):
+        r.eq('cmd-%s' % n, ln_of(r.reply(i)), 'ok %d' % i)
+    st = r.state('s')
+    r.ok('the-editor-is-still-there', bool(st), 'print-state after: %r' % r.seg('s'))
+    e = r.ext('e', 'conf/nocap')
+    r.ok('extension-still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('cmd.every-listed-command-is-ok', ['conf/nocap'], ops=[WR] + [["req", "cmd", n] for n in CMD_LISTED] + [DONE],
+      script=['open {P}/a.txt', 'cmd nocap.go', 'wait-ext nocap running', 'wait 2500'] + ps('s') + pe('e') + ['quit'], check=chk_cmd_listed)
+
+CMD_REFUSED_STEPS = [
+    ('quit-is-refused', ["req", "cmd", "quit"], ('err', 'refused')),
+    ('save-is-refused', ["req", "cmd", "save"], ('err', 'refused')),
+    ('close_tab-is-refused', ["req", "cmd", "close_tab"], ('err', 'refused')),
+    ('unknown-name-is-refused', ["req", "cmd", "frobnicate"], ('err', 'refused')),
+    ('upper-case-of-a-listed-name-is-refused', ["req", "cmd", "SELECT_ALL"], ('err', 'refused')),
+    ('extension-command-is-refused', ["req", "cmd", "full.go"], ('err', 'refused')),
+    ('no-name-is-syntax', ["req", "cmd"], ('err', 'syntax')),
+    ('after', ["text", "a.txt"], ('body', A_TXT.encode() + b'X')),
+    DONE,
+]
+CMD_REFUSED_OPS, CMD_REFUSED_CASES = split_steps(CMD_REFUSED_STEPS)
+
+
+def chk_cmd_refused(r):
+    r.finished()
+    check_steps(r, CMD_REFUSED_STEPS)
+    st = r.state('s')
+    r.ok('quit-did-not-quit-the-editor', st.get('active') == 'a.txt', 'print-state after the request: %r' % r.seg('s'))
+    with open(os.path.join(r.dirs['proj'], 'a.txt'), 'rb') as f:
+        r.eq('save-did-not-save', f.read(), A_TXT.encode())
+    r.eq('close_tab-did-not-close-the-tab', st.get('tabs'), '1')
+    r.eq('save-left-the-document-dirty', st.get('dirty'), '1')
+    r.eq('the-document-is-still-open', r.doc('d'), A_TXT + 'X')
+
+
+plain('cmd.refused-names', ['conf/full'], ops=[WR] + CMD_REFUSED_OPS,
+      script=['open {P}/a.txt', 'key ctrl+End', 'type X', 'wait 300', 'cmd full.go', 'wait-ext full running', 'wait 1500'] + ps('s') + pd('d') + ['quit'],
+      check=chk_cmd_refused)
+
 
 # @@SCENARIOS-END@@
 

@@ -56,13 +56,17 @@ directory; leaked extension processes are found by pid, reported and killed (nev
 | `ui.*` | status truncation at 80 bytes on a character boundary (2, 3, 4-byte), clear, replace; toast/status bodies over their limit; status removed when the extension is stopped | 7, 4.5 |
 | `tr.*` | bytes one at a time, body/header split with a pause, a body shorter than LEN is read exactly, 9 messages in one write (stale sees the first), 600 in one write are not flooding, 3 MB both ways, a 60000-byte line, syntax counter reset by a good request, exit in the middle of a body, rhun's queue (8 MB at once, 1 MB for 10 s) | 3, 7 |
 | `life.*` | three syntax errors, three bad requests, line over 64 KB, replace/insert body over 4 MB (header only, and fully sent), flooding; each: state `stopped`, reason wording, ended promptly, rhun's document intact, a command does not restart it. Exit after hello is `crashed` with the status, commands stay, a command restarts it, three crashes leave it `stopped`; closing stdin/stdout; `bye` on quit, SIGTERM after 300 ms, programs the extension started; 16 at once and the 17th starting when a slot frees | 3, 4, 7 |
+| `register.*`, `option.*` | `register` runs from `cmd` and a palette pick and a default key, shows "TITLE (Extension)", a name in use (earlier register, manifest command) is `refused`, malformed/overlong name or missing title `syntax`, long titles cut, a key already bound stays with its command, registered commands vanish when the extension exits or is stopped; `option` overrides one document only (and one that is not active), the four keys, `-` removes one key, bad keys/values/DOC are `syntax`/`nodoc`, Tab and save follow the overrides, never in the config file, the user's settings return when the extension exits, is stopped or the document closes, two extensions: last writer wins and one's `-` leaves the other's | 4, 6c, 8 |
+| `choose.*`, `ask.*`, `term.*` | the prompt and items are shown, typing filters and `ok ID N` counts in the original list, Enter/arrows/Esc, a second prompt (`choose`, `ask`, `term`) or the open palette is `busy`, opening the palette or `cancel ID` answers `cancelled`, an open prompt goes when the extension stops; `ask` returns the text as `ok ID LEN` + body (spaces, multibyte, empty); `term` without `terminal = yes` is `needs terminal=yes`, control characters (tab, LF, CR, ESC, NUL, BEL, DEL, trailing LF) are `syntax`, the line is shown, can be edited, runs only on Enter (output and a file prove it) and not on Esc or an empty line | 3, 5, 7, 8, 8a |
+| `cmd.*` | commands from the list run as the user would (`duplicate_line`, `select_all`, `undo`, `redo`) and every name of 8a is `ok` (no capability needed); `quit`, `save`, `close_tab`, an unknown name, an upper-case name, an extension command are `refused` and do nothing, no name is `syntax` | 8, 8a |
+| `lim.*` | `choose` 1001 items `toobig` (1000 accepted), prompt and item text cut at 200 bytes on a character boundary, `term` 4097 bytes `toobig` (4096 accepted), the 65th `register` `toobig` | 7 |
 | `sub.*`, `ev.*` | `opened` names gate every other event, default is no, patterns (`*.json`, exact `Makefile`), `saved`/`changed` versions, `closed` and a new id on reopen, user typing gives `changed`, a reload keeps the id and gets a new version | 2, 6, 8 |
 
 ## Not covered
 
-Gate 3-5 verbs and codes (`readonly`, `busy`, `cancelled`, `refused`, `edits`, `hover`,
-`register`, `option`, prompts, `term`, `cmd`), the `project` event, Windows and Linux specifics
-(the macOS build is what was run), key conflicts between extensions, the install dialog.
+Gate 3 verbs and codes (`readonly`, `edits`, `hover`, `diagnostics`), the `project` event,
+Windows and Linux specifics (the macOS build is what was run), key conflicts between extensions
+and the user's `[keys]` winning over a registered key, the install dialog.
 
 ## Places where the specification is ambiguous (what the checks assume)
 
@@ -85,3 +89,14 @@ Gate 3-5 verbs and codes (`readonly`, `busy`, `cancelled`, `refused`, `edits`, `
 - "Stopped at once" for a closed pipe is checked as: not `running`, process gone within 3 s.
 - The log cut at 1 MB is checked both at start and while the program keeps writing; the spec
   does not say when the cut happens.
+- `register`: `NAME` that is malformed or over 40 bytes is taken as `syntax` (section 7 lists
+  `syntax` for the row, `toobig` for the count); the 64 are counted among the registered
+  commands, not the manifest's; a long `TITLE` is only checked to be accepted.
+- Prompts: the label line of `print-palette` is `choose=` for `choose` and `prompt=` for `ask` and
+  `term`; the text of the `term` prompt's label is not checked, only that the command is the field.
+  A DEL (0x7f) in a `term` body and a trailing LF count as control characters.
+- `cmd` with an upper-case spelling of a listed name is taken as not on the list (`refused`).
+- `option` with a DOC that does not exist is `nodoc` (section 3: "no such document").
+- The scenarios pace the extension with `waitrun` (it takes the `run` event of `cmd full.go`, then
+  of `cmd full.go2`), so the script decides when a request is sent; the only sleeps are inside
+  the extension where a later script step must see the earlier request applied.
