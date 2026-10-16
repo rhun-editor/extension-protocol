@@ -128,11 +128,29 @@ type host struct {
 	errOnce  int64 // reply error to this many requests (tests the extension copes)
 	status   string
 	toasts   []string
+	hoverAt  string   // "DOC LINE COL" of the hover event we sent, "" when none
+	hovers   []string // hover answers
+	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
 }
 
-func (h *host) ok(name string)            { h.oks = append(h.oks, name); fmt.Println("ok  ", name) }
-func (h *host) fail(name, why string)      { h.fails = append(h.fails, name); fmt.Printf("FAIL %s: %s\n", name, why) }
+// sub says whether the manifest subscribes to an event (any pattern but "no").
+func (h *host) sub(name string) bool {
+	v := h.m.subscribe[name]
+	return v != "" && v != "no"
+}
+
+// edit is one record of an edits body (section 6a).
+type edit struct {
+	start, del int
+	ins        []byte
+}
+
+func (h *host) ok(name string) { h.oks = append(h.oks, name); fmt.Println("ok  ", name) }
+func (h *host) fail(name, why string) {
+	h.fails = append(h.fails, name)
+	fmt.Printf("FAIL %s: %s\n", name, why)
+}
 func (h *host) note(format string, a ...any) {
 	if *verbose {
 		fmt.Printf("     "+format+"\n", a...)
@@ -223,7 +241,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -451,10 +469,11 @@ func (h *host) handle(msg message) {
 			return
 		}
 		d.text = append(append(append([]byte{}, d.text[:a]...), b...), d.text[e:]...)
-		d.version++
 		d.cur, d.anchor = a+len(b), a+len(b)
+		recs := records(a, e-a, b)
+		d.version += int64(len(recs))
 		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
-		h.afterEdit(d)
+		h.afterEdit(d, recs...)
 	case "insert":
 		if len(args) != 3 {
 			h.fail("request grammar", "insert takes DOC VERSION LEN")
@@ -483,10 +502,11 @@ func (h *host) handle(msg message) {
 			lo, hi = hi, lo
 		}
 		d.text = append(append(append([]byte{}, d.text[:lo]...), b...), d.text[hi:]...)
-		d.version++
 		d.cur, d.anchor = lo+len(b), lo+len(b)
+		recs := records(lo, hi-lo, b)
+		d.version += int64(len(recs))
 		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
-		h.afterEdit(d)
+		h.afterEdit(d, recs...)
 	case "select":
 		if len(args) != 5 {
 			h.fail("request grammar", "select takes DOC L1 C1 L2 C2")
@@ -559,6 +579,112 @@ func (h *host) handle(msg message) {
 		h.active = d.id
 		h.write(fmt.Sprintf("0 active %d\n", d.id))
 		reply(fmt.Sprintf("ok %d %d", id, d.id))
+	case "diagnostics":
+		if len(args) != 4 {
+			h.fail("request grammar", "diagnostics takes DOC VERSION N LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[3])
+		if !ok {
+			return
+		}
+		if !need("read") {
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		v, _ := strconv.ParseInt(args[1], 10, 64)
+		if v != d.version {
+			h.fail("versions", fmt.Sprintf("diagnostics with version %d, the document is at %d", v, d.version))
+			rerr("stale", strconv.FormatInt(d.version, 10))
+			return
+		}
+		n, err := strconv.Atoi(args[2])
+		if err != nil || n < 0 {
+			h.fail("request grammar", fmt.Sprintf("diagnostics: N %q is not a count", args[2]))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if n > 2000 {
+			h.fail("limits", fmt.Sprintf("%d diagnostics (rhun keeps 2000)", n))
+			rerr("toobig", "2000")
+			return
+		}
+		var lines []string
+		if len(b) > 0 {
+			lines = strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+		}
+		if len(lines) != n {
+			h.fail("bodies", fmt.Sprintf("diagnostics announced %d lines, the body has %d", n, len(lines)))
+			rerr("syntax", "the body does not have N lines")
+			return
+		}
+		for _, l := range lines {
+			f := strings.SplitN(l, " ", 6)
+			if len(f) < 6 {
+				h.fail("request grammar", fmt.Sprintf("a diagnostics line is not L1 C1 L2 C2 SEVERITY MESSAGE: %q", l))
+				rerr("syntax", "cannot parse a line of the body")
+				return
+			}
+			a, why := d.position(f[0], f[1])
+			var e int
+			if why == "" {
+				e, why = d.position(f[2], f[3])
+			}
+			if why == "" && e < a {
+				why = "the range ends before it starts"
+			}
+			if why != "" {
+				h.fail("positions", "diagnostics: "+why)
+				rerr("badpos", why)
+				return
+			}
+			switch f[4] {
+			case "error", "warning", "info", "hint":
+			default:
+				h.fail("request grammar", fmt.Sprintf("diagnostics: severity %q", f[4]))
+				rerr("syntax", "cannot parse a line of the body")
+				return
+			}
+			if len(f[5]) > 200 {
+				h.fail("limits", fmt.Sprintf("a diagnostic message of %d bytes (rhun shows 200)", len(f[5])))
+			}
+		}
+		h.marks = n
+		reply(fmt.Sprintf("ok %d", id))
+	case "hover":
+		if len(args) != 4 {
+			h.fail("request grammar", "hover takes DOC LINE COL LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[3])
+		if !ok {
+			return
+		}
+		if !need("read") {
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		if _, why := d.position(args[1], args[2]); why != "" {
+			h.fail("positions", "hover: "+why)
+			rerr("badpos", why)
+			return
+		}
+		if at := strings.Join(args[:3], " "); at != h.hoverAt {
+			h.fail("hover", fmt.Sprintf("hover text for %s, the pointer rests at %q", at, h.hoverAt))
+		}
+		if len(b) > 4000 {
+			h.fail("limits", fmt.Sprintf("a hover text of %d bytes (rhun shows 4000)", len(b)))
+		}
+		h.hovers = append(h.hovers, string(b))
+		reply(fmt.Sprintf("ok %d", id))
 	case "cancel":
 		reply(fmt.Sprintf("ok %d", id))
 	default:
@@ -567,13 +693,34 @@ func (h *host) handle(msg message) {
 	}
 }
 
-// afterEdit reports an edit as rhun does at its next frame: changed, and the cursor, when the
-// manifest subscribes to them.
-func (h *host) afterEdit(d *doc) {
-	if sub := h.m.subscribe["changed"]; sub != "" && sub != "no" {
+// records are the edits records of replacing del bytes at start with ins: a delete record and
+// an insert record, each only when it does something (that is how rhun counts versions too).
+func records(start, del int, ins []byte) []edit {
+	var out []edit
+	if del > 0 {
+		out = append(out, edit{start, del, nil})
+	}
+	if len(ins) > 0 {
+		out = append(out, edit{start, 0, ins})
+	}
+	return out
+}
+
+// afterEdit reports an edit as rhun does at its next frame: edits (with the records), changed,
+// and the cursor, when the manifest subscribes to them.
+func (h *host) afterEdit(d *doc, recs ...edit) {
+	if h.sub("edits") && len(recs) > 0 {
+		var body []byte
+		for _, r := range recs {
+			body = append(body, fmt.Sprintf("%d %d %d\n", r.start, r.del, len(r.ins))...)
+			body = append(body, r.ins...)
+		}
+		h.write(fmt.Sprintf("0 edits %d %d %d\n%s", d.id, d.version, len(body), body))
+	}
+	if h.sub("changed") {
 		h.write(fmt.Sprintf("0 changed %d %d\n", d.id, d.version))
 	}
-	if sub := h.m.subscribe["cursor"]; sub != "" && sub != "no" {
+	if h.sub("cursor") {
 		line, col := 1, 1
 		for i := 0; i < d.cur && i < len(d.text); i++ {
 			if d.text[i] == '\n' {
@@ -754,6 +901,40 @@ func main() {
 	}
 	h.ok("every command handled on four documents without the program exiting")
 
+	// 2b. the user types into main.go: the edits stream for subscribers; then the pointer rests
+	if h.sub("edits") || h.sub("hover") {
+		d := h.docs[2]
+		h.active = d.id
+		h.write(fmt.Sprintf("0 active %d\n", d.id))
+		h.serve(200 * time.Millisecond)
+		typed := []byte("\n// typed\n")
+		at := len("package main\n")
+		d.text = append(append(append([]byte{}, d.text[:at]...), typed...), d.text[at:]...)
+		d.version++
+		d.cur, d.anchor = at+len(typed), at+len(typed)
+		before := len(h.requests)
+		h.afterEdit(d, edit{at, 0, typed})
+		h.serve(700 * time.Millisecond)
+		if h.cmdExited() {
+			h.fail("edits", "the program exited on an edits event")
+			report(h)
+		}
+		h.note("after the edits event: %v", h.requests[before:])
+		h.ok("takes the edits stream")
+		if h.sub("hover") {
+			h.hoverAt = fmt.Sprintf("%d 5 6", d.id) // on "main" of "func  main( )"
+			h.write("0 hover " + h.hoverAt + "\n")
+			h.serve(700 * time.Millisecond)
+			if h.cmdExited() {
+				h.fail("hover", "the program exited on a hover event")
+				report(h)
+			}
+			h.note("hover answers: %q", h.hovers)
+			h.hoverAt = ""
+			h.ok("takes the hover event")
+		}
+	}
+
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
@@ -836,6 +1017,9 @@ func report(h *host) {
 	}
 	if len(h.toasts) > 0 {
 		fmt.Printf("; toasts: %q", h.toasts)
+	}
+	if h.marks > 0 {
+		fmt.Printf("; %d diagnostics", h.marks)
 	}
 	fmt.Println()
 	if len(h.fails) > 0 {

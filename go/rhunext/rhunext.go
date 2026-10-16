@@ -9,6 +9,7 @@ package rhunext
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -33,8 +34,72 @@ type Range struct{ Start, End Pos }
 
 // Event is anything rhun tells the extension without expecting an answer.
 type Event struct {
-	Name string   // ready, opened, active, saved, changed, cursor, selection, closed, project, run, bye
+	Name string   // ready, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover
 	Args []string // the fields after the name; the last may contain spaces
+	Body []byte   // the edits event's records (section 6a)
+}
+
+// Edit is one record of an edits event: at byte offset Start, Del bytes were deleted and Ins
+// inserted, in order, each applying to the text as the previous one left it.
+type Edit struct {
+	Start, Del int
+	Ins        []byte
+}
+
+// ParseEdits decodes an edits event's body.
+func ParseEdits(body []byte) ([]Edit, error) {
+	var out []Edit
+	for len(body) > 0 {
+		nl := bytes.IndexByte(body, '\n')
+		if nl < 0 {
+			return out, errors.New("edits: a record without a line end")
+		}
+		var e Edit
+		var ins int
+		if _, err := fmt.Sscanf(string(body[:nl]), "%d %d %d", &e.Start, &e.Del, &ins); err != nil {
+			return out, fmt.Errorf("edits: bad record %q", body[:nl])
+		}
+		body = body[nl+1:]
+		if ins > len(body) {
+			return out, errors.New("edits: a record's bytes end early")
+		}
+		e.Ins = body[:ins]
+		body = body[ins:]
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// ApplyEdits applies records to a copy of the text.
+func ApplyEdits(text []byte, edits []Edit) ([]byte, error) {
+	for _, e := range edits {
+		if e.Start < 0 || e.Start+e.Del > len(text) {
+			return text, errors.New("edits: a record outside the text")
+		}
+		next := make([]byte, 0, len(text)-e.Del+len(e.Ins))
+		next = append(next, text[:e.Start]...)
+		next = append(next, e.Ins...)
+		next = append(next, text[e.Start+e.Del:]...)
+		text = next
+	}
+	return text, nil
+}
+
+// Severity of a diagnostic.
+type Severity string
+
+const (
+	SevError   Severity = "error"
+	SevWarning Severity = "warning"
+	SevInfo    Severity = "info"
+	SevHint    Severity = "hint"
+)
+
+// Diagnostic is one mark: a half-open range, a severity and a one-line message.
+type Diagnostic struct {
+	Range    Range
+	Severity Severity
+	Message  string
 }
 
 // Handler receives events. Methods are called on one goroutine, in order.
@@ -211,6 +276,13 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			return nil, nil
 		}
 		ev := &Event{Name: fields[1], Args: fields[2:]}
+		if ev.Name == "edits" && len(ev.Args) >= 3 {
+			n, _ := strconv.Atoi(ev.Args[2])
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
 		// the last field of opened and project may contain spaces: fields are rejoined there
 		switch ev.Name {
 		case "opened":
@@ -356,6 +428,34 @@ func (e *Ext) Open(path string, at Pos) (Doc, error) {
 		return 0, err
 	}
 	return Doc(argInt(r, 0)), nil
+}
+
+// Diagnostics replaces this extension's marks on the document, if version is current.
+func (e *Ext) Diagnostics(doc Doc, version int64, ds []Diagnostic) error {
+	var body bytes.Buffer
+	for _, d := range ds {
+		msg := strings.ReplaceAll(strings.ReplaceAll(d.Message, "\n", " "), "\r", " ")
+		fmt.Fprintf(&body, "%s %s %s %s\n", pos(d.Range.Start), pos(d.Range.End), d.Severity, msg)
+	}
+	_, err := e.Request("diagnostics", body.Bytes(), itoa(int64(doc)), itoa(version), itoa(int64(len(ds))), itoa(int64(body.Len())))
+	return err
+}
+
+// Hover shows text at a position the pointer rests on (an answer to the hover event).
+func (e *Ext) Hover(doc Doc, at Pos, text string) error {
+	_, err := e.Request("hover", []byte(text), itoa(int64(doc)), pos(at), itoa(int64(len(text))))
+	return err
+}
+
+// ParseHover reads a hover event: the document and the position the pointer rests on.
+func ParseHover(ev Event) (Doc, Pos, bool) {
+	if ev.Name != "hover" || len(ev.Args) < 3 {
+		return 0, Pos{}, false
+	}
+	d, _ := strconv.ParseInt(ev.Args[0], 10, 64)
+	l, _ := strconv.Atoi(ev.Args[1])
+	c, _ := strconv.Atoi(ev.Args[2])
+	return Doc(d), Pos{l, c}, true
 }
 
 // Logf writes to the extension's log (its standard error).

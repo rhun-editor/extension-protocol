@@ -24,9 +24,9 @@ range         = pos SP pos                        ; half-open: from the first to
 ; ---- the extension's first line
 hello         = "hello" SP "1" *( SP field )      ; further fields: capabilities (none in v1)
 
-; ---- requests from the extension (a body follows replace, insert, toast and status)
+; ---- requests from the extension (a body follows replace, insert, toast, status, diagnostics and hover)
 request       = id SP ( r-text / r-range / r-replace / r-insert / r-select / r-toast / r-status
-                      / r-open / r-cancel / r-register / r-option )
+                      / r-open / r-cancel / r-register / r-option / r-diagnostics / r-hover )
 r-text        = "text" SP doc
 r-range       = "range" SP doc SP range
 r-replace     = "replace" SP doc SP version SP range SP len
@@ -38,17 +38,27 @@ r-open        = "open" SP line SP col SP rest     ; line and col 0 keep the file
 r-cancel      = "cancel" SP id
 r-register    = "register" SP field SP field SP rest   ; gate 4: NAME KEYS TITLE ("-" for no keys)
 r-option      = "option" SP doc SP field SP rest       ; gate 4
+r-diagnostics = "diagnostics" SP doc SP version SP num SP len   ; num: the lines of the body
+r-hover       = "hover" SP doc SP pos SP len           ; the text to show at the position
+
+; ---- the body of diagnostics: num lines (section 6b)
+diag-line     = range SP severity SP rest LF           ; rest: the message, no LF in it
+severity      = "error" / "warning" / "info" / "hint"
+
+; ---- the body of the edits event: records (section 6a); the bytes of each follow its LF
+edit-record   = num SP num SP num LF                  ; START DEL INS, byte offsets and counts
 
 ; ---- replies from rhun (a body follows the ok of text and range: its LEN is the last field)
 reply         = ok / error
 ok            = "ok" SP id *( SP field )
 error         = "error" SP id SP code [ SP rest ]
 code          = "syntax" / "unknown" / "needs" / "nodoc" / "nofile" / "readonly" / "stale"
-              / "badpos" / "busy" / "cancelled" / "refused"
+              / "badpos" / "toobig" / "busy" / "cancelled" / "refused"
 
 ; ---- events from rhun
 event         = "0" SP ( e-ready / e-opened / e-active / e-saved / e-changed / e-cursor
-                       / e-selection / e-closed / e-project / e-run / e-bye )
+                       / e-selection / e-closed / e-project / e-run / e-bye
+                       / e-edits / e-resync / e-hover )
 e-ready       = "ready" SP rest                   ; the project folder, or "-"
 e-opened      = "opened" SP doc SP version SP lang SP rest   ; rest: the path, or "-"
 lang          = "-" / field                       ; a grammar name with spaces as "_"
@@ -61,3 +71,6 @@ e-closed      = "closed" SP doc
 e-project     = "project" SP rest                 ; the new project folder, or "-"
 e-run         = "run" SP field SP doc             ; NAME.command and the active document or 0
 e-bye         = "bye"
+e-edits       = "edits" SP doc SP version SP len     ; a body of edit-records follows
+e-resync      = "resync" SP doc SP version           ; deltas were lost: fetch text
+e-hover       = "hover" SP doc SP pos                ; the pointer rests there
