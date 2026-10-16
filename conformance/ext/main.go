@@ -1,0 +1,857 @@
+// rhun-ext-check plays rhun's side of extension protocol v1 (../../v1/v1.md) against an
+// extension and reports what the extension gets wrong: the handshake, the grammar of every
+// request, positions and versions against in-memory documents, bodies, how it copes with
+// unknown events, error replies, fragmented and coalesced input, bye, end of file, and a burst
+// of events. It also runs each manifest command once and shows what the extension did.
+//
+//	rhun-ext-check [-v] [-target linux-x86_64|macos-arm64|windows-x64] DIR
+//
+// DIR holds extension.ini and the program. Exit status 1 when a check fails.
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+)
+
+var verbose = flag.Bool("v", false, "print the whole exchange")
+var target = flag.String("target", "", "the run.* target to use (default: this machine)")
+
+type manifest struct {
+	name, owner, title, version string
+	protocol                    int
+	run                         map[string]string // target -> program
+	runtime, script, args       string
+	commands                    []string // NAME.key
+	needs                       map[string]string
+	subscribe                   map[string]string
+}
+
+func readManifest(dir string) (*manifest, error) {
+	data, err := os.ReadFile(filepath.Join(dir, "extension.ini"))
+	if err != nil {
+		return nil, err
+	}
+	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}}
+	section := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		if line[0] == '[' && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(line[1 : len(line)-1])
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		switch section {
+		case "":
+			switch {
+			case k == "name":
+				m.name = v
+			case k == "owner":
+				m.owner = v
+			case k == "title":
+				m.title = v
+			case k == "version":
+				m.version = v
+			case k == "protocol":
+				m.protocol, _ = strconv.Atoi(v)
+			case strings.HasPrefix(k, "run."):
+				m.run[k[4:]] = v
+			case k == "runtime":
+				m.runtime = v
+			case k == "run":
+				m.script = v
+			case k == "args":
+				m.args = v
+			}
+		case "commands":
+			m.commands = append(m.commands, k)
+		case "needs":
+			m.needs[k] = v
+		case "subscribe":
+			m.subscribe[k] = v
+		}
+	}
+	return m, nil
+}
+
+// ---- the fake editor ----
+
+type doc struct {
+	id      int64
+	version int64
+	lang    string
+	path    string
+	text    []byte
+	cur     int // byte offsets
+	anchor  int
+}
+
+type host struct {
+	dir, state, project string
+	m                   *manifest
+	docs                map[int64]*doc
+	nextDoc             int64
+	active              int64
+
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	stdout *bufio.Reader
+	wmu    sync.Mutex
+
+	inflight map[int64]bool
+	msgs     chan message
+	requests []string // what the extension sent, for -v and the command report
+	fails    []string
+	oks      []string
+	errOnce  int64 // reply error to this many requests (tests the extension copes)
+	status   string
+	toasts   []string
+	exited   chan error
+}
+
+func (h *host) ok(name string)            { h.oks = append(h.oks, name); fmt.Println("ok  ", name) }
+func (h *host) fail(name, why string)      { h.fails = append(h.fails, name); fmt.Printf("FAIL %s: %s\n", name, why) }
+func (h *host) note(format string, a ...any) {
+	if *verbose {
+		fmt.Printf("     "+format+"\n", a...)
+	}
+}
+
+func (h *host) newDoc(path, lang string, text []byte) *doc {
+	h.nextDoc++
+	d := &doc{id: h.nextDoc, lang: lang, path: path, text: text}
+	h.docs[d.id] = d
+	return d
+}
+
+func (h *host) start() error {
+	prog, args := "", []string{}
+	if h.m.runtime != "" {
+		p, err := exec.LookPath(h.m.runtime)
+		if err != nil {
+			return fmt.Errorf("runtime %s not on PATH", h.m.runtime)
+		}
+		prog = p
+		args = append(args, filepath.Join(h.dir, h.m.script))
+	} else {
+		rel, ok := h.m.run[*target]
+		if !ok {
+			return fmt.Errorf("no run.%s in the manifest", *target)
+		}
+		prog = filepath.Join(h.dir, rel)
+	}
+	if h.m.args != "" {
+		args = append(args, strings.Fields(h.m.args)...)
+	}
+	cmd := exec.Command(prog, args...)
+	cmd.Dir = h.dir
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"), "HOME=" + h.state, "TMPDIR=" + filepath.Join(h.state, "tmp"),
+		"XDG_CACHE_HOME=" + filepath.Join(h.state, "cache"), "RHUN_VERSION=0.18.0", "RHUN_PROTOCOL=1",
+		"RHUN_EXTENSION=" + h.m.owner + "/" + h.m.name, "RHUN_TARGET=" + *target, "RHUN_STATE=" + h.state,
+		"RHUN_PROJECT=" + h.project,
+	}
+	for _, k := range []string{"LANG", "LC_ALL", "TZ", "GOROOT", "GOPATH", "GOCACHE", "GOMODCACHE"} {
+		if v := os.Getenv(k); v != "" && !strings.HasPrefix(k, "GO") {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+	os.MkdirAll(filepath.Join(h.state, "tmp"), 0o755)
+	logf, _ := os.OpenFile(filepath.Join(h.state, "log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	cmd.Stderr = logf
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	h.cmd, h.stdin, h.stdout = cmd, in, bufio.NewReaderSize(out, 1<<20)
+	h.inflight = map[int64]bool{}
+	h.msgs = make(chan message, 1024)
+	go h.reader()
+	h.exited = make(chan error, 1)
+	go func() { h.exited <- cmd.Wait() }()
+	return nil
+}
+
+func (h *host) write(s string) error {
+	h.wmu.Lock()
+	defer h.wmu.Unlock()
+	h.note("← %s", strings.TrimRight(s, "\n"))
+	done := make(chan error, 1)
+	go func() { _, err := io.WriteString(h.stdin, s); done <- err }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		return errors.New("the extension is not reading: a write blocked for 5 s")
+	}
+}
+
+// message is one line from the extension, with its body when the line announces one.
+type message struct {
+	line string
+	body []byte
+	err  error
+}
+
+// bodyVerbs are the requests whose last field is a body length.
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true}
+
+// reader is the one goroutine that reads the extension's output: a line, then its body when the
+// verb has one, so nothing else ever touches the stream.
+func (h *host) reader() {
+	for {
+		s, err := h.stdout.ReadString('\n')
+		if err != nil && s == "" {
+			h.msgs <- message{err: err}
+			return
+		}
+		s = strings.TrimRight(s, "\r\n")
+		m := message{line: s}
+		f := strings.Split(s, " ")
+		if len(f) >= 3 && bodyVerbs[f[1]] {
+			if _, e := strconv.ParseInt(f[0], 10, 64); e == nil {
+				n, e := strconv.ParseInt(f[len(f)-1], 10, 64)
+				if e == nil && n >= 0 && n < 64<<20 {
+					m.body = make([]byte, n)
+					if _, e := io.ReadFull(h.stdout, m.body); e != nil {
+						m.err = fmt.Errorf("the body of %q ended early: %w", s, e)
+					}
+				}
+			}
+		}
+		h.msgs <- m
+		if err != nil {
+			h.msgs <- message{err: err}
+			return
+		}
+	}
+}
+
+// readMessage returns the next message, or errTimeout.
+func (h *host) readMessage(timeout time.Duration) (message, error) {
+	select {
+	case m := <-h.msgs:
+		if m.err != nil && m.line == "" {
+			return m, m.err
+		}
+		h.note("→ %s", m.line)
+		return m, nil
+	case <-time.After(timeout):
+		return message{}, errTimeout
+	}
+}
+
+var errTimeout = errors.New("timeout")
+
+// position parses LINE COL against a document; ok false after the reason.
+func (d *doc) position(ls, cs string) (int, string) {
+	line, err1 := strconv.Atoi(ls)
+	col, err2 := strconv.Atoi(cs)
+	if err1 != nil || err2 != nil || line < 1 || col < 1 {
+		return -1, "position fields must be positive integers"
+	}
+	start, n := 0, 1
+	for n < line {
+		i := bytes.IndexByte(d.text[start:], '\n')
+		if i < 0 {
+			return -1, fmt.Sprintf("line %d is past the last line", line)
+		}
+		start += i + 1
+		n++
+	}
+	end := bytes.IndexByte(d.text[start:], '\n')
+	if end < 0 {
+		end = len(d.text) - start
+	}
+	if col-1 > end {
+		return -1, fmt.Sprintf("column %d is past the end of line %d (%d bytes)", col, line, end)
+	}
+	pos := start + col - 1
+	if pos < len(d.text) && col-1 < end && !utf8.RuneStart(d.text[pos]) {
+		return -1, fmt.Sprintf("column %d of line %d is inside a multibyte character", col, line)
+	}
+	return pos, ""
+}
+
+// handle serves one request line from the extension; it returns false when the line was not a
+// request (a reply or garbage), after recording the failure.
+func (h *host) handle(msg message) {
+	line := msg.line
+	fields := strings.Split(line, " ")
+	if len(fields) < 2 {
+		h.fail("request grammar", fmt.Sprintf("too few fields: %q", line))
+		return
+	}
+	if fields[0] == "ok" || fields[0] == "error" {
+		h.fail("request grammar", fmt.Sprintf("a reply to a request rhun never sent: %q", line))
+		return
+	}
+	id, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || id < 1 || id > 2147483647 {
+		h.fail("request id", fmt.Sprintf("not an id in 1..2147483647: %q", fields[0]))
+		return
+	}
+	if h.inflight[id] {
+		h.fail("request id", fmt.Sprintf("id %d reused while in flight", id))
+	}
+	h.inflight[id] = true
+	defer delete(h.inflight, id)
+	verb := fields[1]
+	args := fields[2:]
+	h.requests = append(h.requests, verb)
+	reply := func(s string) { h.write(s + "\n") }
+	rerr := func(code, text string) { reply(fmt.Sprintf("error %d %s %s", id, code, text)) }
+	if h.errOnce > 0 {
+		h.errOnce--
+		rerr("refused", "conformance: an error reply the extension must survive")
+		return
+	}
+	need := func(level string) bool {
+		have := h.m.needs["documents"]
+		if level == "read" && (have == "read" || have == "write") {
+			return true
+		}
+		if level == "write" && have == "write" {
+			return true
+		}
+		h.fail("needs", fmt.Sprintf("%s needs documents=%s but the manifest has %q", verb, level, have))
+		rerr("needs", "documents="+level)
+		return false
+	}
+	getDoc := func(s string) *doc {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			h.fail("request grammar", fmt.Sprintf("%s: DOC %q is not a number", verb, s))
+			rerr("syntax", "cannot parse the line")
+			return nil
+		}
+		d := h.docs[n]
+		if d == nil {
+			h.fail("document ids", fmt.Sprintf("%s names document %d, which was never opened to it", verb, n))
+			rerr("nodoc", "no such document")
+		}
+		return d
+	}
+	body := func(lenField string) ([]byte, bool) {
+		n, err := strconv.ParseInt(lenField, 10, 64)
+		if err != nil || n < 0 {
+			h.fail("request grammar", fmt.Sprintf("%s: LEN %q is not a length", verb, lenField))
+			return nil, false
+		}
+		if msg.err != nil || int64(len(msg.body)) != n {
+			h.fail("bodies", fmt.Sprintf("%s announced %d bytes, the stream ended first", verb, n))
+			return nil, false
+		}
+		return msg.body, true
+	}
+	switch verb {
+	case "text":
+		if len(args) != 1 || !need("read") {
+			if len(args) != 1 {
+				h.fail("request grammar", "text takes exactly DOC")
+				rerr("syntax", "cannot parse the line")
+			}
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		h.write(fmt.Sprintf("ok %d %d %d\n%s", id, d.version, len(d.text), d.text))
+	case "range":
+		if len(args) != 5 {
+			h.fail("request grammar", "range takes DOC L1 C1 L2 C2")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if !need("read") {
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		a, why := d.position(args[1], args[2])
+		if why == "" {
+			var b int
+			b, why = d.position(args[3], args[4])
+			if why == "" && b < a {
+				why = "the range ends before it starts"
+			}
+			if why == "" {
+				h.write(fmt.Sprintf("ok %d %d %d\n%s", id, d.version, b-a, d.text[a:b]))
+				return
+			}
+		}
+		h.fail("positions", "range: "+why)
+		rerr("badpos", why)
+	case "replace":
+		if len(args) != 7 {
+			h.fail("request grammar", "replace takes DOC VERSION L1 C1 L2 C2 LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[6])
+		if !ok {
+			return
+		}
+		if !need("write") {
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		v, _ := strconv.ParseInt(args[1], 10, 64)
+		if v != d.version {
+			h.fail("versions", fmt.Sprintf("replace with version %d, the document is at %d (nothing changed it)", v, d.version))
+			rerr("stale", strconv.FormatInt(d.version, 10))
+			return
+		}
+		a, why := d.position(args[2], args[3])
+		var e int
+		if why == "" {
+			e, why = d.position(args[4], args[5])
+		}
+		if why == "" && e < a {
+			why = "the range ends before it starts"
+		}
+		if why != "" {
+			h.fail("positions", "replace: "+why)
+			rerr("badpos", why)
+			return
+		}
+		d.text = append(append(append([]byte{}, d.text[:a]...), b...), d.text[e:]...)
+		d.version++
+		d.cur, d.anchor = a+len(b), a+len(b)
+		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
+		h.afterEdit(d)
+	case "insert":
+		if len(args) != 3 {
+			h.fail("request grammar", "insert takes DOC VERSION LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[2])
+		if !ok {
+			return
+		}
+		if !need("write") {
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		v, _ := strconv.ParseInt(args[1], 10, 64)
+		if v != d.version {
+			h.fail("versions", fmt.Sprintf("insert with version %d, the document is at %d", v, d.version))
+			rerr("stale", strconv.FormatInt(d.version, 10))
+			return
+		}
+		lo, hi := d.cur, d.anchor
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		d.text = append(append(append([]byte{}, d.text[:lo]...), b...), d.text[hi:]...)
+		d.version++
+		d.cur, d.anchor = lo+len(b), lo+len(b)
+		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
+		h.afterEdit(d)
+	case "select":
+		if len(args) != 5 {
+			h.fail("request grammar", "select takes DOC L1 C1 L2 C2")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		a, why := d.position(args[1], args[2])
+		var b int
+		if why == "" {
+			b, why = d.position(args[3], args[4])
+		}
+		if why != "" {
+			h.fail("positions", "select: "+why)
+			rerr("badpos", why)
+			return
+		}
+		d.anchor, d.cur = a, b
+		reply(fmt.Sprintf("ok %d", id))
+	case "toast", "status":
+		if len(args) != 1 {
+			h.fail("request grammar", verb+" takes LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[0])
+		if !ok {
+			return
+		}
+		if verb == "toast" {
+			h.toasts = append(h.toasts, string(b))
+			if len(b) > 200 {
+				h.fail("limits", fmt.Sprintf("a toast of %d bytes (rhun shows 200)", len(b)))
+			}
+		} else {
+			h.status = string(b)
+			if len(b) > 80 {
+				h.fail("limits", fmt.Sprintf("a status text of %d bytes (rhun shows 80)", len(b)))
+			}
+		}
+		reply(fmt.Sprintf("ok %d", id))
+	case "open":
+		if len(args) < 3 {
+			h.fail("request grammar", "open takes LINE COL PATH")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		path := strings.Join(args[2:], " ")
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(h.project, path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			rerr("nofile", "no such file")
+			return
+		}
+		var d *doc
+		for _, x := range h.docs {
+			if x.path == path {
+				d = x
+			}
+		}
+		if d == nil {
+			d = h.newDoc(path, langOf(path), data)
+			h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
+		}
+		h.active = d.id
+		h.write(fmt.Sprintf("0 active %d\n", d.id))
+		reply(fmt.Sprintf("ok %d %d", id, d.id))
+	case "cancel":
+		reply(fmt.Sprintf("ok %d", id))
+	default:
+		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
+		rerr("unknown", "no such request")
+	}
+}
+
+// afterEdit reports an edit as rhun does at its next frame: changed, and the cursor, when the
+// manifest subscribes to them.
+func (h *host) afterEdit(d *doc) {
+	if sub := h.m.subscribe["changed"]; sub != "" && sub != "no" {
+		h.write(fmt.Sprintf("0 changed %d %d\n", d.id, d.version))
+	}
+	if sub := h.m.subscribe["cursor"]; sub != "" && sub != "no" {
+		line, col := 1, 1
+		for i := 0; i < d.cur && i < len(d.text); i++ {
+			if d.text[i] == '\n' {
+				line++
+				col = 1
+			} else {
+				col++
+			}
+		}
+		h.write(fmt.Sprintf("0 cursor %d %d %d\n", d.id, line, col))
+	}
+}
+
+func langOf(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		return "Go"
+	case ".json":
+		return "JSON"
+	case ".py":
+		return "Python"
+	case ".md":
+		return "Markdown"
+	}
+	return ""
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return strings.ReplaceAll(s, " ", "_")
+}
+
+// serve reads the extension's lines until it has been quiet for `quiet`, handling requests.
+func (h *host) serve(quiet time.Duration) {
+	for {
+		m, err := h.readMessage(quiet)
+		if err != nil {
+			return
+		}
+		if m.line == "" {
+			continue
+		}
+		h.handle(m)
+	}
+}
+
+func (h *host) catchUp() {
+	ids := make([]int64, 0, len(h.docs))
+	for id := range h.docs {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	for _, id := range ids {
+		d := h.docs[id]
+		h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
+	}
+	h.write(fmt.Sprintf("0 active %d\n", h.active))
+	if h.m.subscribe["cursor"] != "" && h.m.subscribe["cursor"] != "no" {
+		h.write(fmt.Sprintf("0 cursor %d 1 1\n", h.active))
+	}
+}
+
+// expectHello waits for the first line.
+func (h *host) expectHello() bool {
+	m, err := h.readMessage(5 * time.Second)
+	if err != nil {
+		h.fail("hello", "no line within 5 s: "+err.Error())
+		return false
+	}
+	line := m.line
+	if line != "hello 1" && !strings.HasPrefix(line, "hello 1 ") {
+		h.fail("hello", fmt.Sprintf("the first line was %q, not \"hello 1\"", line))
+		return false
+	}
+	h.ok("hello 1 as the first line")
+	return true
+}
+
+func (h *host) stopAndWait(name string, how func()) bool {
+	how()
+	select {
+	case <-h.exited:
+		h.ok(name)
+		return true
+	case <-time.After(1500 * time.Millisecond):
+		h.fail(name, "the program was still running 1.5 s later")
+		h.cmd.Process.Kill()
+		<-h.exited
+		return false
+	}
+}
+
+func main() {
+	flag.Parse()
+	if flag.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: rhun-ext-check [-v] [-target T] DIR")
+		os.Exit(2)
+	}
+	if *target == "" {
+		switch runtime.GOOS + "/" + runtime.GOARCH {
+		case "linux/amd64":
+			*target = "linux-x86_64"
+		case "darwin/arm64":
+			*target = "macos-arm64"
+		case "windows/amd64":
+			*target = "windows-x64"
+		}
+	}
+	dir, _ := filepath.Abs(flag.Arg(0))
+	m, err := readManifest(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "manifest:", err)
+		os.Exit(2)
+	}
+	h := &host{dir: dir, m: m, docs: map[int64]*doc{}}
+	// the manifest itself
+	switch {
+	case m.name == "" || m.owner == "" || m.title == "" || m.version == "":
+		h.fail("manifest", "name, owner, title and version are required")
+	case m.name != filepath.Base(dir):
+		h.fail("manifest", fmt.Sprintf("name %q is not the folder name %q", m.name, filepath.Base(dir)))
+	default:
+		h.ok("manifest has name, owner, title and version")
+	}
+	if m.protocol != 1 {
+		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
+	}
+	if len(m.commands) == 0 {
+		h.fail("manifest", "no [commands]: the extension can never be started on a command")
+	}
+	work, _ := os.MkdirTemp("", "rhun-ext-check-")
+	defer os.RemoveAll(work)
+	h.state = filepath.Join(work, "state")
+	h.project = filepath.Join(work, "project")
+	os.MkdirAll(h.project, 0o755)
+	os.WriteFile(filepath.Join(h.project, "a.txt"), []byte("hello world\nsecond line\n"), 0o644)
+	os.WriteFile(filepath.Join(h.project, "main.go"), []byte("package main\n\nfunc  main( ) {\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(h.project, "data.json"), []byte("{\"a\":1,\"b\":[1,2]}"), 0o644)
+	os.WriteFile(filepath.Join(h.project, "u.txt"), []byte("héllo\n"), 0o644)
+	for _, name := range []string{"a.txt", "main.go", "data.json", "u.txt"} {
+		data, _ := os.ReadFile(filepath.Join(h.project, name))
+		h.newDoc(filepath.Join(h.project, name), langOf(name), data)
+	}
+	h.active = 1
+
+	// 1. start, hello, ready and catch-up; the extension must not speak before ready
+	if err := h.start(); err != nil {
+		h.fail("start", err.Error())
+		report(h)
+	}
+	if !h.expectHello() {
+		report(h)
+	}
+	h.write("0 ready " + h.project + "\n")
+	h.catchUp()
+	h.serve(300 * time.Millisecond)
+	if len(h.fails) == 0 {
+		h.ok("ready and catch-up accepted")
+	}
+
+	// 2. each command once, on each document
+	for _, c := range m.commands {
+		for _, d := range []int64{1, 2, 3, 4} {
+			before := len(h.requests)
+			h.active = d
+			h.write(fmt.Sprintf("0 active %d\n", d))
+			h.write(fmt.Sprintf("0 run %s.%s %d\n", m.name, c, d))
+			h.serve(700 * time.Millisecond)
+			did := h.requests[before:]
+			h.note("command %s on %s: %v", c, filepath.Base(h.docs[d].path), did)
+		}
+		if h.cmdExited() {
+			h.fail("commands", c+": the program exited while handling the command")
+			report(h)
+		}
+	}
+	h.ok("every command handled on four documents without the program exiting")
+
+	// 3. an event it does not know, then an error reply it must survive
+	h.write("0 frobnicate 1 2 three\n")
+	h.errOnce = 1
+	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0]))
+	h.serve(700 * time.Millisecond)
+	if h.cmdExited() {
+		h.fail("resilience", "the program exited after an unknown event or an error reply")
+		report(h)
+	}
+	h.ok("survives an unknown event and an error reply")
+
+	// 4. fragmented input: one byte at a time
+	msg := fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0])
+	before := len(h.requests)
+	for i := range msg {
+		h.write(msg[i : i+1])
+		time.Sleep(2 * time.Millisecond)
+	}
+	h.serve(700 * time.Millisecond)
+	frag := len(h.requests) - before
+	// 5. coalesced input: several events in one write
+	before = len(h.requests)
+	h.write(fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0]))
+	h.serve(700 * time.Millisecond)
+	coal := len(h.requests) - before
+	if frag == coal {
+		h.ok("reads fragmented and coalesced input alike")
+	} else {
+		h.fail("framing", fmt.Sprintf("the same command produced %d requests fragmented and %d coalesced", frag, coal))
+	}
+
+	// 6. a burst: 2000 events; the extension must keep reading
+	burstErr := error(nil)
+	for i := 0; i < 2000 && burstErr == nil; i++ {
+		burstErr = h.write(fmt.Sprintf("0 cursor 1 1 %d\n", 1+i%10))
+	}
+	h.serve(500 * time.Millisecond)
+	if burstErr != nil {
+		why := burstErr.Error()
+		if h.cmdExited() {
+			why += " (the program exited: " + fmt.Sprint(h.cmd.ProcessState) + ")"
+		}
+		h.fail("keeps reading", why)
+	} else if h.cmdExited() {
+		h.fail("keeps reading", "the program exited during a burst of 2000 events")
+	} else {
+		h.ok("keeps reading through a burst of 2000 events")
+	}
+
+	// 7. bye: it leaves within a second
+	h.stopAndWait("exits on bye", func() { h.write("0 bye\n") })
+
+	// 8. restart, then end of file on its input
+	if err := h.start(); err == nil {
+		if h.expectHello() {
+			h.write("0 ready " + h.project + "\n")
+			h.catchUp()
+			h.serve(200 * time.Millisecond)
+			h.ok("restarts cleanly")
+			h.stopAndWait("exits when its input ends", func() { h.stdin.Close() })
+		}
+	}
+	report(h)
+}
+
+func (h *host) cmdExited() bool {
+	select {
+	case err := <-h.exited:
+		h.exited <- err
+		return true
+	default:
+		return false
+	}
+}
+
+func report(h *host) {
+	fmt.Printf("\n%d ok, %d failed", len(h.oks), len(h.fails))
+	if h.status != "" {
+		fmt.Printf("; last status %q", h.status)
+	}
+	if len(h.toasts) > 0 {
+		fmt.Printf("; toasts: %q", h.toasts)
+	}
+	fmt.Println()
+	if len(h.fails) > 0 {
+		if data, err := os.ReadFile(filepath.Join(h.state, "log")); err == nil && len(data) > 0 {
+			lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+			if len(lines) > 20 {
+				lines = lines[len(lines)-20:]
+			}
+			fmt.Println("the extension's log ends with:")
+			for _, l := range lines {
+				fmt.Println("    " + l)
+			}
+		}
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+var _ = context.Background

@@ -1,0 +1,63 @@
+; rhun extension protocol, version 1: the grammar of what travels on the pipes (RFC 5234 ABNF).
+; v1.md says what each message means; this says exactly what it looks like. Bodies are raw
+; bytes that follow a message's LF and are not part of the grammar of lines.
+
+stream        = *message
+message       = ( request / reply / event ) LF [ body ]
+              ; body is present iff the message's last field is a LEN of a body-bearing message
+              ; and is exactly LEN bytes
+
+LF            = %x0A
+SP            = %x20
+field         = 1*( %x21-7E / %x80-FF )          ; no space, no LF, no CR
+rest          = field *( SP field )               ; a last field that may contain spaces
+num           = 1*DIGIT
+id            = %x31-39 *9DIGIT                   ; 1 .. 2147483647 (the receiver checks the bound)
+version       = num
+doc           = num
+len           = num
+line          = num                               ; 1-based
+col           = num                               ; 1-based byte column within the line
+pos           = line SP col
+range         = pos SP pos                        ; half-open: from the first to before the second
+
+; ---- the extension's first line
+hello         = "hello" SP "1" *( SP field )      ; further fields: capabilities (none in v1)
+
+; ---- requests from the extension (a body follows replace, insert, toast and status)
+request       = id SP ( r-text / r-range / r-replace / r-insert / r-select / r-toast / r-status
+                      / r-open / r-cancel / r-register / r-option )
+r-text        = "text" SP doc
+r-range       = "range" SP doc SP range
+r-replace     = "replace" SP doc SP version SP range SP len
+r-insert      = "insert" SP doc SP version SP len
+r-select      = "select" SP doc SP range
+r-toast       = "toast" SP len
+r-status      = "status" SP len
+r-open        = "open" SP line SP col SP rest     ; line and col 0 keep the file's cursor
+r-cancel      = "cancel" SP id
+r-register    = "register" SP field SP field SP rest   ; gate 4: NAME KEYS TITLE ("-" for no keys)
+r-option      = "option" SP doc SP field SP rest       ; gate 4
+
+; ---- replies from rhun (a body follows the ok of text and range: its LEN is the last field)
+reply         = ok / error
+ok            = "ok" SP id *( SP field )
+error         = "error" SP id SP code [ SP rest ]
+code          = "syntax" / "unknown" / "needs" / "nodoc" / "nofile" / "readonly" / "stale"
+              / "badpos" / "busy" / "cancelled" / "refused"
+
+; ---- events from rhun
+event         = "0" SP ( e-ready / e-opened / e-active / e-saved / e-changed / e-cursor
+                       / e-selection / e-closed / e-project / e-run / e-bye )
+e-ready       = "ready" SP rest                   ; the project folder, or "-"
+e-opened      = "opened" SP doc SP version SP lang SP rest   ; rest: the path, or "-"
+lang          = "-" / field                       ; a grammar name with spaces as "_"
+e-active      = "active" SP doc                   ; 0 when no document is active
+e-saved       = "saved" SP doc SP version
+e-changed     = "changed" SP doc SP version
+e-cursor      = "cursor" SP doc SP pos
+e-selection   = "selection" SP doc SP range       ; anchor, then cursor
+e-closed      = "closed" SP doc
+e-project     = "project" SP rest                 ; the new project folder, or "-"
+e-run         = "run" SP field SP doc             ; NAME.command and the active document or 0
+e-bye         = "bye"
