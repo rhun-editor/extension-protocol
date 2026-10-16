@@ -24,9 +24,11 @@ range         = pos SP pos                        ; half-open: from the first to
 ; ---- the extension's first line
 hello         = "hello" SP "1" *( SP field )      ; further fields: capabilities (none in v1)
 
-; ---- requests from the extension (a body follows replace, insert, toast, status, diagnostics and hover)
+; ---- requests from the extension (a body follows replace, insert, toast, status, diagnostics,
+;      hover, choose, ask and term)
 request       = id SP ( r-text / r-range / r-replace / r-insert / r-select / r-toast / r-status
-                      / r-open / r-cancel / r-register / r-option / r-diagnostics / r-hover )
+                      / r-open / r-cancel / r-register / r-option / r-diagnostics / r-hover
+                      / r-choose / r-ask / r-term / r-cmd )
 r-text        = "text" SP doc
 r-range       = "range" SP doc SP range
 r-replace     = "replace" SP doc SP version SP range SP len
@@ -36,8 +38,15 @@ r-toast       = "toast" SP len
 r-status      = "status" SP len
 r-open        = "open" SP line SP col SP rest     ; line and col 0 keep the file's cursor
 r-cancel      = "cancel" SP id
-r-register    = "register" SP field SP field SP rest   ; gate 4: NAME KEYS TITLE ("-" for no keys)
-r-option      = "option" SP doc SP field SP rest       ; gate 4
+r-register    = "register" SP name SP field SP rest   ; NAME KEYS TITLE ("-" for no keys)
+name          = 1*40( %x61-7A / DIGIT / "_" )          ; a command name: [a-z0-9_]
+r-option      = "option" SP doc SP opt-key SP opt-value
+opt-key       = "tab_width" / "insert_spaces" / "trim_trailing_whitespace" / "final_newline"
+opt-value     = "yes" / "no" / num / "-"                ; num for tab_width (1..16); "-" removes
+r-choose      = "choose" SP len                        ; body: the prompt line, then one item per line
+r-ask         = "ask" SP len                           ; body: the prompt
+r-term        = "term" SP len                          ; body: one command line, no control characters
+r-cmd         = "cmd" SP field                         ; a command name from section 8a
 r-diagnostics = "diagnostics" SP doc SP version SP num SP len   ; num: the lines of the body
 r-hover       = "hover" SP doc SP pos SP len           ; the text to show at the position
 
@@ -48,9 +57,9 @@ severity      = "error" / "warning" / "info" / "hint"
 ; ---- the body of the edits event: records (section 6a); the bytes of each follow its LF
 edit-record   = num SP num SP num LF                  ; START DEL INS, byte offsets and counts
 
-; ---- replies from rhun (a body follows the ok of text and range: its LEN is the last field)
+; ---- replies from rhun (a body follows the ok of text, range and ask: its LEN is the last field)
 reply         = ok / error
-ok            = "ok" SP id *( SP field )
+ok            = "ok" SP id *( SP field )               ; choose: ok ID N; ask: ok ID LEN + body
 error         = "error" SP id SP code [ SP rest ]
 code          = "syntax" / "unknown" / "needs" / "nodoc" / "nofile" / "readonly" / "stale"
               / "badpos" / "toobig" / "busy" / "cancelled" / "refused"

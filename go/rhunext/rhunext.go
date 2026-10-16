@@ -346,7 +346,7 @@ func (e *Ext) Request(verb string, body []byte, args ...string) (Reply, error) {
 	ch := make(chan result, 1)
 	e.pmu.Lock()
 	e.pend[id] = ch
-	if verb == "text" || verb == "range" {
+	if verb == "text" || verb == "range" || verb == "ask" {
 		e.bodies[id] = true
 	}
 	e.pmu.Unlock()
@@ -445,6 +445,81 @@ func (e *Ext) Diagnostics(doc Doc, version int64, ds []Diagnostic) error {
 func (e *Ext) Hover(doc Doc, at Pos, text string) error {
 	_, err := e.Request("hover", []byte(text), itoa(int64(doc)), pos(at), itoa(int64(len(text))))
 	return err
+}
+
+// Register adds a command for this session: EXTENSION.name in the palette as "title (Extension)"
+// with the default keys (space separated, "" for none); it arrives like a manifest command, as a
+// Run call, and goes when the extension stops.
+func (e *Ext) Register(name, keys, title string) error {
+	if keys == "" {
+		keys = "-"
+	}
+	_, err := e.Request("register", nil, name, keys, title)
+	return err
+}
+
+// Option sets a per-document setting (section 6c): tab_width (1-16), insert_spaces,
+// trim_trailing_whitespace, final_newline ("yes"/"no"); value "-" removes this extension's override.
+func (e *Ext) Option(doc Doc, key, value string) error {
+	_, err := e.Request("option", nil, itoa(int64(doc)), key, value)
+	return err
+}
+
+// Choose shows a pick list with the prompt as its label and returns the index (0-based) of
+// the item the user picked. The user dismissing it is an *Error with Code "cancelled"
+// (see Cancelled); another prompt being open is "busy".
+func (e *Ext) Choose(prompt string, items []string) (int, error) {
+	var body bytes.Buffer
+	body.WriteString(oneLine(prompt))
+	body.WriteByte('\n')
+	for _, it := range items {
+		body.WriteString(oneLine(it))
+		body.WriteByte('\n')
+	}
+	r, err := e.Request("choose", body.Bytes(), itoa(int64(body.Len())))
+	if err != nil {
+		return 0, err
+	}
+	return int(argInt(r, 0)) - 1, nil
+}
+
+// Ask shows a text prompt and returns what the user typed ("" when nothing); Esc is "cancelled".
+func (e *Ext) Ask(prompt string) (string, error) {
+	p := oneLine(prompt)
+	r, err := e.Request("ask", []byte(p), itoa(int64(len(p))))
+	if err != nil {
+		return "", err
+	}
+	return string(r.Body), nil
+}
+
+// Term proposes a command line for rhun's terminal: the user sees it, may edit it, and runs it
+// with Enter (nil) or dismisses it (Cancelled). Needs terminal = yes in the manifest.
+func (e *Ext) Term(command string) error {
+	_, err := e.Request("term", []byte(command), itoa(int64(len(command))))
+	return err
+}
+
+// Cmd runs one of rhun's own commands, from the list in section 8a of the protocol.
+func (e *Ext) Cmd(name string) error {
+	_, err := e.Request("cmd", nil, name)
+	return err
+}
+
+// Cancelled reports whether an error is a prompt the user dismissed.
+func Cancelled(err error) bool {
+	var re *Error
+	return errors.As(err, &re) && re.Code == "cancelled"
+}
+
+// Busy reports whether an error is a prompt refused because one is already open.
+func Busy(err error) bool {
+	var re *Error
+	return errors.As(err, &re) && re.Code == "busy"
+}
+
+func oneLine(s string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
 }
 
 // ParseHover reads a hover event: the document and the position the pointer rests on.

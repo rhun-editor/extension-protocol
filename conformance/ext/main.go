@@ -129,6 +129,10 @@ type host struct {
 	status   string
 	toasts   []string
 	hoverAt  string   // "DOC LINE COL" of the hover event we sent, "" when none
+	rtcmds   []string // commands registered at runtime (EXT.NAME)
+	options  []string // option requests, "DOC KEY VALUE"
+	prompts  []string // choose/ask/term prompts shown
+	cmds     []string // cmd names run
 	hovers   []string // hover answers
 	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
@@ -241,7 +245,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -685,6 +689,148 @@ func (h *host) handle(msg message) {
 		}
 		h.hovers = append(h.hovers, string(b))
 		reply(fmt.Sprintf("ok %d", id))
+	case "register":
+		if len(args) < 3 {
+			h.fail("request grammar", "register takes NAME KEYS TITLE")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		name := args[0]
+		if len(name) > 40 || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			h.fail("request grammar", fmt.Sprintf("register: NAME %q is not [a-z0-9_]{1,40}", name))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		full := h.m.name + "." + name
+		for _, c := range h.m.commands {
+			if c == name {
+				h.fail("verbs", fmt.Sprintf("register: %s is already a manifest command", full))
+				rerr("refused", "the name is in use")
+				return
+			}
+		}
+		for _, c := range h.rtcmds {
+			if c == full {
+				h.fail("verbs", fmt.Sprintf("register: %s registered twice", full))
+				rerr("refused", "the name is in use")
+				return
+			}
+		}
+		if len(h.rtcmds) >= 64 {
+			h.fail("limits", "more than 64 runtime commands")
+			rerr("toobig", "64 commands")
+			return
+		}
+		if title := strings.Join(args[2:], " "); len(title) > 80 {
+			h.fail("limits", fmt.Sprintf("a command title of %d bytes (rhun shows 80)", len(title)))
+		}
+		h.rtcmds = append(h.rtcmds, full)
+		reply(fmt.Sprintf("ok %d", id))
+	case "option":
+		if len(args) != 3 {
+			h.fail("request grammar", "option takes DOC KEY VALUE")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		d := getDoc(args[0])
+		if d == nil {
+			return
+		}
+		ok := false
+		switch args[1] {
+		case "tab_width":
+			n, err := strconv.Atoi(args[2])
+			ok = args[2] == "-" || (err == nil && n >= 1 && n <= 16)
+		case "insert_spaces", "trim_trailing_whitespace", "final_newline":
+			ok = args[2] == "yes" || args[2] == "no" || args[2] == "-"
+		}
+		if !ok {
+			h.fail("request grammar", fmt.Sprintf("option: %s %s is not a setting rhun knows", args[1], args[2]))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		h.options = append(h.options, strings.Join(args, " "))
+		reply(fmt.Sprintf("ok %d", id))
+	case "choose":
+		if len(args) != 1 {
+			h.fail("request grammar", "choose takes LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[0])
+		if !ok {
+			return
+		}
+		lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+		if len(lines) < 2 || len(b) == 0 {
+			h.fail("request grammar", "choose: the body needs a prompt line and at least one item")
+			rerr("syntax", "no items")
+			return
+		}
+		if len(lines)-1 > 1000 {
+			h.fail("limits", fmt.Sprintf("%d items (rhun shows 1000)", len(lines)-1))
+			rerr("toobig", "1000 items")
+			return
+		}
+		for _, l := range lines {
+			if len(l) > 200 {
+				h.fail("limits", fmt.Sprintf("a choose line of %d bytes (rhun shows 200)", len(l)))
+			}
+		}
+		h.prompts = append(h.prompts, "choose: "+lines[0]+" "+fmt.Sprint(lines[1:]))
+		// the user picks the last item
+		reply(fmt.Sprintf("ok %d %d", id, len(lines)-1))
+	case "ask":
+		if len(args) != 1 {
+			h.fail("request grammar", "ask takes LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[0])
+		if !ok {
+			return
+		}
+		if len(b) > 200 {
+			h.fail("limits", fmt.Sprintf("an ask prompt of %d bytes (rhun shows 200)", len(b)))
+		}
+		h.prompts = append(h.prompts, "ask: "+string(b))
+		answer := "conformance"
+		h.write(fmt.Sprintf("ok %d %d\n%s", id, len(answer), answer))
+	case "term":
+		if len(args) != 1 {
+			h.fail("request grammar", "term takes LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[0])
+		if !ok {
+			return
+		}
+		if h.m.needs["terminal"] != "yes" {
+			h.fail("needs", "term needs terminal=yes but the manifest does not say so")
+			rerr("needs", "terminal=yes")
+			return
+		}
+		if len(b) == 0 || len(b) > 4096 || strings.ContainsFunc(string(b), func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			h.fail("request grammar", "term: the body must be one line of 1 to 4096 bytes without control characters")
+			rerr("syntax", "not one command line")
+			return
+		}
+		h.prompts = append(h.prompts, "term: "+string(b))
+		reply(fmt.Sprintf("ok %d", id)) // the user ran it
+	case "cmd":
+		if len(args) != 1 {
+			h.fail("request grammar", "cmd takes NAME")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if !cmdAllowed[args[0]] {
+			h.fail("verbs", fmt.Sprintf("cmd %s is not a command an extension may run (section 8a)", args[0]))
+			rerr("refused", "not a command an extension may run")
+			return
+		}
+		h.cmds = append(h.cmds, args[0])
+		reply(fmt.Sprintf("ok %d", id))
 	case "cancel":
 		reply(fmt.Sprintf("ok %d", id))
 	default:
@@ -733,6 +879,19 @@ func (h *host) afterEdit(d *doc, recs ...edit) {
 		h.write(fmt.Sprintf("0 cursor %d %d %d\n", d.id, line, col))
 	}
 }
+
+// cmdAllowed lists the commands of section 8a.
+var cmdAllowed = func() map[string]bool {
+	m := map[string]bool{}
+	for _, n := range strings.Fields(`undo redo cut copy paste select_all select_line select_next duplicate_line
+		delete_line move_line_up move_line_down indent outdent toggle_comment newline_below newline_above
+		find replace find_next find_prev find_in_files goto_line quick_open command_palette next_tab prev_tab
+		reveal_file focus_explorer toggle_sidebar toggle_agents toggle_terminal new_terminal clear_terminal
+		toggle_word_wrap toggle_whitespace toggle_line_numbers zoom_in zoom_out zoom_reset`) {
+		m[n] = true
+	}
+	return m
+}()
 
 func langOf(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -900,6 +1059,16 @@ func main() {
 		}
 	}
 	h.ok("every command handled on four documents without the program exiting")
+	for _, c := range h.rtcmds {
+		before := len(h.requests)
+		h.write(fmt.Sprintf("0 run %s 1\n", c))
+		h.serve(700 * time.Millisecond)
+		h.note("runtime command %s: %v", c, h.requests[before:])
+		if h.cmdExited() {
+			h.fail("commands", c+": the program exited while handling the command")
+			report(h)
+		}
+	}
 
 	// 2b. the user types into main.go: the edits stream for subscribers; then the pointer rests
 	if h.sub("edits") || h.sub("hover") {
@@ -987,7 +1156,8 @@ func main() {
 	// 7. bye: it leaves within a second
 	h.stopAndWait("exits on bye", func() { h.write("0 bye\n") })
 
-	// 8. restart, then end of file on its input
+	// 8. restart, then end of file on its input (runtime commands do not survive a stop)
+	h.rtcmds = nil
 	if err := h.start(); err == nil {
 		if h.expectHello() {
 			h.write("0 ready " + h.project + "\n")
@@ -1020,6 +1190,18 @@ func report(h *host) {
 	}
 	if h.marks > 0 {
 		fmt.Printf("; %d diagnostics", h.marks)
+	}
+	if len(h.rtcmds) > 0 {
+		fmt.Printf("; registered %v", h.rtcmds)
+	}
+	if len(h.options) > 0 {
+		fmt.Printf("; options %q", h.options)
+	}
+	if len(h.prompts) > 0 {
+		fmt.Printf("; prompts %q", h.prompts)
+	}
+	if len(h.cmds) > 0 {
+		fmt.Printf("; cmd %v", h.cmds)
 	}
 	fmt.Println()
 	if len(h.fails) > 0 {
