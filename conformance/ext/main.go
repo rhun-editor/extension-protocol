@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,9 @@ type manifest struct {
 	runtime, script, args, on   string
 	commands                    []string // NAME.key
 	cmdValues                   map[string]string
+	description                 string
+	settings                    []string                     // keys, in manifest order
+	settingFields               map[string]map[string]string // key -> field -> value
 	needs                       map[string]string
 	subscribe                   map[string]string
 }
@@ -88,7 +92,22 @@ func readManifest(dir string) (*manifest, error) {
 				m.args = v
 			case k == "on":
 				m.on = v
+			case k == "description":
+				m.description = v
 			}
+		case "settings":
+			key, field, ok := strings.Cut(k, ".")
+			if !ok {
+				key, field = k, ""
+			}
+			if m.settingFields == nil {
+				m.settingFields = map[string]map[string]string{}
+			}
+			if m.settingFields[key] == nil {
+				m.settingFields[key] = map[string]string{}
+				m.settings = append(m.settings, key)
+			}
+			m.settingFields[key][field] = v
 		case "commands":
 			m.commands = append(m.commands, k)
 			if m.cmdValues == nil {
@@ -981,6 +1000,33 @@ func (h *host) catchUp() {
 	}
 }
 
+// sendSettings sends each of the manifest's settings with its default, as rhun does after ready.
+func (h *host) sendSettings() {
+	for _, key := range h.m.settings {
+		f := h.m.settingFields[key]
+		v := f["default"]
+		switch f["type"] {
+		case "bool":
+			if v != "yes" {
+				v = "no"
+			}
+		case "int":
+			if _, err := strconv.Atoi(v); err != nil {
+				v = f["min"]
+				if v == "" {
+					v = "0"
+				}
+			}
+		case "choice":
+			opts := strings.Fields(f["options"])
+			if len(opts) > 0 && !slices.Contains(opts, v) {
+				v = opts[0]
+			}
+		}
+		h.write(fmt.Sprintf("0 setting %s %s\n", key, v))
+	}
+}
+
 // expectHello waits for the first line.
 func (h *host) expectHello() bool {
 	m, err := h.readMessage(5 * time.Second)
@@ -1107,6 +1153,30 @@ func main() {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
 		}
 	}
+	if len(m.description) > 200 {
+		bad(fmt.Sprintf("description is %d bytes (200 at most)", len(m.description)))
+	}
+	for _, key := range m.settings {
+		f := m.settingFields[key]
+		if !regexp.MustCompile(`^[a-z0-9_]{1,40}$`).MatchString(key) {
+			bad(fmt.Sprintf("[settings] key %q is not [a-z0-9_]{1,40}", key))
+		}
+		for field := range f {
+			switch field {
+			case "type", "default", "title", "description", "min", "max", "options":
+			default:
+				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options)", key, field))
+			}
+		}
+		switch f["type"] {
+		case "", "string", "bool", "int", "choice":
+		default:
+			bad(fmt.Sprintf("[settings] %s.type = %s is not string, bool, int or choice", key, f["type"]))
+		}
+		if f["type"] == "choice" && strings.TrimSpace(f["options"]) == "" {
+			bad(fmt.Sprintf("[settings] %s is a choice without options", key))
+		}
+	}
 	if schemaFails == 0 {
 		h.ok("manifest follows v1.json")
 	}
@@ -1135,6 +1205,7 @@ func main() {
 		report(h)
 	}
 	h.write("0 ready " + h.project + "\n")
+	h.sendSettings()
 	h.catchUp()
 	h.serve(300 * time.Millisecond)
 	if len(h.fails) == 0 {
@@ -1258,6 +1329,7 @@ func main() {
 	if err := h.start(); err == nil {
 		if h.expectHello() {
 			h.write("0 ready " + h.project + "\n")
+			h.sendSettings()
 			h.catchUp()
 			h.serve(200 * time.Millisecond)
 			h.ok("restarts cleanly")

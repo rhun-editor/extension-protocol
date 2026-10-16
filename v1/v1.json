@@ -2,9 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rhun.app/extensions/v1/v1.json",
   "title": "rhun extension manifest (extension.ini), protocol version 1",
-  "description": "The manifest is an INI file (UTF-8, key = value, # comments, unknown keys ignored). This schema describes it as the object it maps to: top-level keys are properties of the root; dotted keys such as run.linux-x86_64 become the 'run' object with the part after the dot as the key; each [section] is an object of the same name. Two rules the schema cannot state: 'name' must equal the folder's name and 'owner' the parent folder's name, and a target needs either a 'run' entry for it or 'runtime' with 'run'. Section 2 of v1.md says what each key means.",
+  "description": "The manifest is an INI file (UTF-8, key = value, # comments, unknown keys ignored). This schema describes it as the object it maps to: top-level keys are properties of the root; dotted keys such as run.linux-x86_64 become the 'run' object with the part after the dot as the key; each [section] is an object of the same name ([settings] keeps its dotted KEY.FIELD keys as property names). Two rules the schema cannot state: 'name' must equal the folder's name and 'owner' the parent folder's name, and a target needs either a 'run' entry for it or 'runtime' with 'run'. Section 2 of v1.md says what each key means.",
   "type": "object",
-  "required": ["name", "owner", "title", "version", "protocol"],
+  "required": [
+    "name",
+    "owner",
+    "title",
+    "version",
+    "protocol"
+  ],
   "properties": {
     "name": {
       "type": "string",
@@ -16,41 +22,91 @@
       "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*$",
       "description": "the GitHub owner, equal to the parent folder"
     },
-    "title": { "type": "string", "minLength": 1, "maxLength": 80, "description": "shown in Settings and after command titles" },
-    "version": { "type": "string", "minLength": 1, "description": "the extension's version, as released" },
-    "protocol": { "const": 1, "description": "the protocol version this extension speaks" },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "shown in Settings and after command titles"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "the extension's version, as released"
+    },
+    "protocol": {
+      "const": 1,
+      "description": "the protocol version this extension speaks"
+    },
     "run": {
       "type": "object",
       "description": "the program per target, relative to the extension folder (from the dotted keys run.TARGET); or, with 'runtime', the single key 'run' at the top level is the script",
-      "propertyNames": { "enum": ["linux-x86_64", "macos-arm64", "windows-x64"] },
-      "additionalProperties": { "type": "string", "minLength": 1 }
+      "propertyNames": {
+        "enum": [
+          "linux-x86_64",
+          "macos-arm64",
+          "windows-x64"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
     },
-    "runtime": { "type": "string", "minLength": 1, "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)" },
-    "requires": { "type": "string", "description": "shown when the runtime is missing or too old; not checked by rhun 0.18.0" },
-    "args": { "type": "string", "description": "extra arguments for the program, space separated" },
+    "runtime": {
+      "type": "string",
+      "minLength": 1,
+      "description": "a program found on PATH that runs the script named by 'run' (python3, node, \u2026)"
+    },
+    "requires": {
+      "type": "string",
+      "description": "shown when the runtime is missing or too old; not checked by rhun 0.18.0"
+    },
+    "args": {
+      "type": "string",
+      "description": "extra arguments for the program, space separated"
+    },
     "on": {
       "type": "string",
       "pattern": "^\\s*((startup|command|project|lang:[^\\s]+|open:[^\\s]+)(\\s+|$))+$",
-      "default": "command",
-      "description": "when the extension starts: startup, command, project, lang:LANG, open:PATTERN; several, space separated; a manifest command always starts it"
+      "default": "startup",
+      "description": "when the extension starts: startup (the default: an installed extension runs), command, project, lang:LANG, open:PATTERN; several, space separated; a manifest command always starts it"
     },
     "commands": {
       "type": "object",
       "description": "[commands]: key = Title | default keys (space separated, each with a modifier; '|' and keys optional)",
-      "propertyNames": { "pattern": "^[a-z0-9_]{1,40}$" },
-      "additionalProperties": { "type": "string", "pattern": "^[^|]+(\\|.*)?$" }
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[^|]+(\\|.*)?$"
+      }
     },
     "subscribe": {
       "type": "object",
       "description": "[subscribe]: which events to send, with name patterns ('*' all, '*.go' a suffix, 'Makefile' an exact name, 'no' none); a document is reported only when 'opened' names it",
       "properties": {
-        "opened": { "$ref": "#/$defs/patterns" },
-        "saved": { "$ref": "#/$defs/patterns" },
-        "changed": { "$ref": "#/$defs/patterns" },
-        "cursor": { "$ref": "#/$defs/patterns" },
-        "selection": { "$ref": "#/$defs/patterns" },
-        "edits": { "$ref": "#/$defs/patterns" },
-        "hover": { "$ref": "#/$defs/patterns" }
+        "opened": {
+          "$ref": "#/$defs/patterns"
+        },
+        "saved": {
+          "$ref": "#/$defs/patterns"
+        },
+        "changed": {
+          "$ref": "#/$defs/patterns"
+        },
+        "cursor": {
+          "$ref": "#/$defs/patterns"
+        },
+        "selection": {
+          "$ref": "#/$defs/patterns"
+        },
+        "edits": {
+          "$ref": "#/$defs/patterns"
+        },
+        "hover": {
+          "$ref": "#/$defs/patterns"
+        }
       },
       "additionalProperties": false
     },
@@ -58,14 +114,64 @@
       "type": "object",
       "description": "[needs]: the capabilities (section 5); a request without its capability is refused with 'needs'",
       "properties": {
-        "documents": { "enum": ["none", "read", "write"], "default": "none" },
-        "project": { "enum": ["none", "read", "write"], "default": "none" },
-        "home": { "enum": ["none", "read"], "default": "none" },
-        "network": { "enum": ["no", "yes"], "default": "no" },
-        "terminal": { "enum": ["no", "yes"], "default": "no" },
-        "run": { "type": "string", "description": "programs the extension may start, by name, space separated" }
+        "documents": {
+          "enum": [
+            "none",
+            "read",
+            "write"
+          ],
+          "default": "none"
+        },
+        "project": {
+          "enum": [
+            "none",
+            "read",
+            "write"
+          ],
+          "default": "none"
+        },
+        "home": {
+          "enum": [
+            "none",
+            "read"
+          ],
+          "default": "none"
+        },
+        "network": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no"
+        },
+        "terminal": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no"
+        },
+        "run": {
+          "type": "string",
+          "description": "programs the extension may start, by name, space separated"
+        }
       },
       "additionalProperties": false
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "one line shown on the Extensions page"
+    },
+    "settings": {
+      "type": "object",
+      "description": "[settings]: the extension's own settings as KEY.FIELD = VALUE; shown on its page, sent as setting events (section 6d)",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(type|default|title|description|min|max|options)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
     }
   },
   "$defs": {

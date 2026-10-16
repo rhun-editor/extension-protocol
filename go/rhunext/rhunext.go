@@ -34,7 +34,7 @@ type Range struct{ Start, End Pos }
 
 // Event is anything rhun tells the extension without expecting an answer.
 type Event struct {
-	Name string   // ready, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover
+	Name string   // ready, setting, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover
 	Args []string // the fields after the name; the last may contain spaces
 	Body []byte   // the edits event's records (section 6a)
 }
@@ -323,6 +323,13 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			if len(ev.Args) > 1 {
 				ev.Args = []string{strings.Join(ev.Args, " ")}
 			}
+		case "setting":
+			if len(ev.Args) > 2 {
+				ev.Args = append(ev.Args[:1], strings.Join(ev.Args[1:], " "))
+			}
+			if len(ev.Args) == 1 {
+				ev.Args = append(ev.Args, "")
+			}
 		}
 		return ev, nil
 	}
@@ -554,6 +561,67 @@ func Busy(err error) bool {
 
 func oneLine(s string) string {
 	return strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+}
+
+// ParseSetting reads a setting event: one of the extension's own settings ([settings] in its
+// manifest) and its value. Each arrives after Ready and again whenever the user changes it.
+func ParseSetting(ev Event) (key, value string, ok bool) {
+	if ev.Name != "setting" || len(ev.Args) < 1 {
+		return "", "", false
+	}
+	if len(ev.Args) > 1 {
+		value = ev.Args[1]
+	}
+	return ev.Args[0], value, true
+}
+
+// Settings keeps an extension's own settings as they arrive: pass every event to Update.
+type Settings struct {
+	mu     sync.Mutex
+	values map[string]string
+}
+
+// Update takes a setting event (anything else is ignored) and reports whether it was one.
+func (s *Settings) Update(ev Event) bool {
+	key, value, ok := ParseSetting(ev)
+	if !ok {
+		return false
+	}
+	s.mu.Lock()
+	if s.values == nil {
+		s.values = map[string]string{}
+	}
+	s.values[key] = value
+	s.mu.Unlock()
+	return true
+}
+
+// String is a setting's value, or def before it has arrived.
+func (s *Settings) String(key, def string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if v, ok := s.values[key]; ok {
+		return v
+	}
+	return def
+}
+
+// Bool is a bool setting ("yes" or "no").
+func (s *Settings) Bool(key string, def bool) bool {
+	d := "no"
+	if def {
+		d = "yes"
+	}
+	return s.String(key, d) == "yes"
+}
+
+// Int is an int setting.
+func (s *Settings) Int(key string, def int) int {
+	n, err := strconv.Atoi(s.String(key, strconv.Itoa(def)))
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // ParseDoc reads the document id of an event whose first field is one: active, saved,

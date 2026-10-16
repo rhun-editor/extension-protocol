@@ -67,7 +67,7 @@ code          = "syntax" / "unknown" / "needs" / "nodoc" / "nofile" / "readonly"
 ; ---- events from rhun
 event         = "0" SP ( e-ready / e-opened / e-active / e-saved / e-changed / e-cursor
                        / e-selection / e-closed / e-project / e-run / e-bye
-                       / e-edits / e-resync / e-hover )
+                       / e-edits / e-resync / e-hover / e-setting )
 e-ready       = "ready" SP rest                   ; the project folder, or "-"
 e-opened      = "opened" SP doc SP version SP lang SP rest   ; rest: the path, or "-"
 lang          = "-" / field                       ; a grammar name with spaces as "_"
@@ -83,3 +83,4 @@ e-bye         = "bye"
 e-edits       = "edits" SP doc SP version SP len     ; a body of edit-records follows
 e-resync      = "resync" SP doc SP version           ; deltas were lost: fetch text
 e-hover       = "hover" SP doc SP pos                ; the pointer rests there
+e-setting     = "setting" SP field [ SP rest ]       ; one of its own settings and its value
