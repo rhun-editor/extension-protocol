@@ -62,8 +62,9 @@ typedef struct {
 /* what rhun asks for (12b, 12c), an rx_ask: kind is typed, trigger (ch is the character), invoked,
  * incomplete or update */
 typedef struct {
+    int64_t id;                 /* rhun's id for it: a "cancel" event names it */
     rx_doc doc;
-    int64_t version;
+    int64_t version;            /* positions in the answer are in the document at this version */
     rx_pos at;
     const char *kind;
     const char *ch;
@@ -88,7 +89,7 @@ int rx_has(rx_ext *ext, const char *feature);
 
 /* Requests. They block until rhun answers: 0 (or an id, a version) on ok, -1 on an error reply,
  * whose "code text" rx_error then says (code: syntax unknown needs nodoc nofile readonly stale
- * badpos toobig busy cancelled refused noview). */
+ * badpos toobig busy cancelled refused noview), for the log rather than for the user. */
 const char *rx_error(rx_ext *ext);
 int rx_toast(rx_ext *ext, const char *text);
 int rx_status(rx_ext *ext, const char *text);   /* "" clears it */
@@ -127,9 +128,13 @@ void rx_label(rx_buf *p, double x, double y, const char *size, const char *align
 void rx_clip(rx_buf *p, double x, double y, double w, double h);
 void rx_unclip(rx_buf *p);
 
-/* Completion lists (12b): add items, then rx_list_finish writes the body. kind is text method
- * function field variable class struct interface module property enum keyword snippet constant
- * value file folder. insert NULL is the label; detail and doc may be NULL. */
+/* Completion lists (12b): start from a zeroed rx_list (rx_list l = {0}; in C++ rx_list l{};), add
+ * items, then rx_list_finish writes the body; with no items it is the empty list. Set l.more = 1
+ * when you cut the list short: typing in the word then asks again (it is set for you past 4096
+ * items or 1 MB). Give every candidate for the word: rhun filters and orders by what is typed.
+ * kind is text method function field variable class struct interface module property enum
+ * keyword snippet constant value file folder. insert NULL is the label; detail and doc may be
+ * NULL. */
 typedef struct { rx_buf items; int n; int more; } rx_list;
 void rx_list_item(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
                   const char *detail, const char *doc);
@@ -142,6 +147,9 @@ void rx_signature_answer(rx_buf *out, const char *signature, int from, int to, c
 
 /* the start of the word (letters, digits, _, non-ASCII) that ends at `at` in text */
 rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at);
+/* the rest of an event's line after its first n fields: rx_event_tail(ev, 3) is the path of
+ * "opened DOC VERSION LANG PATH" (a path may hold spaces, which argv splits) */
+const char *rx_event_tail(const rx_event *ev, int n);
 
 #ifdef __cplusplus
 }
@@ -700,6 +708,15 @@ rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at) {
     return p;
 }
 
+const char *rx_event_tail(const rx_event *ev, int n) {
+    const char *p = ev->rest;
+    for (int i = 0; i < n && p; i++) {
+        p = strchr(p, ' ');
+        if (p) p++;
+    }
+    return p ? p : "";
+}
+
 /* ---- the loop */
 
 static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n) {
@@ -708,6 +725,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
     rx_buf body = {NULL, 0, 0};
     if (n >= 8) {
         rx_ask req;
+        req.id = atoll(f[0]);
         req.doc = atoll(f[2]);
         req.version = atoll(f[3]);
         req.at.line = atoi(f[4]);

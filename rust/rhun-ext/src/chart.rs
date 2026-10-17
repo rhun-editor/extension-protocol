@@ -233,8 +233,8 @@ impl Chart {
         let step = nice_step((hi - lo) / want as f64);
         let lo = (lo / step).floor() * step;
         let hi = (hi / step).ceil() * step;
-        let n = ((hi - lo) / step).round().clamp(1.0, 100.0) as usize;
-        let ticks: Vec<f64> = (0..=n).map(|k| lo + k as f64 * step).collect();
+        let steps = ((hi - lo) / step).round().clamp(1.0, 100.0) as usize;
+        let ticks: Vec<f64> = (0..=steps).map(|k| lo + k as f64 * step).collect();
         let tick_w = ticks.iter().map(|t| m.width(TextSize::Small, &compact(*t))).fold(0.0, f32::max);
         let x0 = PAD + tick_w + 8.0;
         let x1 = w - PAD;
@@ -278,7 +278,13 @@ impl Chart {
                         let x = x0 + slot * i as f32 + (slot - group) / 2.0 + bw * s as f32;
                         let (ya, yb) = (y_of(v.max(0.0)), y_of(v.min(0.0)));
                         let gap = if bw > 6.0 { 1.0 } else { 0.0 };
-                        p.rect(x + gap, ya, (bw - 2.0 * gap).max(0.5), (yb - ya).max(0.0), self.color(s));
+                        // one series: a color per bar, as a pie's wedges have
+                        let c = if self.series.len() == 1 && self.series[0].color.is_none() {
+                            Color::Series((i % 8) as u8 + 1)
+                        } else {
+                            self.color(s)
+                        };
+                        p.rect(x + gap, ya, (bw - 2.0 * gap).max(0.5), (yb - ya).max(0.0), c);
                         d.areas.push((Area::Rect(x, top, bw, bottom - top), Hit { series: s, index: i }));
                     }
                 }
@@ -479,8 +485,8 @@ mod tests {
         let mut c = Chart::bar("t", &["a", "b", "c"], vec![Series::new("s", vec![1.0, 5.0, 3.0])]);
         let d = c.draw(400.0, 300.0, &m);
         assert!(d.hovered.is_none());
-        // the second bar (the second rect in the series color) is item 1
-        let bar: Vec<f32> = d.picture.body().lines().filter(|l| l.starts_with("rect ") && l.ends_with(" c1")).nth(1).unwrap()
+        // the second bar (one series: the bars take c1, c2, …) is item 1
+        let bar: Vec<f32> = d.picture.body().lines().find(|l| l.starts_with("rect ") && l.ends_with(" c2")).unwrap()
             .split(' ').skip(1).take(4).map(|v| v.parse().unwrap()).collect();
         let (x, y) = (bar[0] + bar[2] / 2.0, bar[1] + bar[3] / 2.0);
         assert_eq!(d.hit(x, y), Some(Hit { series: 0, index: 1 }));
@@ -517,6 +523,13 @@ mod tests {
         let c = Chart::bar("", &["a", "b"], vec![Series::new("s", vec![-2.0, 4.0])]);
         let body = c.draw(300.0, 200.0, &m).picture.body().to_string();
         assert!(body.contains("-2"));
+    }
+
+    #[test]
+    fn as_many_columns_as_items() {
+        let c = Chart::bar("", &["a", "b"], vec![Series::new("s", vec![120000.0, 3.0])]);
+        let body = c.draw(800.0, 600.0, &Metrics::default()).picture.body().to_string();
+        assert_eq!(body.lines().filter(|l| l.starts_with("text") && l.contains(" center ")).count(), 2);
     }
 
     #[test]
