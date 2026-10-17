@@ -26,12 +26,15 @@
 //! Requests ([`Ext::toast`], [`Ext::insert`], [`Ext::view`], …) block until rhun answers; events
 //! that arrive meanwhile wait and are delivered afterwards, in order. Features (section 12 of the
 //! spec) are asked for by name in [`run`]: [`Feature::Views`] for pictures in tabs of their own,
-//! [`Feature::Complete`] and [`Feature::Signature`] for language support.
+//! [`Feature::Complete`], [`Feature::Signature`], [`Feature::Definition`], [`Feature::References`],
+//! [`Feature::Symbols`], [`Feature::Actions`], [`Feature::Rename`] and [`Feature::Format`] for
+//! language support (the [`Handler`] methods of the same names answer them).
 
 #![allow(clippy::needless_doctest_main)]
 
 pub mod chart;
 pub mod complete;
+pub mod lang;
 pub mod picture;
 
 use std::collections::HashMap;
@@ -42,6 +45,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub use complete::{CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest};
+pub use lang::{
+    ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest, Symbol, SymbolKind, Target,
+    TextEdit, WorkspaceEdit,
+};
 pub use picture::{Color, Picture};
 
 #[cfg(test)]
@@ -97,6 +104,18 @@ pub enum Feature {
     Complete,
     /// Signature help: [`Handler::signature`].
     Signature,
+    /// Go to definition: [`Handler::definition`].
+    Definition,
+    /// Find all references: [`Handler::references`].
+    References,
+    /// The symbols of a document: [`Handler::symbols`].
+    Symbols,
+    /// Code actions: [`Handler::actions`] and [`Handler::action`].
+    Actions,
+    /// Rename a symbol: [`Handler::rename`].
+    Rename,
+    /// Format a document: [`Handler::format`].
+    Format,
 }
 
 impl Feature {
@@ -105,6 +124,12 @@ impl Feature {
             Feature::Views => "views",
             Feature::Complete => "complete",
             Feature::Signature => "signature",
+            Feature::Definition => "definition",
+            Feature::References => "references",
+            Feature::Symbols => "symbols",
+            Feature::Actions => "actions",
+            Feature::Rename => "rename",
+            Feature::Format => "format",
         }
     }
 }
@@ -116,7 +141,7 @@ pub struct Event {
     pub fields: Vec<String>,
     /// The rest of the line after the name, for events whose last field may hold spaces (paths).
     pub rest: String,
-    /// The body, for `edits`.
+    /// The body, for `edits` and `action`.
     pub body: Vec<u8>,
 }
 
@@ -385,6 +410,36 @@ pub trait Handler: Send {
     fn signature(&mut self, _ext: &Ext, _req: &SignatureRequest) -> Option<SignatureHelp> {
         None
     }
+    /// rhun asks where the symbol at the cursor is defined (feature `definition`); several
+    /// locations make a list, none says there is none.
+    fn definition(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// rhun asks for the references to the symbol at the cursor (feature `references`).
+    fn references(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// rhun asks for the document's symbols, in document order (feature `symbols`).
+    fn symbols(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Symbol> {
+        Vec::new()
+    }
+    /// rhun asks for code actions at the selection (feature `actions`).
+    fn actions(&mut self, _ext: &Ext, _req: &ActionsRequest) -> Vec<CodeAction> {
+        Vec::new()
+    }
+    /// The user chose a code action that has data: its edit (if any) is applied, this is the
+    /// rest (run a command, ask the language server).
+    fn action(&mut self, _ext: &Ext, _data: &[u8]) {}
+    /// rhun asks to rename the symbol at the cursor (feature `rename`): the edits, or why not
+    /// (shown to the user).
+    fn rename(&mut self, _ext: &Ext, _req: &RenameRequest) -> Result<WorkspaceEdit, String> {
+        Err("cannot rename here".to_string())
+    }
+    /// rhun asks to format a document (feature `format`): the edits for it (usually one group);
+    /// an empty one changes nothing.
+    fn format(&mut self, _ext: &Ext, _req: &FormatRequest) -> WorkspaceEdit {
+        WorkspaceEdit::default()
+    }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
 }
@@ -531,6 +586,15 @@ impl Ext {
     pub fn insert(&self, doc: Doc, version: i64, text: &str) -> Result<i64, Error> {
         let rep = self.request(&format!("insert {doc} {version}"), Some(text.as_bytes()))?;
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Applies a workspace edit (section 12g) across documents and files, as the language
+    /// features' answers do: rhun checks it whole and changes nothing on any error (`stale`,
+    /// `badpos`, `nodoc`, `nofile`, …). Needs `documents = write`. For a language server's
+    /// `workspace/applyEdit`.
+    pub fn apply(&self, edit: &WorkspaceEdit) -> Result<(), Error> {
+        let body = edit.encode().map_err(|text| Error { code: "toobig".into(), text })?;
+        self.request("apply", Some(&body)).map(|_| ())
     }
 
     /// Selects a range (the cursor at its end).
@@ -687,7 +751,7 @@ impl Ext {
                     let name = fields.get(1).cloned().unwrap_or_default();
                     let rest = text.splitn(3, ' ').nth(2).unwrap_or("").to_string();
                     let mut ev = Event { name, fields: fields[2.min(fields.len())..].to_vec(), rest, body: Vec::new() };
-                    if ev.name == "edits" {
+                    if ev.name == "edits" || ev.name == "action" {
                         let len: usize = ev.fields.last().and_then(|v| v.parse().ok()).unwrap_or(0);
                         ev.body = vec![0; len];
                         if input.read_exact(&mut ev.body).is_err() {
@@ -750,6 +814,7 @@ impl Ext {
                                 h.view(self, view, vev);
                             }
                         }
+                        "action" => h.action(self, &ev.body),
                         "bye" => {
                             h.bye(self);
                             break;
@@ -758,14 +823,39 @@ impl Ext {
                     }
                 }
                 Msg::HostRequest { id, verb, fields } => {
-                    let body = match verb.as_str() {
-                        "complete" => CompleteRequest::parse(&fields).map(|r| h.complete(self, &r).encode()),
+                    let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
+                        "complete" => CompleteRequest::parse(&fields).map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
                         "signature" => SignatureRequest::parse(&fields)
-                            .map(|r| h.signature(self, &r).map(|s| s.encode()).unwrap_or_default()),
+                            .map(|r| Ok(h.signature(self, &r).map(|s| s.encode()).unwrap_or_default().into_bytes())),
+                        "definition" => PosRequest::parse(&fields).map(|r| Ok(lang::encode_locations(&h.definition(self, &r)))),
+                        "references" => PosRequest::parse(&fields).map(|r| Ok(lang::encode_locations(&h.references(self, &r)))),
+                        "symbols" => PosRequest::parse(&fields).map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
+                        "actions" => ActionsRequest::parse(&fields).map(|r| Ok(lang::encode_actions(&h.actions(self, &r)))),
+                        "rename" => RenameRequest::parse(&fields).map(|r| match h.rename(self, &r) {
+                            Ok(e) => e.encode().map_err(|why| ("toobig", why)),
+                            Err(why) => Err(("refused", why)),
+                        }),
+                        "format" => {
+                            FormatRequest::parse(&fields).map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why)))
+                        }
                         _ => None,
                     };
                     let _ = match body {
-                        Some(b) => self.write(&format!("ok {id} {}", b.len()), b.as_bytes()),
+                        Some(Ok(b)) => self.write(&format!("ok {id} {}", b.len()), &b),
+                        Some(Err((code, why))) => {
+                            // one line, at most 1000 bytes: rhun shows a sentence
+                            let mut why: String =
+                                why.trim().chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+                            if why.len() > 1000 {
+                                let mut cut = 1000;
+                                while !why.is_char_boundary(cut) {
+                                    cut -= 1;
+                                }
+                                why.truncate(cut);
+                            }
+                            let line = if why.is_empty() { format!("error {id} {code}") } else { format!("error {id} {code} {why}") };
+                            self.write(&line, &[])
+                        }
                         None => self.write(&format!("error {id} unknown no such request"), &[]),
                     };
                 }

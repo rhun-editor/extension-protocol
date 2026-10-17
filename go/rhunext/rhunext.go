@@ -34,9 +34,9 @@ type Range struct{ Start, End Pos }
 
 // Event is anything rhun tells the extension without expecting an answer.
 type Event struct {
-	Name string   // ready, setting, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover
+	Name string   // ready, setting, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover, action
 	Args []string // the fields after the name; the last may contain spaces
-	Body []byte   // the edits event's records (section 6a)
+	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f)
 }
 
 // Edit is one record of an edits event: at byte offset Start, Del bytes were deleted and Ins
@@ -172,7 +172,8 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 }
 
 // RunWith is Run asking for features (section 12 of the protocol): FeatureViews, FeatureComplete,
-// FeatureSignature. Those rhun agrees to are in Ext.Has before Ready is called.
+// FeatureSignature, FeatureDefinition, FeatureReferences, FeatureSymbols, FeatureActions,
+// FeatureRename, FeatureFormat. Those rhun agrees to are in Ext.Has before Ready is called.
 func RunWith(features []string, h Handler) error {
 	return RunOnWith(os.Stdin, os.Stdout, os.Stderr, features, h)
 }
@@ -265,6 +266,12 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				}
 			}
 			h.Event(ext, ev)
+		case "action":
+			if a, ok := h.(ActionProvider); ok {
+				a.Action(ext, ev.Body)
+				continue
+			}
+			h.Event(ext, ev)
 		default:
 			h.Event(ext, ev)
 		}
@@ -348,10 +355,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			return nil, nil
 		}
 		ev := &Event{Name: fields[1], Args: fields[2:]}
+		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
+		lenAt := -1
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
-			n, err := strconv.Atoi(ev.Args[2])
+			lenAt = 2
+		} else if ev.Name == "action" && len(ev.Args) >= 1 {
+			lenAt = 0
+		}
+		if lenAt >= 0 {
+			n, err := strconv.Atoi(ev.Args[lenAt])
 			if err != nil || n < 0 || n > 1<<30 {
-				return nil, fmt.Errorf("an edits length %q", ev.Args[2])
+				return nil, fmt.Errorf("an %s length %q", ev.Name, ev.Args[lenAt])
 			}
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {

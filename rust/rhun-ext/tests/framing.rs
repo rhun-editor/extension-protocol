@@ -189,3 +189,80 @@ fn a_request_after_rhun_went_away_fails_at_once() {
     done.join().unwrap().unwrap();
     assert_eq!(got.lock().unwrap().as_deref(), Some("Err(\"closed\")"));
 }
+
+#[test]
+fn language_requests_and_the_action_event() {
+    use rhun_ext::{
+        ActionsRequest, CodeAction, FormatRequest, Location, PosRequest, RenameRequest, Symbol, SymbolKind, Target,
+        TextEdit, WorkspaceEdit,
+    };
+    struct Lang(Arc<Mutex<Vec<String>>>);
+    impl Handler for Lang {
+        fn definition(&mut self, _ext: &Ext, req: &PosRequest) -> Vec<Location> {
+            vec![Location::new(Target::Doc(req.doc), Range::new(req.at, req.at)).text("x")]
+        }
+        fn symbols(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Symbol> {
+            vec![Symbol::new(Range::default(), SymbolKind::Function, 0, "main")]
+        }
+        fn actions(&mut self, _ext: &Ext, _req: &ActionsRequest) -> Vec<CodeAction> {
+            vec![CodeAction::new("source", "Go").data(b"a b\nc")]
+        }
+        fn action(&mut self, ext: &Ext, data: &[u8]) {
+            self.0.lock().unwrap().push(String::from_utf8_lossy(data).into_owned());
+            let edit = WorkspaceEdit::new().file("/p/a.rs", None, vec![TextEdit::new(Range::default(), "x")]);
+            let res = ext.apply(&edit).map_err(|e| e.code);
+            self.0.lock().unwrap().push(format!("{res:?}"));
+        }
+        fn rename(&mut self, _ext: &Ext, req: &RenameRequest) -> Result<WorkspaceEdit, String> {
+            if req.name == "bad" {
+                return Err("not a name\nhere".into());
+            }
+            Ok(WorkspaceEdit::new().doc(req.doc, req.version, vec![TextEdit::new(Range::new(req.at, req.at), &req.name)]))
+        }
+        fn format(&mut self, _ext: &Ext, req: &FormatRequest) -> WorkspaceEdit {
+            if !req.spaces {
+                return WorkspaceEdit::new();
+            }
+            WorkspaceEdit::new().doc(req.doc, req.version, vec![TextEdit::new(Range::default(), "")])
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let lang = Lang(seen.clone());
+    let feats = [Feature::Definition, Feature::Symbols, Feature::Actions, Feature::Rename, Feature::Format];
+    let done =
+        thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &feats, lang));
+    fn answer(host: &mut Host, id: u32, body: &str) {
+        assert_eq!(host.line(), format!("ok {id} {}", body.len()));
+        assert_eq!(host.body(body.len()), body);
+    }
+    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    assert_eq!(host.line(), "hello 1 definition symbols actions rename format");
+    host.send("0 features definition symbols actions rename format\n0 ready -\n");
+
+    host.send("1 definition 4 9 2 3 invoked -\n");
+    answer(&mut host, 1, "1\n2 3 2 3 2 1\n#4x");
+    host.send("2 references 4 9 2 3 invoked -\n");
+    answer(&mut host, 2, "0\n");
+    host.send("3 symbols 4 9 2 3 invoked -\n");
+    answer(&mut host, 3, "1\n0 0 0 0 function 0 4 0\nmain");
+    host.send("4 actions 4 9 1 1 1 1\n");
+    answer(&mut host, 4, "1\nsource 2 0 5\nGoa b\nc");
+    host.send("0 action 5\na b\nc");
+    let edit = "1\n7 - 1\n/p/a.rs0 0 0 0 1\nx";
+    assert_eq!(host.line(), format!("1 apply {}", edit.len()));
+    assert_eq!(host.body(edit.len()), edit);
+    host.send("error 1 stale a document changed\n");
+    host.send("5 rename 4 9 2 3 invoked y\n");
+    answer(&mut host, 5, "1\n2 9 1\n#42 3 2 3 1\ny");
+    host.send("6 rename 4 9 2 3 invoked bad\n");
+    assert_eq!(host.line(), "error 6 refused not a name here");
+    host.send("7 format 4 9 4 no\n");
+    answer(&mut host, 7, "0\n");
+    host.send("8 rename 4 9 2 3 invoked\n");
+    assert!(host.line().starts_with("error 8 unknown"));
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec!["a b\nc".to_string(), "Err(\"stale\")".to_string()]);
+}

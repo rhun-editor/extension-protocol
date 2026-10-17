@@ -2,3 +2,4 @@ bin/
 dist/
 rust/rhun-ext/target/
 rust/rhun-ext/Cargo.lock
+/ext

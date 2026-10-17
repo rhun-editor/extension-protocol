@@ -161,7 +161,8 @@ type host struct {
 	requests []string // what the extension sent, for -v and the command report
 	fails    []string
 	oks      []string
-	errOnce  int64 // reply error to this many requests (tests the extension copes)
+	warns    []string // odd but allowed: reported, not failed
+	errOnce  int64    // reply error to this many requests (tests the extension copes)
 	status   string
 	toasts   []string
 	hoverAt  string   // "DOC LINE COL" of the hover event we sent, "" when none
@@ -198,6 +199,10 @@ func (h *host) ok(name string) { h.oks = append(h.oks, name); fmt.Println("ok  "
 func (h *host) fail(name, why string) {
 	h.fails = append(h.fails, name)
 	fmt.Printf("FAIL %s: %s\n", name, why)
+}
+func (h *host) warn(name, why string) {
+	h.warns = append(h.warns, name)
+	fmt.Printf("warn %s: %s\n", name, why)
 }
 func (h *host) note(format string, a ...any) {
 	if *verbose {
@@ -289,7 +294,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -303,10 +308,15 @@ func (h *host) reader() {
 		s = strings.TrimRight(s, "\r\n")
 		m := message{line: s}
 		f := strings.Split(s, " ")
-		// section 12: an answer to one of rhun's requests is ok ID LEN and its body, always
+		// section 12: an answer to one of rhun's requests is ok ID LEN and its body, always; rhun
+		// stops an extension whose answer is over 4 MB (a workspace edit's cap): the checker reads
+		// such a body (up to 64 MB) only to stay in step
 		if len(f) == 3 && f[0] == "ok" {
-			if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n > 1<<20 {
-				m.err = fmt.Errorf("LEN %q is not 0 to 1 MB", f[2])
+			if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
+				m.err = fmt.Errorf("LEN %q is not 0 to 4 MB (rhun stops an extension whose answer is over 4 MB)", f[2])
+			} else if n > 4<<20 {
+				m.err = fmt.Errorf("a body of %d bytes: rhun stops an extension whose answer is over 4 MB", n)
+				io.CopyN(io.Discard, h.stdout, n)
 			} else {
 				m.body = make([]byte, n)
 				if _, e := io.ReadFull(h.stdout, m.body); e != nil {
@@ -534,6 +544,20 @@ func (h *host) handle(msg message) {
 		d.version += int64(len(recs))
 		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
 		h.afterEdit(d, recs...)
+	case "apply":
+		if len(args) != 1 {
+			h.fail("request grammar", "apply takes LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[0])
+		if !ok {
+			return
+		}
+		if !need("write") {
+			return
+		}
+		h.applyRequest(b, reply, rerr, id)
 	case "insert":
 		if len(args) != 3 {
 			h.fail("request grammar", "insert takes DOC VERSION LEN")
@@ -920,9 +944,10 @@ func records(start, del int, ins []byte) []edit {
 }
 
 // afterEdit reports an edit as rhun does at its next frame: edits (with the records), changed,
-// and the cursor, when the manifest subscribes to them.
+// and the cursor, when the manifest subscribes to them (a provider of the document's features
+// hears its edits as if subscribed, section 12b).
 func (h *host) afterEdit(d *doc, recs ...edit) {
-	if h.sub("edits") && len(recs) > 0 {
+	if (h.sub("edits") || h.provider(d)) && len(recs) > 0 {
 		var body []byte
 		for _, r := range recs {
 			body = append(body, fmt.Sprintf("%d %d %d\n", r.start, r.del, len(r.ins))...)
@@ -1196,6 +1221,11 @@ func main() {
 			bad(fmt.Sprintf("[subscribe] %s is not an event with a subscription", k))
 		}
 	}
+	for k := range m.provides {
+		if !slices.Contains(providerFeatures, k) && k != "complete.triggers" && k != "signature.triggers" {
+			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
+		}
+	}
 	for k, v := range m.needs {
 		ok := false
 		switch k {
@@ -1339,7 +1369,8 @@ func main() {
 		}
 	}
 
-	// 2c. section 12: the requests rhun sends, and the views it opened
+	// 2c. section 12: the requests rhun sends (completion, signature help, definition, references,
+	// symbols, code actions, rename, format), and the views it opened
 	h.checkFeatures()
 
 	// 3. an event it does not know, then an error reply it must survive
@@ -1423,6 +1454,9 @@ func (h *host) cmdExited() bool {
 
 func report(h *host) {
 	fmt.Printf("\n%d ok, %d failed", len(h.oks), len(h.fails))
+	if len(h.warns) > 0 {
+		fmt.Printf(", %d warnings", len(h.warns))
+	}
 	if h.status != "" {
 		fmt.Printf("; last status %q", h.status)
 	}

@@ -188,7 +188,7 @@
     },
     "provides": {
       "type": "object",
-      "description": "[provides] (section 12b, 12c): the files the extension completes in and gives signature help in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1.",
+      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1.",
       "properties": {
         "complete": {
           "$ref": "#/$defs/patterns"
@@ -205,6 +205,24 @@
           "type": "string",
           "description": "characters that ask for signature help: '( ,'",
           "pattern": "^\\S( \\S)*$"
+        },
+        "definition": {
+          "$ref": "#/$defs/patterns"
+        },
+        "references": {
+          "$ref": "#/$defs/patterns"
+        },
+        "symbols": {
+          "$ref": "#/$defs/patterns"
+        },
+        "actions": {
+          "$ref": "#/$defs/patterns"
+        },
+        "rename": {
+          "$ref": "#/$defs/patterns"
+        },
+        "format": {
+          "$ref": "#/$defs/patterns"
         }
       },
       "additionalProperties": false

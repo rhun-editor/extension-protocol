@@ -1,9 +1,12 @@
 package rhunext
 
 // Section 12 of the protocol: features an extension asks for in hello and rhun agrees to before
-// ready. Views are tabs the extension draws in; completion and signature help are requests rhun
-// sends and the extension answers. A handler implements Viewer, Completer or SignatureHelper to
-// receive them; without the interface rhun's request is answered "unknown".
+// ready. Views are tabs the extension draws in; completion, signature help, go to definition,
+// references, symbols, code actions, rename and format (lang.go) are requests rhun sends and the
+// extension answers. A handler implements Viewer, Completer, SignatureHelper, Definer,
+// ReferenceFinder, SymbolLister, ActionProvider, Renamer or Formatter to receive them; without
+// the interface rhun's request is answered "unknown". An ActionProvider also gets the data of
+// the code action the user chose (the action event).
 
 import (
 	"bytes"
@@ -16,9 +19,15 @@ import (
 
 // The features of section 12.
 const (
-	FeatureViews     = "views"
-	FeatureComplete  = "complete"
-	FeatureSignature = "signature"
+	FeatureViews      = "views"
+	FeatureComplete   = "complete"
+	FeatureSignature  = "signature"
+	FeatureDefinition = "definition"
+	FeatureReferences = "references"
+	FeatureSymbols    = "symbols"
+	FeatureActions    = "actions"
+	FeatureRename     = "rename"
+	FeatureFormat     = "format"
 )
 
 // hostRequest is the internal event name of a request from rhun.
@@ -321,8 +330,8 @@ const (
 	KindFolder    CompletionKind = "folder"
 )
 
-// TextEdit is another replacement made with an item (an import), in the document at the
-// request's version.
+// TextEdit is one replacement in a text: a completion item's extra edit (an import), in the
+// document at the request's version, or one of a FileEdit's edits.
 type TextEdit struct {
 	Range Range
 	Text  string
@@ -437,33 +446,41 @@ type SignatureHelper interface {
 	Signature(ext *Ext, req Request) *SignatureHelp
 }
 
-// answer replies to a request from rhun: "ok ID LEN" and the body, or "error ID unknown".
+// answer replies to a request from rhun: "ok ID LEN" and the body; "error ID CODE TEXT" when
+// the handler refuses a rename or its edit cannot be encoded; "error ID unknown" for a verb the
+// handler does not answer or a request that does not parse.
 func (e *Ext) answer(h Handler, f []string) {
 	if len(f) < 2 {
 		return
 	}
 	id := f[0]
 	var body []byte
+	var rerr *Error
 	known := false
-	if req, ok := parseRequest(f[2:]); ok {
-		switch f[1] {
-		case "complete":
-			if c, is := h.(Completer); is {
-				body, known = c.Complete(e, req).Encode(), true
-			}
-		case "signature":
-			if s, is := h.(SignatureHelper); is {
-				if help := s.Signature(e, req); help != nil {
-					body = help.Encode()
-				}
-				known = true
-			}
+	switch f[1] {
+	case "complete":
+		c, is := h.(Completer)
+		if req, ok := parseRequest(f[2:]); is && ok {
+			body, known = c.Complete(e, req).Encode(), true
 		}
+	case "signature":
+		s, is := h.(SignatureHelper)
+		if req, ok := parseRequest(f[2:]); is && ok {
+			if help := s.Signature(e, req); help != nil {
+				body = help.Encode()
+			}
+			known = true
+		}
+	default:
+		body, rerr, known = e.answerLang(h, f[1], f[2:])
 	}
-	if known {
-		e.write(fmt.Sprintf("ok %s %d\n", id, len(body)), body)
-	} else {
+	switch {
+	case !known:
 		e.write(fmt.Sprintf("error %s unknown no such request\n", id), nil)
+	case rerr != nil:
+		e.write(errorLine(id, rerr), nil)
+	default:
+		e.write(fmt.Sprintf("ok %s %d\n", id, len(body)), body)
 	}
 }
 

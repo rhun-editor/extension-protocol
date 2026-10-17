@@ -23,13 +23,14 @@ range         = pos SP pos                        ; half-open: from the first to
 
 ; ---- the extension's first line
 hello         = "hello" SP "1" *( SP feature )    ; section 12: the features it would use
-feature       = "views" / "complete" / "signature" / field   ; rhun says back the ones it knows
+feature       = "views" / "complete" / "signature" / "definition" / "references" / "symbols"
+              / "actions" / "rename" / "format" / field   ; rhun says back the ones it knows
 
 ; ---- requests from the extension (a body follows replace, insert, toast, status, diagnostics,
-;      hover, choose, ask and term)
+;      hover, choose, ask, term, draw and apply)
 request       = id SP ( r-text / r-range / r-replace / r-insert / r-select / r-toast / r-status
                       / r-open / r-cancel / r-register / r-option / r-diagnostics / r-hover
-                      / r-choose / r-ask / r-term / r-cmd / r-view / r-draw / r-unview )
+                      / r-choose / r-ask / r-term / r-cmd / r-view / r-draw / r-unview / r-apply )
 r-text        = "text" SP doc
 r-range       = "range" SP doc SP range
 r-replace     = "replace" SP doc SP version SP range SP len
@@ -53,6 +54,7 @@ r-hover       = "hover" SP doc SP pos SP len           ; the text to show at the
 r-view        = "view" SP rest                         ; feature views: a tab titled rest; ok ID VIEW
 r-draw        = "draw" SP view SP len                  ; body: the picture (section 12a)
 r-unview      = "unview" SP view
+r-apply       = "apply" SP len                         ; body: a workspace edit (12g); ok ID
 view          = num
 
 ; ---- the body of draw: one shape per line (section 12a)
@@ -92,7 +94,7 @@ code          = "syntax" / "unknown" / "needs" / "nodoc" / "nofile" / "readonly"
 event         = "0" SP ( e-ready / e-opened / e-active / e-saved / e-changed / e-cursor
                        / e-selection / e-closed / e-project / e-run / e-bye
                        / e-edits / e-resync / e-hover / e-setting / e-features / e-cancel
-                       / e-view )
+                       / e-view / e-action )
 e-ready       = "ready" SP rest                   ; the project folder, or "-"
 e-opened      = "opened" SP doc SP version SP lang SP rest   ; rest: the path, or "-"
 lang          = "-" / field                       ; a grammar name with spaces as "_"
@@ -111,12 +113,18 @@ e-hover       = "hover" SP doc SP pos                ; the pointer rests there
 e-setting     = "setting" SP field [ SP rest ]       ; one of its own settings and its value
 e-features    = "features" 1*( SP feature )          ; before ready: the features rhun agreed to
 e-cancel      = "cancel" SP id                       ; rhun no longer needs that request's answer
+e-action      = "action" SP len                      ; the chosen code action's DATA follows (12f)
 e-view        = "view" SP view SP ( "size" SP n SP n / "metrics" 4( SP t-size SP n SP n )
               / ( "hover" / "down" / "drag" / "up" / "click" ) SP n SP n
               / "wheel" SP n SP n SP n / "leave" / "closed" )
 
 ; ---- requests rhun sends an extension that agreed the feature (section 12); its id is rhun's
 host-request  = id SP ( "complete" / "signature" ) SP doc SP version SP pos SP h-kind SP h-char
+              / id SP ( "definition" / "references" / "symbols" ) SP doc SP version SP pos
+                SP "invoked" SP "-"
+              / id SP "actions" SP doc SP version SP range       ; the selection (12f)
+              / id SP "rename" SP doc SP version SP pos SP "invoked" SP field   ; the new name
+              / id SP "format" SP doc SP version SP num SP ( "yes" / "no" )   ; tab width, spaces
 h-kind        = "typed" / "trigger" / "invoked" / "incomplete" / "update"
 h-char        = field                                ; the trigger character, else "-"
 host-reply    = "ok" SP id SP len / error            ; ok always carries LEN and its body
@@ -133,3 +141,24 @@ c-extra       = ( "edit" SP range SP len / "doc" SP len / field *( SP field ) SP
 
 ; ---- the body of a signature answer (12c): "FROM TO" LF, the signature LF, documentation
 s-head        = ( num / "-1" ) SP ( num / "-1" ) LF
+
+; ---- locations (12d): "N" LF, then N records, each a header line and its PATH TEXT bytes;
+;      PATH is absolute or "#" doc
+l-head        = num LF
+l-item        = range SP len SP len LF
+
+; ---- symbols (12e): "N" LF, then N records, each a header line and its NAME DETAIL bytes
+y-item        = range SP y-kind SP num SP len SP len LF
+y-kind        = "file" / "module" / "namespace" / "package" / "class" / "method" / "property"
+              / "field" / "constructor" / "enum" / "interface" / "function" / "variable"
+              / "constant" / "string" / "number" / "boolean" / "array" / "object" / "key"
+              / "null" / "enum_member" / "struct" / "event" / "operator" / "type_parameter" / field
+
+; ---- code actions (12f): "N" LF, then N records, each a header line and its TITLE EDIT DATA
+;      bytes; EDIT is a workspace edit or empty
+a-item        = field SP len SP len SP len LF        ; KIND: quickfix, refactor, source, ...
+
+; ---- a workspace edit (12g, 12h): "N" LF, then N groups: a header line and the PATH bytes,
+;      then M edits, each a header line and its LEN bytes of new text
+w-group       = len SP ( version / "-" ) SP num LF   ; PATH_LEN VERSION M; "-": the file on disk
+w-edit        = range SP len LF

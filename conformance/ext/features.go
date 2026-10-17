@@ -3,7 +3,8 @@ package main
 // Section 12 of the spec: features. The checker agrees to the ones the extension names in hello,
 // answers view, draw and unview (validating every picture), sends the views it opened their
 // events, and asks completion and signature help on a document its [provides] patterns match,
-// validating the answers against the grammar and the document.
+// validating the answers against the grammar and the document (definition, references, symbols,
+// code actions, rename and format are in langfeat.go).
 
 import (
 	"bytes"
@@ -16,7 +17,7 @@ import (
 	"unicode/utf8"
 )
 
-var knownFeatures = []string{"views", "complete", "signature"}
+var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format"}
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -221,7 +222,8 @@ func checkPicture(body []byte) (int, string) {
 	return 0, ""
 }
 
-// sampleFor makes a document whose name matches the first of the patterns, the cursor's word "pr"
+// sampleFor makes a document whose name matches the first of the patterns, the cursor's word "pr";
+// a document already open under that name is used again (rhun opens a file once)
 func (h *host) sampleFor(patterns string) *doc {
 	p := strings.Fields(patterns)
 	name := "sample.txt"
@@ -234,18 +236,29 @@ func (h *host) sampleFor(patterns string) *doc {
 			name = p[0]
 		}
 	}
-	d := h.newDoc(filepath.Join(h.project, name), langOf(name), []byte("pr\n"))
+	path := filepath.Join(h.project, name)
+	for _, id := range h.docIDs() {
+		if d := h.docs[id]; d.path == path {
+			return d
+		}
+	}
+	d := h.newDoc(path, langOf(name), []byte("pr\n"))
 	h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
 	return d
 }
 
 // ask sends one of rhun's requests and waits for its answer (served meanwhile)
 func (h *host) ask(line string) (message, bool) {
+	return h.askWithin(line, 3*time.Second)
+}
+
+// askWithin is ask with rhun's own wait for that request
+func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
 	h.hostSeq++
 	id := h.hostSeq
 	h.hostReqs[id] = line
 	h.write(fmt.Sprintf("%d %s\n", id, line))
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		if m, ok := h.hostAnswers[id]; ok {
 			return m, true
@@ -261,19 +274,16 @@ func (h *host) ask(line string) (message, bool) {
 
 // checkFeatures is step 12: the requests rhun sends, and the events of the views opened
 func (h *host) checkFeatures() {
-	if h.features["complete"] || h.features["signature"] {
-		pv := h.m.provides
-		for _, f := range []string{"complete", "signature"} {
-			if h.features[f] && strings.TrimSpace(pv[f]) == "" {
-				h.fail("provides", f+" agreed after hello but [provides] has no "+f+" patterns: rhun never asks")
-			}
-			if !h.features[f] && strings.TrimSpace(pv[f]) != "" {
-				h.fail("provides", "[provides] "+f+" without saying it after hello 1: rhun never asks")
-			}
+	for _, f := range providerFeatures {
+		if h.features[f] && h.patterns(f) == "" {
+			h.fail("provides", f+" agreed after hello but [provides] has no "+f+" patterns: rhun never asks")
+		}
+		if !h.features[f] && h.patterns(f) != "" {
+			h.fail("provides", "[provides] "+f+" without saying it after hello 1: rhun never asks")
 		}
 	}
-	if h.features["complete"] && strings.TrimSpace(h.m.provides["complete"]) != "" {
-		d := h.sampleFor(h.m.provides["complete"])
+	if h.features["complete"] && h.patterns("complete") != "" {
+		d := h.sampleFor(h.patterns("complete"))
 		h.serve(300 * time.Millisecond)
 		m, ok := h.ask(fmt.Sprintf("complete %d %d 1 3 invoked -", d.id, d.version))
 		switch {
@@ -290,15 +300,10 @@ func (h *host) checkFeatures() {
 		}
 		h.hostSeq++
 		h.write(fmt.Sprintf("0 cancel %d\n", h.hostSeq))
-		m, ok = h.ask(fmt.Sprintf("frobnicate %d %d 1 3 invoked -", d.id, d.version))
-		if f := strings.Fields(m.line); ok && len(f) >= 3 && f[0] == "error" && f[2] == "unknown" {
-			h.ok("answers a request it does not know with error ID unknown")
-		} else {
-			h.fail("requests", fmt.Sprintf("a request it does not know must be answered error ID unknown; got %q", m.line))
-		}
+		h.checkUnknownRequest(d)
 	}
-	if h.features["signature"] && strings.TrimSpace(h.m.provides["signature"]) != "" {
-		d := h.sampleFor(h.m.provides["signature"])
+	if h.features["signature"] && h.patterns("signature") != "" {
+		d := h.sampleFor(h.patterns("signature"))
 		h.serve(300 * time.Millisecond)
 		m, ok := h.ask(fmt.Sprintf("signature %d %d 1 3 invoked -", d.id, d.version))
 		switch {
@@ -311,6 +316,18 @@ func (h *host) checkFeatures() {
 				h.fail("signature", why)
 			} else {
 				h.ok("answers signature requests")
+			}
+		}
+	}
+	h.checkLangFeatures()
+	if h.cmdExited() {
+		return
+	}
+	if !h.features["complete"] || h.patterns("complete") == "" {
+		for _, f := range providerFeatures {
+			if h.features[f] && h.patterns(f) != "" {
+				h.checkUnknownRequest(h.sampleFor(h.patterns(f)))
+				break
 			}
 		}
 	}
@@ -331,6 +348,16 @@ func (h *host) checkFeatures() {
 			delete(h.views, v)
 		}
 		h.serve(300 * time.Millisecond)
+	}
+}
+
+// checkUnknownRequest asks something no feature defines: the answer is error ID unknown
+func (h *host) checkUnknownRequest(d *doc) {
+	m, ok := h.ask(fmt.Sprintf("frobnicate %d %d 1 3 invoked -", d.id, d.version))
+	if f := strings.Fields(m.line); ok && len(f) >= 3 && f[0] == "error" && f[2] == "unknown" {
+		h.ok("answers a request it does not know with error ID unknown")
+	} else {
+		h.fail("requests", fmt.Sprintf("a request it does not know must be answered error ID unknown; got %q", m.line))
 	}
 }
 

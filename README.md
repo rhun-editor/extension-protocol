@@ -9,14 +9,15 @@ versions, a Go package that speaks it, and the conformance tools.
 | `v1/v1.md` | the specification, written to be read by people and by coding agents |
 | `v1/v1.abnf` | the grammar of every line |
 | `v1/v1.json` | the manifest (`extension.ini`) as a JSON Schema, with every key, pattern and default |
-| `rust/rhun-ext` | the Rust crate (the first choice): framing, requests, events, views with pictures and charts, completion and signature help |
+| `rust/rhun-ext` | the Rust crate (the first choice): framing, requests, events, views with pictures and charts, and every language feature of section 12 |
 | `go/rhunext` | a Go package: framing, ids, bodies, requests that block until their reply, section 12 features |
 | `c/rhunext.h` | one header for C and C++: the same, with nothing but the C library |
 | `conformance/ext` | `rhun-ext-check DIR`: plays rhun against an extension and reports what it gets wrong |
 | `conformance/host` | scripted extensions and headless scripts that check rhun itself against the spec |
 
 Status: **v1 is frozen** (2026-10-16, rhun 0.18.0). Later additions are features announced after
-`hello 1` (section 12: views, completion, signature help); nothing in v1 changes.
+`hello 1` (section 12: views, completion, signature help, definition, references, symbols, code
+actions, rename, format) and requests that need one (`apply`); nothing in v1 changes.
 
 ## Writing an extension
 
@@ -28,14 +29,15 @@ test and a release workflow that builds Linux, macOS and Windows binaries. In C 
 plugin from [rhun-editor/skills](https://github.com/rhun-editor/skills).
 
 ```toml
-rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.1.0" }
+rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.2.0" }
 ```
 
 ```sh
-go get github.com/rhun-editor/extension-protocol@v1.1.0
+go get github.com/rhun-editor/extension-protocol@v1.2.0
 ```
 
-Test with the checker, `rhun-ext-check DIR` (`go run github.com/rhun-editor/extension-protocol/conformance/ext@latest DIR`),
+Test with the checker, `rhun-ext-check DIR` (it asks every feature the extension agreed, checks
+each answer as rhun reads it, applies the edits and serves `apply`) (`go run github.com/rhun-editor/extension-protocol/conformance/ext@latest DIR`),
 where `DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` and `bin/`), then
 headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
