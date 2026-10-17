@@ -1,0 +1,12 @@
+[package]
+name = "rhun-ext"
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Write extensions for the rhun editor: its extension protocol (v1 and features), pictures and charts for views, completion and signature help."
+license = "MIT"
+repository = "https://github.com/rhun-editor/extension-protocol"
+keywords = ["rhun", "editor", "extension", "plugin"]
+categories = ["text-editors"]
+
+[dependencies]

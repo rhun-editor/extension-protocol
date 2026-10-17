@@ -150,6 +150,8 @@ type Ext struct {
 	bodies map[int64]bool // request ids whose ok reply carries a body (text, range)
 	logw   io.Writer
 	done   chan struct{}
+	fmu    sync.Mutex
+	agreed map[string]bool // the features rhun agreed to (section 12), from the features event
 }
 
 type result struct {
@@ -165,8 +167,24 @@ func Run(h Handler) error {
 
 // RunOn is Run on explicit streams (tests).
 func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
-	ext := &Ext{w: w, pend: map[int64]chan result{}, bodies: map[int64]bool{}, logw: logw, done: make(chan struct{})}
-	if _, err := fmt.Fprintf(w, "hello %d\n", Protocol); err != nil {
+	return RunOnWith(r, w, logw, nil, h)
+}
+
+// RunWith is Run asking for features (section 12 of the protocol): FeatureViews, FeatureComplete,
+// FeatureSignature. Those rhun agrees to are in Ext.Has before Ready is called.
+func RunWith(features []string, h Handler) error {
+	return RunOnWith(os.Stdin, os.Stdout, os.Stderr, features, h)
+}
+
+// RunOnWith is RunWith on explicit streams (tests).
+func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Handler) error {
+	ext := &Ext{w: w, pend: map[int64]chan result{}, bodies: map[int64]bool{}, logw: logw, done: make(chan struct{}),
+		agreed: map[string]bool{}}
+	hello := fmt.Sprintf("hello %d", Protocol)
+	for _, f := range features {
+		hello += " " + f
+	}
+	if _, err := io.WriteString(w, hello+"\n"); err != nil {
 		return err
 	}
 	br := bufio.NewReaderSize(r, 1<<16)
@@ -226,6 +244,23 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 			close(ext.done)
 			ext.failPending(errors.New("rhun said bye"))
 			return nil
+		case "features":
+			ext.fmu.Lock()
+			for _, f := range ev.Args {
+				ext.agreed[f] = true
+			}
+			ext.fmu.Unlock()
+			h.Event(ext, ev)
+		case hostRequest:
+			ext.answer(h, ev.Args)
+		case "view":
+			if v, ok := h.(Viewer); ok {
+				if view, vev, ok := parseViewEvent(ev); ok {
+					v.View(ext, view, vev)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		default:
 			h.Event(ext, ev)
 		}
@@ -333,9 +368,9 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		}
 		return ev, nil
 	}
-	// a request from rhun (none in v1): unknown
+	// a request from rhun (section 12): answered on the handler's goroutine, in order with events
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
-		e.write(fmt.Sprintf("error %d unknown no such request\n", id), nil)
+		return &Event{Name: hostRequest, Args: fields}, nil
 	}
 	return nil, nil
 }

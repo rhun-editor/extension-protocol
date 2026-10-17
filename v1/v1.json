@@ -166,7 +166,9 @@
     "icon": {
       "type": "string",
       "pattern": "^[^/\\\\:][^\\\\:]*$",
-      "not": { "pattern": "\\.\\." },
+      "not": {
+        "pattern": "\\.\\."
+      },
       "description": "a PNG in the extension's folder (at most 64 KB and 256 pixels a side, square, 128 recommended): the badge in the title bar, its dropdown and the Extensions page, drawn on color"
     },
     "color": {
@@ -183,6 +185,29 @@
       "additionalProperties": {
         "type": "string"
       }
+    },
+    "provides": {
+      "type": "object",
+      "description": "[provides] (section 12b, 12c): the files the extension completes in and gives signature help in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1.",
+      "properties": {
+        "complete": {
+          "$ref": "#/$defs/patterns"
+        },
+        "complete.triggers": {
+          "type": "string",
+          "description": "characters that ask for a list at once, space separated: '. :'",
+          "pattern": "^\\S( \\S)*$"
+        },
+        "signature": {
+          "$ref": "#/$defs/patterns"
+        },
+        "signature.triggers": {
+          "type": "string",
+          "description": "characters that ask for signature help: '( ,'",
+          "pattern": "^\\S( \\S)*$"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "$defs": {

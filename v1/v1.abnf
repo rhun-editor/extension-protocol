@@ -3,7 +3,7 @@
 ; bytes that follow a message's LF and are not part of the grammar of lines.
 
 stream        = *message
-message       = ( request / reply / event ) LF [ body ]
+message       = ( request / reply / event / host-request / host-reply ) LF [ body ]
               ; body is present iff the message's last field is a LEN of a body-bearing message
               ; and is exactly LEN bytes
 
@@ -22,13 +22,14 @@ pos           = line SP col
 range         = pos SP pos                        ; half-open: from the first to before the second
 
 ; ---- the extension's first line
-hello         = "hello" SP "1" *( SP field )      ; further fields: capabilities (none in v1)
+hello         = "hello" SP "1" *( SP feature )    ; section 12: the features it would use
+feature       = "views" / "complete" / "signature" / field   ; rhun says back the ones it knows
 
 ; ---- requests from the extension (a body follows replace, insert, toast, status, diagnostics,
 ;      hover, choose, ask and term)
 request       = id SP ( r-text / r-range / r-replace / r-insert / r-select / r-toast / r-status
                       / r-open / r-cancel / r-register / r-option / r-diagnostics / r-hover
-                      / r-choose / r-ask / r-term / r-cmd )
+                      / r-choose / r-ask / r-term / r-cmd / r-view / r-draw / r-unview )
 r-text        = "text" SP doc
 r-range       = "range" SP doc SP range
 r-replace     = "replace" SP doc SP version SP range SP len
@@ -49,6 +50,29 @@ r-term        = "term" SP len                          ; body: one command line,
 r-cmd         = "cmd" SP field                         ; a command name from section 8a
 r-diagnostics = "diagnostics" SP doc SP version SP num SP len   ; num: the lines of the body
 r-hover       = "hover" SP doc SP pos SP len           ; the text to show at the position
+r-view        = "view" SP rest                         ; feature views: a tab titled rest; ok ID VIEW
+r-draw        = "draw" SP view SP len                  ; body: the picture (section 12a)
+r-unview      = "unview" SP view
+view          = num
+
+; ---- the body of draw: one shape per line (section 12a)
+shape         = s-rect / s-rrect / s-line / s-poly / s-fill / s-circle / s-ring / s-pie / s-text
+              / s-clip / "unclip"                      ; a line with another first word is skipped
+s-rect        = "rect" SP n SP n SP n SP n SP color
+s-rrect       = "rrect" SP n SP n SP n SP n SP n SP color
+s-line        = "line" SP n SP n SP n SP n SP n SP color
+s-poly        = "poly" SP n SP color 2*( SP n SP n )
+s-fill        = "fill" SP color 3*( SP n SP n )
+s-circle      = "circle" SP n SP n SP n SP color
+s-ring        = "ring" SP n SP n SP n SP n SP color
+s-pie         = "pie" SP n SP n SP n SP n SP n SP color ; degrees, 0 at the top, clockwise
+s-text        = "text" SP n SP n SP t-size SP t-align SP color SP rest
+s-clip        = "clip" SP n SP n SP n SP n
+t-size        = "small" / "normal" / "large" / "mono"
+t-align       = "left" / "center" / "right"
+n             = [ "-" ] 1*7DIGIT [ "." 1*9DIGIT ]
+color         = "#" 6HEXDIG [ 2HEXDIG ] / "fg" / "muted" / "bg" / "panel" / "border" / "accent"
+              / "error" / "warning" / "success" / "c1" / "c2" / "c3" / "c4" / "c5" / "c6" / "c7" / "c8"
 
 ; ---- the body of diagnostics: num lines (section 6b)
 diag-line     = range SP severity SP rest LF           ; rest: the message, no LF in it
@@ -62,12 +86,13 @@ reply         = ok / error
 ok            = "ok" SP id *( SP field )               ; choose: ok ID N; ask: ok ID LEN + body
 error         = "error" SP id SP code [ SP rest ]
 code          = "syntax" / "unknown" / "needs" / "nodoc" / "nofile" / "readonly" / "stale"
-              / "badpos" / "toobig" / "busy" / "cancelled" / "refused"
+              / "badpos" / "toobig" / "busy" / "cancelled" / "refused" / "noview"
 
 ; ---- events from rhun
 event         = "0" SP ( e-ready / e-opened / e-active / e-saved / e-changed / e-cursor
                        / e-selection / e-closed / e-project / e-run / e-bye
-                       / e-edits / e-resync / e-hover / e-setting )
+                       / e-edits / e-resync / e-hover / e-setting / e-features / e-cancel
+                       / e-view )
 e-ready       = "ready" SP rest                   ; the project folder, or "-"
 e-opened      = "opened" SP doc SP version SP lang SP rest   ; rest: the path, or "-"
 lang          = "-" / field                       ; a grammar name with spaces as "_"
@@ -84,3 +109,27 @@ e-edits       = "edits" SP doc SP version SP len     ; a body of edit-records fo
 e-resync      = "resync" SP doc SP version           ; deltas were lost: fetch text
 e-hover       = "hover" SP doc SP pos                ; the pointer rests there
 e-setting     = "setting" SP field [ SP rest ]       ; one of its own settings and its value
+e-features    = "features" 1*( SP feature )          ; before ready: the features rhun agreed to
+e-cancel      = "cancel" SP id                       ; rhun no longer needs that request's answer
+e-view        = "view" SP view SP ( "size" SP n SP n / "metrics" 4( SP t-size SP n SP n )
+              / ( "hover" / "down" / "drag" / "up" / "click" ) SP n SP n
+              / "wheel" SP n SP n SP n / "leave" / "closed" )
+
+; ---- requests rhun sends an extension that agreed the feature (section 12); its id is rhun's
+host-request  = id SP ( "complete" / "signature" ) SP doc SP version SP pos SP h-kind SP h-char
+h-kind        = "typed" / "trigger" / "invoked" / "incomplete" / "update"
+h-char        = field                                ; the trigger character, else "-"
+host-reply    = "ok" SP id SP len / error            ; ok always carries LEN and its body
+
+; ---- the body of a completion answer (12b): "N MORE" LF, then N items, each a header line and
+;      its LABEL INSERT DETAIL EXTRA bytes back to back
+c-head        = num SP ( "0" / "1" ) LF
+c-item        = range SP c-kind SP len SP len SP len SP len LF
+c-kind        = "text" / "method" / "function" / "field" / "variable" / "class" / "struct"
+              / "interface" / "module" / "property" / "enum" / "keyword" / "snippet" / "constant"
+              / "value" / "file" / "folder" / field
+c-extra       = ( "edit" SP range SP len / "doc" SP len / field *( SP field ) SP len ) LF
+              ; each record's LEN bytes follow its LF; unknown records are skipped
+
+; ---- the body of a signature answer (12c): "FROM TO" LF, the signature LF, documentation
+s-head        = ( num / "-1" ) SP ( num / "-1" ) LF

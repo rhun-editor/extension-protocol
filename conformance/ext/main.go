@@ -48,6 +48,7 @@ type manifest struct {
 	settingFields               map[string]map[string]string // key -> field -> value
 	needs                       map[string]string
 	subscribe                   map[string]string
+	provides                    map[string]string
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -55,7 +56,7 @@ func readManifest(dir string) (*manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}}
+	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}}
 	section := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -124,6 +125,8 @@ func readManifest(dir string) (*manifest, error) {
 			m.needs[k] = v
 		case "subscribe":
 			m.subscribe[k] = v
+		case "provides":
+			m.provides[k] = v
 		}
 	}
 	return m, nil
@@ -169,6 +172,14 @@ type host struct {
 	hovers   []string // hover answers
 	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
+
+	features    map[string]bool // section 12: agreed after hello
+	views       map[int64]bool  // views it opened
+	nextView    int64
+	pictures    int               // draw requests that passed
+	hostSeq     int64             // the last id of a request the checker sent
+	hostReqs    map[int64]string  // those waiting for an answer
+	hostAnswers map[int64]message // and the answers
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -278,7 +289,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -292,7 +303,15 @@ func (h *host) reader() {
 		s = strings.TrimRight(s, "\r\n")
 		m := message{line: s}
 		f := strings.Split(s, " ")
-		if len(f) >= 3 && bodyVerbs[f[1]] {
+		// section 12: an answer to one of rhun's requests is ok ID LEN and its body, always
+		if len(f) == 3 && f[0] == "ok" {
+			if n, e := strconv.ParseInt(f[2], 10, 64); e == nil && n >= 0 && n <= 1<<20 {
+				m.body = make([]byte, n)
+				if _, e := io.ReadFull(h.stdout, m.body); e != nil {
+					m.err = fmt.Errorf("the body of %q ended early: %w", s, e)
+				}
+			}
+		} else if len(f) >= 3 && bodyVerbs[f[1]] {
 			if _, e := strconv.ParseInt(f[0], 10, 64); e == nil {
 				n, e := strconv.ParseInt(f[len(f)-1], 10, 64)
 				if e == nil && n >= 0 && n < 64<<20 {
@@ -367,7 +386,9 @@ func (h *host) handle(msg message) {
 		return
 	}
 	if fields[0] == "ok" || fields[0] == "error" {
-		h.fail("request grammar", fmt.Sprintf("a reply to a request rhun never sent: %q", line))
+		if !h.hostReply(fields, msg) {
+			h.fail("request grammar", fmt.Sprintf("a reply to a request rhun never sent: %q", line))
+		}
 		return
 	}
 	id, err := strconv.ParseInt(fields[0], 10, 64)
@@ -875,6 +896,8 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "cancel":
 		reply(fmt.Sprintf("ok %d", id))
+	case "view", "draw", "unview":
+		h.viewRequest(id, verb, args, msg.body, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1046,6 +1069,8 @@ func (h *host) expectHello() bool {
 		return false
 	}
 	h.ok("hello 1 as the first line")
+	h.views, h.hostReqs, h.hostAnswers = map[int64]bool{}, map[int64]string{}, map[int64]message{}
+	h.agree(line)
 	return true
 }
 
@@ -1311,6 +1336,9 @@ func main() {
 			h.ok("takes the hover event")
 		}
 	}
+
+	// 2c. section 12: the requests rhun sends, and the views it opened
+	h.checkFeatures()
 
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")

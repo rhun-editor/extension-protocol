@@ -1,0 +1,413 @@
+package main
+
+// Section 12 of the spec: features. The checker agrees to the ones the extension names in hello,
+// answers view, draw and unview (validating every picture), sends the views it opened their
+// events, and asks completion and signature help on a document its [provides] patterns match,
+// validating the answers against the grammar and the document.
+
+import (
+	"bytes"
+	"fmt"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+	"unicode/utf8"
+)
+
+var knownFeatures = []string{"views", "complete", "signature"}
+
+// agree records the features hello named that rhun knows, and says them back before ready.
+func (h *host) agree(hello string) {
+	h.features = map[string]bool{}
+	asked := map[string]bool{}
+	for _, f := range strings.Fields(hello)[2:] {
+		asked[f] = true
+	}
+	var said []string
+	for _, f := range knownFeatures {
+		if asked[f] {
+			h.features[f] = true
+			said = append(said, f)
+		}
+	}
+	if len(said) > 0 {
+		h.write("0 features " + strings.Join(said, " ") + "\n")
+		h.ok("hello names features: " + strings.Join(said, " "))
+	}
+}
+
+// hostReply takes an extension's ok or error for one of rhun's requests: true when it was one
+func (h *host) hostReply(fields []string, msg message) bool {
+	if len(fields) < 2 {
+		return false
+	}
+	id, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return false
+	}
+	if _, ok := h.hostReqs[id]; !ok {
+		return false
+	}
+	delete(h.hostReqs, id)
+	h.hostAnswers[id] = msg
+	return true
+}
+
+// view, draw and unview (12a)
+func (h *host) viewRequest(id int64, verb string, args []string, body []byte, reply func(string), rerr func(string, string)) {
+	if !h.features["views"] {
+		h.fail("features", verb+" without views agreed after hello (hello 1 views)")
+		rerr("unknown", "no such request")
+		return
+	}
+	switch verb {
+	case "view":
+		if len(args) == 0 {
+			h.fail("views", "view without a title")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if len(h.views) == 8 {
+			rerr("toobig", "8 views")
+			return
+		}
+		h.nextView++
+		h.views[h.nextView] = true
+		reply(fmt.Sprintf("ok %d %d", id, h.nextView))
+	case "draw":
+		if len(args) != 2 {
+			h.fail("views", fmt.Sprintf("draw takes VIEW LEN, got %q", strings.Join(args, " ")))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		v, _ := strconv.ParseInt(args[0], 10, 64)
+		if !h.views[v] {
+			h.fail("views", fmt.Sprintf("draw names view %s, which is not open", args[0]))
+			rerr("noview", "no such view")
+			return
+		}
+		if line, why := checkPicture(body); why != "" {
+			h.fail("views", fmt.Sprintf("picture line %d: %s", line, why))
+			rerr("syntax", fmt.Sprintf("line %d", line))
+			return
+		}
+		h.pictures++
+		reply(fmt.Sprintf("ok %d", id))
+	case "unview":
+		v, _ := strconv.ParseInt(strings.Join(args, ""), 10, 64)
+		if !h.views[v] {
+			rerr("noview", "no such view")
+			return
+		}
+		delete(h.views, v)
+		reply(fmt.Sprintf("ok %d", id))
+	}
+}
+
+var shapeArgs = map[string][3]int{ // numbers before the color, has text, minimum points
+	"rect": {4, 0, 0}, "rrect": {5, 0, 0}, "line": {5, 0, 0}, "poly": {1, 0, 2}, "fill": {0, 0, 3},
+	"circle": {3, 0, 0}, "ring": {4, 0, 0}, "pie": {5, 0, 0}, "text": {2, 1, 0},
+}
+var numRe = regexp.MustCompile(`^-?[0-9]{1,7}(\.[0-9]{1,9})?$`)
+var colorRe = regexp.MustCompile(`^(#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?|fg|muted|bg|panel|border|accent|error|warning|success|c[1-8])$`)
+
+// checkPicture validates a draw body against 12a: the line number and why, or "" for a good one
+func checkPicture(body []byte) (int, string) {
+	if len(body) > 1<<20 {
+		return 0, "the picture is over 1 MB"
+	}
+	shapes, points := 0, 0
+	for i, l := range strings.Split(strings.TrimSuffix(string(body), "\n"), "\n") {
+		n := i + 1
+		if l == "" {
+			continue
+		}
+		w := strings.Split(l, " ")
+		switch w[0] {
+		case "unclip":
+			shapes++
+			continue
+		case "clip":
+			if len(w) != 5 {
+				return n, "clip takes X Y W H"
+			}
+			for _, x := range w[1:] {
+				if !numRe.MatchString(x) {
+					return n, fmt.Sprintf("%q is not a number", x)
+				}
+			}
+			shapes++
+			continue
+		}
+		spec, ok := shapeArgs[w[0]]
+		if !ok {
+			continue // a later rhun may draw it: skipped
+		}
+		shapes++
+		k := 1
+		for j := 0; j < spec[0]; j++ {
+			if k >= len(w) || !numRe.MatchString(w[k]) {
+				return n, fmt.Sprintf("%s: number %d is missing or not one", w[0], j+1)
+			}
+			k++
+		}
+		if spec[1] == 1 { // text: SIZE ALIGN COLOR TEXT
+			if k+2 >= len(w) {
+				return n, "text takes X Y SIZE ALIGN COLOR TEXT"
+			}
+			if !strings.Contains(" small normal large mono ", " "+w[k]+" ") {
+				return n, fmt.Sprintf("text size %q", w[k])
+			}
+			if !strings.Contains(" left center right ", " "+w[k+1]+" ") {
+				return n, fmt.Sprintf("text align %q", w[k+1])
+			}
+			k += 2
+		}
+		if k >= len(w) || !colorRe.MatchString(w[k]) {
+			return n, fmt.Sprintf("%s: no color where one goes", w[0])
+		}
+		k++
+		if spec[1] == 1 {
+			continue
+		}
+		rest := w[k:]
+		if spec[2] == 0 && len(rest) != 0 {
+			return n, fmt.Sprintf("%s: %d words too many", w[0], len(rest))
+		}
+		if spec[2] > 0 {
+			if len(rest)%2 != 0 || len(rest)/2 < spec[2] || len(rest)/2 > 10000 {
+				return n, fmt.Sprintf("%s: %d numbers is not %d to 10000 points", w[0], len(rest), spec[2])
+			}
+			for _, x := range rest {
+				if !numRe.MatchString(x) {
+					return n, fmt.Sprintf("%q is not a number", x)
+				}
+			}
+			points += len(rest) / 2
+		}
+	}
+	if shapes > 20000 {
+		return 0, "over 20000 shapes"
+	}
+	if points > 200000 {
+		return 0, "over 200000 points"
+	}
+	return 0, ""
+}
+
+// sampleFor makes a document whose name matches the first of the patterns, the cursor's word "pr"
+func (h *host) sampleFor(patterns string) *doc {
+	p := strings.Fields(patterns)
+	name := "sample.txt"
+	if len(p) > 0 {
+		switch {
+		case p[0] == "*":
+		case strings.HasPrefix(p[0], "*"):
+			name = "sample" + p[0][1:]
+		default:
+			name = p[0]
+		}
+	}
+	d := h.newDoc(filepath.Join(h.project, name), langOf(name), []byte("pr\n"))
+	h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
+	return d
+}
+
+// ask sends one of rhun's requests and waits for its answer (served meanwhile)
+func (h *host) ask(line string) (message, bool) {
+	h.hostSeq++
+	id := h.hostSeq
+	h.hostReqs[id] = line
+	h.write(fmt.Sprintf("%d %s\n", id, line))
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if m, ok := h.hostAnswers[id]; ok {
+			return m, true
+		}
+		msg, err := h.readMessage(100 * time.Millisecond)
+		if err == nil && msg.line != "" {
+			h.handle(msg)
+		}
+	}
+	delete(h.hostReqs, id)
+	return message{}, false
+}
+
+// checkFeatures is step 12: the requests rhun sends, and the events of the views opened
+func (h *host) checkFeatures() {
+	if h.features["complete"] || h.features["signature"] {
+		pv := h.m.provides
+		for _, f := range []string{"complete", "signature"} {
+			if h.features[f] && strings.TrimSpace(pv[f]) == "" {
+				h.fail("provides", f+" agreed after hello but [provides] has no "+f+" patterns: rhun never asks")
+			}
+			if !h.features[f] && strings.TrimSpace(pv[f]) != "" {
+				h.fail("provides", "[provides] "+f+" without saying it after hello 1: rhun never asks")
+			}
+		}
+	}
+	if h.features["complete"] && strings.TrimSpace(h.m.provides["complete"]) != "" {
+		d := h.sampleFor(h.m.provides["complete"])
+		h.serve(300 * time.Millisecond)
+		m, ok := h.ask(fmt.Sprintf("complete %d %d 1 3 invoked -", d.id, d.version))
+		switch {
+		case !ok:
+			h.fail("complete", "no answer to a completion request within 3 s")
+		case strings.HasPrefix(m.line, "error "):
+			h.fail("complete", "a completion request answered "+m.line)
+		default:
+			if why := checkCompletion(m, d); why != "" {
+				h.fail("complete", why)
+			} else {
+				h.ok("answers completion requests with a list rhun can read")
+			}
+		}
+		h.hostSeq++
+		h.write(fmt.Sprintf("0 cancel %d\n", h.hostSeq))
+		m, ok = h.ask(fmt.Sprintf("frobnicate %d %d 1 3 invoked -", d.id, d.version))
+		if ok && strings.HasPrefix(m.line, "error ") && strings.Fields(m.line)[2] == "unknown" {
+			h.ok("answers a request it does not know with error ID unknown")
+		} else {
+			h.fail("requests", fmt.Sprintf("a request it does not know must be answered error ID unknown; got %q", m.line))
+		}
+	}
+	if h.features["signature"] && strings.TrimSpace(h.m.provides["signature"]) != "" {
+		d := h.sampleFor(h.m.provides["signature"])
+		h.serve(300 * time.Millisecond)
+		m, ok := h.ask(fmt.Sprintf("signature %d %d 1 3 invoked -", d.id, d.version))
+		switch {
+		case !ok:
+			h.fail("signature", "no answer to a signature request within 3 s")
+		case strings.HasPrefix(m.line, "error "):
+			h.fail("signature", "a signature request answered "+m.line)
+		default:
+			if why := checkSignature(m); why != "" {
+				h.fail("signature", why)
+			} else {
+				h.ok("answers signature requests")
+			}
+		}
+	}
+	if len(h.views) > 0 {
+		for v := range h.views {
+			h.write(fmt.Sprintf("0 view %d size 640 480\n0 view %d metrics small 6 16 normal 7 18 large 10 26 mono 7 19\n", v, v))
+			h.write(fmt.Sprintf("0 view %d hover 10 10\n0 view %d down 10 10\n0 view %d up 10 10\n0 view %d click 10 10\n", v, v, v, v))
+			h.write(fmt.Sprintf("0 view %d wheel 10 10 -3\n0 view %d leave\n", v, v))
+		}
+		h.serve(700 * time.Millisecond)
+		if h.cmdExited() {
+			h.fail("views", "the program exited on its views' events")
+			return
+		}
+		h.ok(fmt.Sprintf("its %d views take size, metrics and pointer events (%d pictures drawn)", len(h.views), h.pictures))
+		for v := range h.views {
+			h.write(fmt.Sprintf("0 view %d closed\n", v))
+			delete(h.views, v)
+		}
+		h.serve(300 * time.Millisecond)
+	}
+}
+
+// checkCompletion validates an answer against 12b and the document it was asked about
+func checkCompletion(m message, d *doc) string {
+	f := strings.Fields(m.line)
+	if len(f) != 3 || f[0] != "ok" {
+		return fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
+	}
+	b := m.body
+	if len(b) > 1<<20 {
+		return "the list is over 1 MB"
+	}
+	nl := bytes.IndexByte(b, '\n')
+	if nl < 0 {
+		return "the body has no first line N MORE"
+	}
+	head := strings.Fields(string(b[:nl]))
+	if len(head) != 2 || (head[1] != "0" && head[1] != "1") {
+		return fmt.Sprintf("the first line %q is not N MORE", b[:nl])
+	}
+	n, err := strconv.Atoi(head[0])
+	if err != nil || n < 0 || n > 4096 {
+		return fmt.Sprintf("N %q is not 0 to 4096", head[0])
+	}
+	pos := nl + 1
+	lines := bytes.Split(d.text, []byte("\n"))
+	inDoc := func(l, c string) bool {
+		li, e1 := strconv.Atoi(l)
+		ci, e2 := strconv.Atoi(c)
+		return e1 == nil && e2 == nil && li >= 1 && li <= len(lines) && ci >= 1 && ci <= len(lines[li-1])+1
+	}
+	for i := 0; i < n; i++ {
+		e := bytes.IndexByte(b[pos:], '\n')
+		if e < 0 {
+			return fmt.Sprintf("item %d has no header line", i+1)
+		}
+		h := strings.Fields(string(b[pos : pos+e]))
+		if len(h) != 9 {
+			return fmt.Sprintf("item %d's header %q is not L1 C1 L2 C2 KIND LABEL_LEN INSERT_LEN DETAIL_LEN EXTRA_LEN", i+1, b[pos:pos+e])
+		}
+		if !inDoc(h[0], h[1]) || !inDoc(h[2], h[3]) {
+			return fmt.Sprintf("item %d's range %s %s %s %s is not in the document", i+1, h[0], h[1], h[2], h[3])
+		}
+		sizes := make([]int, 4)
+		total := 0
+		for j := range sizes {
+			v, err := strconv.Atoi(h[5+j])
+			if err != nil || v < 0 {
+				return fmt.Sprintf("item %d: %q is not a length", i+1, h[5+j])
+			}
+			sizes[j] = v
+			total += v
+		}
+		pos += e + 1
+		if pos+total > len(b) {
+			return fmt.Sprintf("item %d's bytes run past the body", i+1)
+		}
+		label := b[pos : pos+sizes[0]]
+		detail := b[pos+sizes[0]+sizes[1] : pos+sizes[0]+sizes[1]+sizes[2]]
+		if bytes.ContainsAny(label, "\r\n") || bytes.ContainsAny(detail, "\r\n") {
+			return fmt.Sprintf("item %d's label or detail holds a line break", i+1)
+		}
+		if !utf8.Valid(label) {
+			return fmt.Sprintf("item %d's label is not UTF-8", i+1)
+		}
+		pos += total
+	}
+	if pos != len(b) {
+		return fmt.Sprintf("%d bytes after the %d items N says", len(b)-pos, n)
+	}
+	return ""
+}
+
+// checkSignature validates an answer against 12c
+func checkSignature(m message) string {
+	f := strings.Fields(m.line)
+	if len(f) != 3 || f[0] != "ok" {
+		return fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
+	}
+	if len(m.body) == 0 {
+		return ""
+	}
+	if len(m.body) > 65536 {
+		return "over 64 KB"
+	}
+	parts := strings.SplitN(string(m.body), "\n", 3)
+	if len(parts) < 2 {
+		return "the body is not FROM TO, then the signature"
+	}
+	ft := strings.Fields(parts[0])
+	if len(ft) != 2 {
+		return fmt.Sprintf("the first line %q is not FROM TO", parts[0])
+	}
+	a, e1 := strconv.Atoi(ft[0])
+	b, e2 := strconv.Atoi(ft[1])
+	if e1 != nil || e2 != nil {
+		return fmt.Sprintf("the first line %q is not two numbers", parts[0])
+	}
+	if !(a == -1 && b == -1) && (a < 0 || b < a || b > len(parts[1])) {
+		return fmt.Sprintf("FROM TO %d %d is not within the signature's %d bytes", a, b, len(parts[1]))
+	}
+	return ""
+}
