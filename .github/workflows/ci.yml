@@ -1,0 +1,32 @@
+# The SDKs and the checker on the three systems rhun runs on.
+name: ci
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: Go SDK and the checker
+        run: go vet ./... && go test ./... && go build ./conformance/ext
+      - name: Rust SDK
+        working-directory: rust/rhun-ext
+        run: cargo clippy --all-targets -- -D warnings && cargo test
+      - name: C SDK
+        shell: bash
+        working-directory: c
+        run: |
+          cc=cc; cxx=c++; [ "$RUNNER_OS" = Windows ] && cc=clang && cxx=clang++
+          $cc -std=c99 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o rhunext-test test.c && ./rhunext-test
+          printf '#define RHUNEXT_IMPLEMENTATION\n#include "rhunext.h"\nint main(void) { return 0; }\n' > cxx.cpp
+          $cxx -std=c++17 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o cxx-test cxx.cpp
