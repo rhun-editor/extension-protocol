@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -112,6 +113,38 @@ const (
 	MaxEdits       = 100000
 )
 
+// The longest fields rhun reads (section 12d): one over makes it drop the whole answer, so the
+// encoders cut names, titles, details and previews to MaxText bytes and kind words to MaxKind (at
+// a character), leave out a symbol or action whose name or title is then empty and a location whose
+// path is over MaxPath, and refuse to encode a workspace edit with such a path.
+const (
+	MaxText = 1000
+	MaxKind = 40
+	MaxPath = 4096
+)
+
+// cut is s cut to at most max bytes, at the start of a character.
+func cut(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	n := max
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// field is a name, title, detail or preview as rhun reads it: one line, at most MaxText bytes.
+func field(s string) string { return cut(oneLine(s), MaxText) }
+
+// num is a line, column or depth as a number rhun reads (at most 10 digits, not negative).
+func num(v int) string {
+	n := int64(v)
+	n = min(max(n, 0), 1<<32-1)
+	return strconv.FormatInt(n, 10)
+}
+
 // Target is where a location or a file's edits are: a file by its absolute Path, or when Path is
 // "" an open document by its id (an untitled one).
 type Target struct {
@@ -127,24 +160,29 @@ func (t Target) String() string {
 	return "#" + itoa(int64(t.Doc))
 }
 
-func rangeFields(r Range) string { return pos(r.Start) + " " + pos(r.End) }
+func rangeFields(r Range) string {
+	return num(r.Start.Line) + " " + num(r.Start.Col) + " " + num(r.End.Line) + " " + num(r.End.Col)
+}
 
 // Location is a place in a file: the answer to definition and references is a list of them.
 // Range is in the open document when the file is open, else in the file on disk; Text is a
-// one-line preview (the line's text, trimmed when encoded), or "".
+// one-line preview (the line's text, trimmed and cut to MaxText bytes when encoded), or "".
 type Location struct {
 	Target Target
 	Range  Range
 	Text   string
 }
 
-// EncodeLocations is the body rhun reads for a list of locations (section 12d). Those past
-// MaxRecords or MaxRecordsBody are left out.
+// EncodeLocations is the body rhun reads for a list of locations (section 12d). Those whose path is
+// over MaxPath bytes, and those past MaxRecords or MaxRecordsBody, are left out.
 func EncodeLocations(locs []Location) []byte {
 	var recs bytes.Buffer
 	n := 0
 	for _, l := range locs {
-		p, t := l.Target.String(), oneLine(strings.TrimSpace(l.Text))
+		p, t := l.Target.String(), field(strings.TrimSpace(l.Text))
+		if len(p) > MaxPath {
+			continue
+		}
 		head := fmt.Sprintf("%s %d %d\n", rangeFields(l.Range), len(p), len(t))
 		if n == MaxRecords || recs.Len()+len(head)+len(p)+len(t)+16 > MaxRecordsBody {
 			break
@@ -193,7 +231,7 @@ const (
 // Symbol is a symbol of a document: the answer to symbols is a list of them, in document order.
 // Range is the whole symbol (the cursor goes to its start); Kind is SymbolFunction when "";
 // Depth is 0 at the top level and one more for each level it is nested in; Name and Detail (a
-// signature, a type, shown beside it) are one line each.
+// signature, a type, shown beside it) are one line each, at most MaxText bytes (cut when encoded).
 type Symbol struct {
 	Range  Range
 	Kind   SymbolKind
@@ -202,24 +240,36 @@ type Symbol struct {
 	Detail string
 }
 
-// word is a kind as one field: without white space, def when nothing is left.
+// word is a kind as one field: without white space and control characters, at most MaxKind
+// bytes, def when nothing is left. Bytes that are not UTF-8 stay as they are.
 func word(s, def string) string {
-	w := strings.Join(strings.Fields(s), "")
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if invalid := r == utf8.RuneError && size == 1; invalid || !unicode.IsSpace(r) && !unicode.IsControl(r) {
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	w := cut(b.String(), MaxKind)
 	if w == "" {
 		return def
 	}
 	return w
 }
 
-// EncodeSymbols is the body rhun reads for a list of symbols (section 12e). Those past
-// MaxRecords or MaxRecordsBody are left out.
+// EncodeSymbols is the body rhun reads for a list of symbols (section 12e). Those without a name,
+// and those past MaxRecords or MaxRecordsBody, are left out.
 func EncodeSymbols(syms []Symbol) []byte {
 	var recs bytes.Buffer
 	n := 0
 	for _, s := range syms {
-		name, detail := oneLine(s.Name), oneLine(s.Detail)
-		head := fmt.Sprintf("%s %s %d %d %d\n", rangeFields(s.Range), word(string(s.Kind), string(SymbolFunction)),
-			max(s.Depth, 0), len(name), len(detail))
+		name, detail := field(s.Name), field(s.Detail)
+		if name == "" {
+			continue
+		}
+		head := fmt.Sprintf("%s %s %s %d %d\n", rangeFields(s.Range), word(string(s.Kind), string(SymbolFunction)),
+			num(s.Depth), len(name), len(detail))
 		if n == MaxRecords || recs.Len()+len(head)+len(name)+len(detail)+16 > MaxRecordsBody {
 			break
 		}
@@ -273,7 +323,8 @@ func (w WorkspaceEdit) Empty() bool {
 }
 
 // Encode is the body rhun reads (section 12g), or why it cannot be one: over MaxEditFiles,
-// MaxEdits or MaxEditBody. An edit cut short would leave the files half changed, so none is sent.
+// MaxEdits or MaxEditBody, or a path over MaxPath bytes. An edit cut short would leave the files
+// half changed, so none is sent.
 func (w WorkspaceEdit) Encode() ([]byte, error) {
 	if len(w.Files) > MaxEditFiles {
 		return nil, fmt.Errorf("%d files: at most %d", len(w.Files), MaxEditFiles)
@@ -290,6 +341,9 @@ func (w WorkspaceEdit) Encode() ([]byte, error) {
 	fmt.Fprintf(&b, "%d\n", len(w.Files))
 	for _, f := range w.Files {
 		p, v := f.Target.String(), "-"
+		if len(p) > MaxPath {
+			return nil, fmt.Errorf("a path over %d bytes", MaxPath)
+		}
 		if f.Version >= 0 {
 			v = itoa(f.Version)
 		}
@@ -334,9 +388,9 @@ const (
 	ActionSource   ActionKind = "source"
 )
 
-// CodeAction is one action of the list rhun shows by its Title (one line). Choosing it applies
-// Edit, when not nil, and then sends Data, when not empty, back to the handler's Action method.
-// Kind is ActionQuickFix when "".
+// CodeAction is one action of the list rhun shows by its Title (one line, at most MaxText bytes:
+// cut when encoded). Choosing it applies Edit, when not nil, and then sends Data, when not empty,
+// back to the handler's Action method. Kind is ActionQuickFix when "".
 type CodeAction struct {
 	Kind  ActionKind
 	Title string
@@ -344,12 +398,17 @@ type CodeAction struct {
 	Data  []byte
 }
 
-// EncodeActions is the body rhun reads for a list of code actions (section 12f). Actions past
-// MaxActions or MaxActionsBody, and those whose edit cannot be encoded, are left out.
+// EncodeActions is the body rhun reads for a list of code actions (section 12f). Actions without a
+// title, those whose edit cannot be encoded, and those past MaxActions or MaxActionsBody are left
+// out.
 func EncodeActions(actions []CodeAction) []byte {
 	var recs bytes.Buffer
 	n := 0
 	for _, a := range actions {
+		title := field(a.Title)
+		if title == "" {
+			continue
+		}
 		var edit []byte
 		if a.Edit != nil {
 			b, err := a.Edit.Encode()
@@ -358,7 +417,6 @@ func EncodeActions(actions []CodeAction) []byte {
 			}
 			edit = b
 		}
-		title := oneLine(a.Title)
 		head := fmt.Sprintf("%s %d %d %d\n", word(string(a.Kind), string(ActionQuickFix)), len(title), len(edit), len(a.Data))
 		if n == MaxActions || recs.Len()+len(head)+len(title)+len(edit)+len(a.Data)+16 > MaxActionsBody {
 			break
@@ -469,14 +527,7 @@ const maxErrorText = 1000
 
 // errorLine is "error ID CODE TEXT" with the text on one line, cut at a character.
 func errorLine(id string, re *Error) string {
-	text := strings.TrimSpace(oneLine(re.Text))
-	if len(text) > maxErrorText {
-		cut := maxErrorText
-		for cut > 0 && !utf8.RuneStart(text[cut]) {
-			cut--
-		}
-		text = text[:cut]
-	}
+	text := cut(strings.TrimSpace(oneLine(re.Text)), maxErrorText)
 	if text == "" {
 		return fmt.Sprintf("error %s %s\n", id, re.Code)
 	}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,13 +95,81 @@ func TestLocationsAreFramedAsRhunReadsThem(t *testing.T) {
 	if got := EncodeLocations(many); !strings.HasPrefix(string(got), "10000\n") {
 		t.Fatalf("10001 locations: %q", got[:10])
 	}
-	// 300 KB paths: three fit in 1 MB, the rest is left out
-	big := make([]Location, 6)
+	// records of 5018 bytes (a path of 4000, a preview of 1000): 208 fit in 1 MB, the rest is left out
+	big := make([]Location, 300)
 	for i := range big {
-		big[i].Target.Path = "/" + strings.Repeat("p", 300<<10-1)
+		big[i] = Location{Target: Target{Path: "/" + strings.Repeat("p", 3999)}, Range: rg(1, 1, 1, 1), Text: strings.Repeat("t", 1000)}
 	}
-	if got := EncodeLocations(big); !strings.HasPrefix(string(got), "3\n") || len(got) > MaxRecordsBody {
-		t.Fatalf("over 1 MB: %q, %d bytes", got[:3], len(got))
+	if got := EncodeLocations(big); !strings.HasPrefix(string(got), "208\n") || len(got) != 4+208*5018 {
+		t.Fatalf("over 1 MB: %q, %d bytes", got[:4], len(got))
+	}
+}
+
+// TestFieldsRhunWouldRefuseAreCutOrLeftOut: rhun drops a whole answer for one name, title or
+// detail over 1000 bytes, kind over 40 or path over 4096, so the encoders cut or leave them out.
+func TestFieldsRhunWouldRefuseAreCutOrLeftOut(t *testing.T) {
+	x999, y := strings.Repeat("x", 999), strings.Repeat("y", 10)
+	straddle := x999 + "é" + y // é is bytes 999 and 1000: cut before it
+	exact := x999 + "z"        // 1000 bytes: kept whole
+	line := "a\nb" + strings.Repeat("c", 1000)
+	path4096 := "/" + strings.Repeat("p", 4095)
+
+	// numbers are not negative and have at most 10 digits
+	huge, hugeWord := math.MaxInt, "4294967295"
+	if strconv.IntSize == 32 {
+		hugeWord = strconv.Itoa(huge)
+	}
+	got := string(EncodeLocations([]Location{
+		{Target: Target{Path: path4096 + "q"}, Range: rg(1, 1, 1, 1), Text: "left out"},
+		{Target: Target{Path: path4096}, Range: rg(1, 1, 1, 2), Text: "  " + straddle + "  "},
+		{Target: Target{Doc: 2}, Range: rg(-1, 0, huge, 3), Text: line},
+	}))
+	want := list(locRec("1 1 1 2", path4096, x999), locRec("0 0 "+hugeWord+" 3", "#2", "a b"+strings.Repeat("c", 997)))
+	if got != want {
+		t.Fatalf("locations:\ngot  %.120q\nwant %.120q", got, want)
+	}
+
+	got = string(EncodeSymbols([]Symbol{
+		{Range: rg(1, 1, 1, 1), Kind: SymbolKind(strings.Repeat("k", 39) + "é"), Depth: 3, Name: straddle, Detail: exact + "!"},
+		{Range: rg(2, 1, 2, 1), Name: "\n"},            // a space: a name
+		{Range: rg(3, 1, 3, 1), Name: ""},              // left out
+		{Range: rg(4, 1, 4, 1), Name: "v", Kind: "\t"}, // no kind left: function
+	}))
+	want = list(symRec("1 1 1 1", strings.Repeat("k", 39), 3, x999, exact),
+		symRec("2 1 2 1", "function", 0, " ", ""), symRec("4 1 4 1", "function", 0, "v", ""))
+	if got != want {
+		t.Fatalf("symbols:\ngot  %.200q\nwant %.200q", got, want)
+	}
+	if got := string(EncodeSymbols([]Symbol{{Name: ""}})); got != "0\n" {
+		t.Fatalf("a symbol without a name: %q", got)
+	}
+
+	var e WorkspaceEdit
+	e.AddDoc(1, 2, TextEdit{rg(1, 1, 1, 1), "x"})
+	got = string(EncodeActions([]CodeAction{
+		{Kind: ActionKind(strings.Repeat("k", 50)), Title: straddle, Data: []byte("d")},
+		{Kind: ActionSource, Title: "", Edit: &e},
+		{Kind: "a\x01b c", Title: exact},
+	}))
+	want = list(actionRec(strings.Repeat("k", 40), x999, "", "d"), actionRec("abc", exact, "", ""))
+	if got != want {
+		t.Fatalf("actions:\ngot  %.120q\nwant %.120q", got, want)
+	}
+
+	var far WorkspaceEdit
+	far.AddDoc(1, 2, TextEdit{rg(1, 1, 1, 1), "x"})
+	far.AddFile(path4096+"q", OnDisk)
+	if _, err := far.Encode(); err == nil || err.Error() != "a path over 4096 bytes" {
+		t.Fatalf("a path over 4096 bytes: %v", err)
+	}
+	var near WorkspaceEdit
+	near.AddFile(path4096, OnDisk, TextEdit{rg(1, 1, 1, 1), "x"})
+	if got, err := near.Encode(); err != nil || string(got) != workspace(group(path4096, "-", editRec("1 1 1 1", "x"))) {
+		t.Fatalf("a path of 4096 bytes: %v", err)
+	}
+	// an action whose edit names such a path is left out, as one whose edit is too big
+	if got := string(EncodeActions([]CodeAction{{Title: "far", Edit: &far}})); got != "0\n" {
+		t.Fatalf("an action with a far path: %q", got)
 	}
 }
 
@@ -120,6 +190,9 @@ func TestSymbolsAreFramedAsRhunReadsThem(t *testing.T) {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
 	many := make([]Symbol, MaxRecords+1)
+	for i := range many {
+		many[i].Name = "v"
+	}
 	if got := EncodeSymbols(many); !strings.HasPrefix(string(got), "10000\n") {
 		t.Fatalf("10001 symbols: %q", got[:10])
 	}
@@ -207,13 +280,16 @@ func TestActionsCarryTheirEditAndData(t *testing.T) {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
 	many := make([]CodeAction, MaxActions+1)
+	for i := range many {
+		many[i].Title = "t"
+	}
 	if got := EncodeActions(many); !strings.HasPrefix(string(got), "1000\n") {
 		t.Fatalf("1001 actions: %q", got[:10])
 	}
 	// 1 MB of data each: three fit in 4 MB, the rest is left out
 	big := make([]CodeAction, 5)
 	for i := range big {
-		big[i].Data = make([]byte, 1<<20)
+		big[i] = CodeAction{Title: "t", Data: make([]byte, 1<<20)}
 	}
 	if got := EncodeActions(big); !strings.HasPrefix(string(got), "3\n") || len(got) > MaxActionsBody {
 		t.Fatalf("over 4 MB: %q, %d bytes", got[:3], len(got))
@@ -485,5 +561,55 @@ func TestABadActionLengthEndsTheSession(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the session went on")
+	}
+}
+
+// waiter asks for a toast when ready: the request waits while the bad length arrives
+type waiter struct {
+	plain
+	got chan error
+}
+
+func (w *waiter) Ready(ext *Ext, project string) { w.got <- ext.Toast("hi") }
+
+// TestEventLengthsAreCheckedBeforeAllocating: an edits or action LEN over 4 MB, or one that is not
+// a plain decimal of at most 10 digits, ends the session as end of input does (the request waiting
+// fails) without reading or allocating its body.
+func TestEventLengthsAreCheckedBeforeAllocating(t *testing.T) {
+	for _, bad := range []string{"0 action 4194305", "0 action 99999999999", "0 action +5", "0 action 5x",
+		"0 action ", "0 edits 1 2 4194305", "0 edits 1 2 -0", "0 edits 1 2 1e3"} {
+		w := &waiter{plain: plain{events: make(chan Event, 8)}, got: make(chan error, 1)}
+		s := startHost(t, nil, w)
+		s.expect("hello 1")
+		s.send("0 ready -\n")
+		s.expect("1 toast 2")
+		b := make([]byte, 2)
+		if _, err := io.ReadFull(s.br, b); err != nil || string(b) != "hi" {
+			t.Fatalf("the toast's body: %q %v", b, err)
+		}
+		// the body is not read: what follows is never taken for messages
+		go s.send(bad + "\nok 1\n0 bye\n")
+		select {
+		case err := <-w.got:
+			if err == nil {
+				t.Fatalf("%q: the waiting request succeeded", bad)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%q: the waiting request still waits", bad)
+		}
+		select {
+		case err := <-s.done:
+			if err == nil || !strings.Contains(err.Error(), "length") {
+				t.Fatalf("%q: the session ended with %v", bad, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%q: the session went on", bad)
+		}
+	}
+	if n, ok := bodyLen("4194304", MaxEventBody); !ok || n != 4<<20 {
+		t.Fatal("4 MB is a length")
+	}
+	if n, ok := bodyLen("0", MaxEventBody); !ok || n != 0 {
+		t.Fatal("0 is a length")
 	}
 }

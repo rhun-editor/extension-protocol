@@ -266,3 +266,17 @@ fn language_requests_and_the_action_event() {
     done.join().unwrap().unwrap();
     assert_eq!(*seen.lock().unwrap(), vec!["a b\nc".to_string(), "Err(\"stale\")".to_string()]);
 }
+
+#[test]
+fn an_action_length_rhun_never_sends_ends_the_session() {
+    let (to_ext, ext_in) = channel::<Vec<u8>>();
+    let (ext_out, from_ext) = channel();
+    struct Quiet;
+    impl Handler for Quiet {}
+    let done = thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &[], Quiet));
+    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    assert_eq!(host.line(), "hello 1");
+    host.send("0 action 18446744073709551615\n");
+    // the session ends without allocating, while rhun's end is still open
+    done.join().unwrap().unwrap();
+}

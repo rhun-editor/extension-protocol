@@ -2,16 +2,19 @@ package main
 
 // Sections 12d to 12h of the spec: definition, references, symbols, code actions, rename and
 // format. The checker asks each agreed feature about a document its [provides] patterns match and
-// reads the answer as rhun does: locations, symbols, actions and workspace edits, every range
-// against the text it names (an open document at its version, or a file on disk). The workspace
-// edits of a rename, a format and the chosen action are then made, as rhun makes them, and the
-// chosen action's data goes back as the action event.
+// reads the answer as rhun does (src/app/langfeat.s): a record that breaks one of rhun's rules
+// makes it drop the whole answer, which fails the check; what the spec asks but rhun copes with (a
+// range past the text, a preview with a line break) is a warning. The workspace edits of a rename,
+// a format and the chosen code action are checked against the texts they name (an open document
+// at its version, or a file on disk as rhun would open it) and made as rhun makes them; the chosen
+// action's data then goes back as the action event.
 
 import (
 	"bytes"
+	"cmp"
 	"fmt"
-	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,17 +70,8 @@ func (h *host) provider(d *doc) bool {
 
 // ---- reading a body as rhun does ----
 
-// words splits a header line at single spaces; nil when a field is empty (two spaces, or one at
-// an end), which the grammar does not allow
-func words(l string) []string {
-	w := strings.Split(l, " ")
-	for _, x := range w {
-		if x == "" {
-			return nil
-		}
-	}
-	return w
-}
+// maxWarns is how many warnings one answer reports
+const maxWarns = 20
 
 // count is a number of at most 10 digits, as rhun reads lengths and counts; -1 when it is not one
 func count(s string) int {
@@ -93,10 +87,19 @@ func count(s string) int {
 	return n
 }
 
-// cursor walks a body: header lines and the bytes that follow them
+// cursor walks a body: header lines and the bytes that follow them; what is odd but allowed
+// gathers in warns
 type cursor struct {
-	b   []byte
-	pos int
+	b      []byte
+	pos    int
+	warns  []string
+	spaced bool // a header line ended in a space (said once)
+}
+
+func (c *cursor) warn(format string, a ...any) {
+	if len(c.warns) < maxWarns {
+		c.warns = append(c.warns, fmt.Sprintf(format, a...))
+	}
 }
 
 func (c *cursor) line() (string, bool) {
@@ -120,26 +123,52 @@ func (c *cursor) take(n int) ([]byte, bool) {
 
 func (c *cursor) rest() int { return len(c.b) - c.pos }
 
+// fields splits a header line as rhun reads it (ps_word): words between single spaces; nil when
+// one is empty (two spaces, or one at the start). rhun also takes one space after the last word,
+// which the grammar does not have (a warning).
+func (c *cursor) fields(l string) []string {
+	t, trailing := strings.CutSuffix(l, " ")
+	w := strings.Split(t, " ")
+	for _, x := range w {
+		if x == "" {
+			return nil
+		}
+	}
+	if trailing && !c.spaced {
+		c.spaced = true
+		c.warn("the header line %q ends in a space: rhun reads it, but the grammar has none", l)
+	}
+	return w
+}
+
 // head reads the first line, N, at most max; why when it is not one
 func (c *cursor) head(max int, what string) (int, string) {
 	l, ok := c.line()
 	if !ok {
 		return 0, "the body has no first line N"
 	}
-	n := count(l)
+	n := -1
+	if w := c.fields(l); len(w) == 1 {
+		n = count(w[0])
+	}
 	if n < 0 || n > max {
 		return 0, fmt.Sprintf("the first line %q is not N, 0 to %d %s", l, max, what)
 	}
 	return n, ""
 }
 
-// span is the range L1 C1 L2 C2 (the first four words) in a text: byte offsets, or why not
-func span(d *doc, w []string) (int, int, string) {
-	for _, x := range w[:4] {
-		if count(x) < 1 {
-			return 0, 0, fmt.Sprintf("%q is not a line or column (1 or more)", x)
+// numbers says which of the words is not a number of at most 10 digits (rhun's ps_num), or ""
+func numbers(w []string) string {
+	for _, x := range w {
+		if count(x) < 0 {
+			return fmt.Sprintf("%q is not a number of at most 10 digits", x)
 		}
 	}
+	return ""
+}
+
+// span is the range L1 C1 L2 C2 (the first four words) in a text: byte offsets, or why not
+func span(d *doc, w []string) (int, int, string) {
 	a, why := d.position(w[0], w[1])
 	if why != "" {
 		return 0, 0, "the range starts badly: " + why
@@ -177,7 +206,35 @@ func answer(m message) ([]byte, string) {
 	return m.body, ""
 }
 
-// place is the text a PATH names: an open document, by its id or its path, or a file on disk
+// pathOK says whether rhun reads p as a PATH (lf_path_ok): "#" and 1 to 18 digits, or an absolute
+// path ("/..."; on Windows also "\...", "X:/..." and "X:\..."), without a NUL, CR or LF
+func pathOK(p []byte) bool {
+	if len(p) == 0 || bytes.ContainsAny(p, "\x00\r\n") {
+		return false
+	}
+	if p[0] == '#' {
+		if len(p) < 2 || len(p) > 19 {
+			return false
+		}
+		for _, c := range p[1:] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	if p[0] == '/' {
+		return true
+	}
+	return runtime.GOOS == "windows" && (p[0] == '\\' || len(p) >= 3 && p[1] == ':' && (p[2] == '/' || p[2] == '\\'))
+}
+
+// badPath is why rhun does not read a PATH
+func badPath(p []byte) string {
+	return fmt.Sprintf("the path %q is neither absolute nor #DOC (or holds a NUL or a line break)", p)
+}
+
+// place is the text a PATH names: an open document, or a file on disk as rhun would open it
 type place struct {
 	d    *doc   // the open document, nil for a file that is not open
 	path string // as the answer gave it
@@ -192,37 +249,36 @@ func (t place) at() *doc {
 	return &doc{path: t.path, text: t.text}
 }
 
-// resolve finds what a PATH of 12d or 12g names: #DOC, an open document's path, or a readable
-// file; or the code an apply request is refused with (section 8) and why
-func (h *host) resolve(p []byte) (place, string, string) {
+// openDoc is the document a PATH rhun reads names when it is open (#DOC, or an open file's path),
+// or nil
+func (h *host) openDoc(p []byte) *doc {
 	s := string(p)
-	if bytes.IndexByte(p, 0) >= 0 || bytes.ContainsAny(p, "\r\n") {
-		return place{}, "nofile", fmt.Sprintf("the path %q holds a NUL or a line break", s)
-	}
-	if strings.HasPrefix(s, "#") {
-		id := count(s[1:])
-		if id < 1 {
-			return place{}, "nofile", fmt.Sprintf("%q is not #DOC", s)
-		}
-		d := h.docs[int64(id)]
-		if d == nil {
-			return place{}, "nodoc", fmt.Sprintf("%s names document %d, which rhun never opened", s, id)
-		}
-		return place{d: d, path: s, text: d.text}, "", ""
-	}
-	if !filepath.IsAbs(s) {
-		return place{}, "nofile", fmt.Sprintf("the path %q is neither absolute nor #DOC", s)
+	if s[0] == '#' {
+		id, _ := strconv.ParseInt(s[1:], 10, 64)
+		return h.docs[id]
 	}
 	for _, id := range h.docIDs() {
 		if d := h.docs[id]; d.path == s {
-			return place{d: d, path: s, text: d.text}, "", ""
+			return d
 		}
 	}
-	data, err := os.ReadFile(s)
-	if err != nil {
-		return place{}, "nofile", fmt.Sprintf("%s is neither open nor a file rhun can read", s)
+	return nil
+}
+
+// lookup finds what a PATH rhun reads names: an open document, or a file rhun would open as text;
+// why not
+func (h *host) lookup(p []byte) (place, string) {
+	if d := h.openDoc(p); d != nil {
+		return place{d: d, path: string(p), text: d.text}, ""
 	}
-	return place{path: s, text: data}, "", ""
+	if p[0] == '#' {
+		return place{}, fmt.Sprintf("%s names a document rhun never opened", p)
+	}
+	text, why, _ := loadFile(string(p))
+	if why != "" {
+		return place{}, fmt.Sprintf("%s is not open, and %s", p, why)
+	}
+	return place{path: string(p), text: text}, ""
 }
 
 // docIDs are the open documents' ids in order
@@ -237,56 +293,59 @@ func (h *host) docIDs() []int64 {
 
 // ---- the bodies ----
 
-// checkLocations validates a locations answer (12d): the number of locations, or why rhun drops it
-func (h *host) checkLocations(m message) (int, string) {
+// checkLocations validates a locations answer (12d): the number of locations and what is odd but
+// allowed, or why rhun drops it. rhun reads the numbers and the path's form; where a location
+// leads is found when it is chosen (a range past the text goes to the nearest place).
+func (h *host) checkLocations(m message) (int, []string, string) {
 	b, why := answer(m)
 	if why != "" {
-		return 0, why
+		return 0, nil, why
 	}
 	if len(b) > 1<<20 {
-		return 0, "the locations are over 1 MB"
+		return 0, nil, "the locations are over 1 MB"
 	}
 	c := &cursor{b: b}
 	n, why := c.head(10000, "locations")
 	if why != "" {
-		return 0, why
+		return 0, nil, why
 	}
 	for i := 1; i <= n; i++ {
 		l, ok := c.line()
 		if !ok {
-			return 0, fmt.Sprintf("location %d has no header line (N says %d)", i, n)
+			return 0, nil, fmt.Sprintf("location %d has no header line (N says %d)", i, n)
 		}
-		w := words(l)
+		w := c.fields(l)
 		if len(w) != 6 {
-			return 0, fmt.Sprintf("location %d's header %q is not L1 C1 L2 C2 PATH_LEN TEXT_LEN", i, l)
+			return 0, nil, fmt.Sprintf("location %d's header %q is not L1 C1 L2 C2 PATH_LEN TEXT_LEN", i, l)
+		}
+		if why := numbers(w); why != "" {
+			return 0, nil, fmt.Sprintf("location %d: %s", i, why)
 		}
 		pl, tl := count(w[4]), count(w[5])
 		if pl < 1 || pl > 4096 {
-			return 0, fmt.Sprintf("location %d: PATH_LEN %q is not 1 to 4096", i, w[4])
-		}
-		if tl < 0 {
-			return 0, fmt.Sprintf("location %d: TEXT_LEN %q is not a length", i, w[5])
+			return 0, nil, fmt.Sprintf("location %d: PATH_LEN %q is not 1 to 4096", i, w[4])
 		}
 		path, ok1 := c.take(pl)
 		text, ok2 := c.take(tl)
 		if !ok1 || !ok2 {
-			return 0, fmt.Sprintf("location %d's bytes run past the body", i)
+			return 0, nil, fmt.Sprintf("location %d's bytes run past the body", i)
 		}
-		t, _, why := h.resolve(path)
-		if why != "" {
-			return 0, fmt.Sprintf("location %d: %s", i, why)
+		if !pathOK(path) {
+			return 0, nil, fmt.Sprintf("location %d: %s", i, badPath(path))
 		}
-		if _, _, why := span(t.at(), w); why != "" {
-			return 0, fmt.Sprintf("location %d in %s: %s", i, path, why)
+		if t, why := h.lookup(path); why != "" {
+			c.warn("location %d: %s: rhun lists it, but cannot go there", i, why)
+		} else if _, _, why := span(t.at(), w); why != "" {
+			c.warn("location %d in %s: %s (rhun goes to the nearest place)", i, path, why)
 		}
 		if why := oneLine("the preview", text); why != "" {
-			return 0, fmt.Sprintf("location %d: %s", i, why)
+			c.warn("location %d: %s", i, why)
 		}
 	}
 	if c.rest() > 0 {
-		return 0, fmt.Sprintf("%d bytes after the %d locations N says", c.rest(), n)
+		return 0, nil, fmt.Sprintf("%d bytes after the %d locations N says", c.rest(), n)
 	}
-	return n, ""
+	return n, c.warns, ""
 }
 
 // checkSymbols validates a symbols answer (12e) about d: the number of symbols and what is odd
@@ -304,7 +363,6 @@ func checkSymbols(m message, d *doc) (int, []string, string) {
 	if why != "" {
 		return 0, nil, why
 	}
-	var warns []string
 	odd := map[string]bool{}
 	prev := 0
 	for i := 1; i <= n; i++ {
@@ -312,29 +370,21 @@ func checkSymbols(m message, d *doc) (int, []string, string) {
 		if !ok {
 			return 0, nil, fmt.Sprintf("symbol %d has no header line (N says %d)", i, n)
 		}
-		w := words(l)
+		w := c.fields(l)
 		if len(w) != 8 {
 			return 0, nil, fmt.Sprintf("symbol %d's header %q is not L1 C1 L2 C2 KIND DEPTH NAME_LEN DETAIL_LEN", i, l)
 		}
-		a, _, why := span(d, w)
-		if why != "" {
+		if why := numbers(append(w[:4:4], w[5:]...)); why != "" {
 			return 0, nil, fmt.Sprintf("symbol %d: %s", i, why)
 		}
 		if len(w[4]) > 40 {
 			return 0, nil, fmt.Sprintf("symbol %d: KIND %q is over 40 bytes", i, w[4])
 		}
-		if !symbolKinds[w[4]] && !odd[w[4]] {
-			odd[w[4]] = true
-			warns = append(warns, fmt.Sprintf("symbol %d: KIND %q is not one 12e lists (rhun shows it as given)", i, w[4]))
-		}
-		if count(w[5]) < 0 {
-			return 0, nil, fmt.Sprintf("symbol %d: DEPTH %q is not a number", i, w[5])
-		}
 		nl, dl := count(w[6]), count(w[7])
 		if nl < 1 || nl > 1000 {
 			return 0, nil, fmt.Sprintf("symbol %d: NAME_LEN %q is not 1 to 1000", i, w[6])
 		}
-		if dl < 0 || dl > 1000 {
+		if dl > 1000 {
 			return 0, nil, fmt.Sprintf("symbol %d: DETAIL_LEN %q is not 0 to 1000", i, w[7])
 		}
 		name, ok1 := c.take(nl)
@@ -342,106 +392,121 @@ func checkSymbols(m message, d *doc) (int, []string, string) {
 		if !ok1 || !ok2 {
 			return 0, nil, fmt.Sprintf("symbol %d's bytes run past the body", i)
 		}
+		if !symbolKinds[w[4]] && !odd[w[4]] {
+			odd[w[4]] = true
+			c.warn("symbol %d: KIND %q is not one 12e lists (rhun shows it as given)", i, w[4])
+		}
 		if why := oneLine("the name", name); why != "" {
-			return 0, nil, fmt.Sprintf("symbol %d: %s", i, why)
+			c.warn("symbol %d: %s", i, why)
 		}
 		if why := oneLine("the detail", detail); why != "" {
-			return 0, nil, fmt.Sprintf("symbol %d: %s", i, why)
+			c.warn("symbol %d: %s", i, why)
 		}
-		if a < prev && len(warns) < 20 {
-			warns = append(warns, fmt.Sprintf("symbol %d starts before the one above it: symbols come in document order", i))
+		a, _, why := span(d, w)
+		switch {
+		case why != "":
+			c.warn("symbol %d: %s (rhun goes to the nearest place)", i, why)
+		case a < prev:
+			c.warn("symbol %d starts before the one above it: symbols come in document order", i)
 		}
-		prev = a
+		if why == "" {
+			prev = a
+		}
 	}
 	if c.rest() > 0 {
 		return 0, nil, fmt.Sprintf("%d bytes after the %d symbols N says", c.rest(), n)
 	}
-	return n, warns, ""
+	return n, c.warns, ""
 }
 
-// codeAction is one action of a 12f answer, its edit checked
+// codeAction is one action of a 12f answer: its edit is read when the list comes and checked
+// against the documents when it is chosen
 type codeAction struct {
 	kind, title string
-	edit        []wsGroup
-	data        []byte
+	edit, data  []byte
 }
 
-// checkActions validates a code actions answer (12f), each action's workspace edit included
-func (h *host) checkActions(m message) ([]codeAction, string) {
+// checkActions validates a code actions answer (12f): the actions and what is odd but allowed, or
+// why the answer is broken. rhun keeps each action's edit whole and checks it when the action is
+// chosen; an edit that cannot be read is broken whatever the documents say, so it fails here, while
+// one made for another version of a document may still be right when chosen.
+func (h *host) checkActions(m message) ([]codeAction, []string, string) {
 	b, why := answer(m)
 	if why != "" {
-		return nil, why
+		return nil, nil, why
 	}
 	if len(b) > 4<<20 {
-		return nil, "the actions are over 4 MB"
+		return nil, nil, "the actions are over 4 MB"
 	}
 	c := &cursor{b: b}
 	n, why := c.head(1000, "actions")
 	if why != "" {
-		return nil, why
+		return nil, nil, why
 	}
 	var acts []codeAction
 	for i := 1; i <= n; i++ {
 		l, ok := c.line()
 		if !ok {
-			return nil, fmt.Sprintf("action %d has no header line (N says %d)", i, n)
+			return nil, nil, fmt.Sprintf("action %d has no header line (N says %d)", i, n)
 		}
-		w := words(l)
+		w := c.fields(l)
 		if len(w) != 4 {
-			return nil, fmt.Sprintf("action %d's header %q is not KIND TITLE_LEN EDIT_LEN DATA_LEN", i, l)
+			return nil, nil, fmt.Sprintf("action %d's header %q is not KIND TITLE_LEN EDIT_LEN DATA_LEN", i, l)
 		}
 		if len(w[0]) > 40 {
-			return nil, fmt.Sprintf("action %d: KIND %q is over 40 bytes", i, w[0])
+			return nil, nil, fmt.Sprintf("action %d: KIND %q is over 40 bytes", i, w[0])
+		}
+		if why := numbers(w[1:]); why != "" {
+			return nil, nil, fmt.Sprintf("action %d: %s", i, why)
 		}
 		tl, el, dl := count(w[1]), count(w[2]), count(w[3])
 		if tl < 1 || tl > 1000 {
-			return nil, fmt.Sprintf("action %d: TITLE_LEN %q is not 1 to 1000", i, w[1])
-		}
-		if el < 0 || dl < 0 {
-			return nil, fmt.Sprintf("action %d: EDIT_LEN %q or DATA_LEN %q is not a length", i, w[2], w[3])
+			return nil, nil, fmt.Sprintf("action %d: TITLE_LEN %q is not 1 to 1000", i, w[1])
 		}
 		title, ok1 := c.take(tl)
 		edit, ok2 := c.take(el)
 		data, ok3 := c.take(dl)
 		if !ok1 || !ok2 || !ok3 {
-			return nil, fmt.Sprintf("action %d's bytes run past the body", i)
+			return nil, nil, fmt.Sprintf("action %d's bytes run past the body", i)
 		}
 		if why := oneLine("the title", title); why != "" {
-			return nil, fmt.Sprintf("action %d: %s", i, why)
+			c.warn("action %d: %s", i, why)
 		}
-		a := codeAction{kind: w[0], title: string(title), data: data}
 		if len(edit) > 0 {
-			gs, _, why := h.checkWorkspaceEdit(edit, nil)
-			if why != "" {
-				return nil, fmt.Sprintf("action %d (%q): its edit: %s", i, title, why)
+			if _, code, why := editGrammar(edit); why != "" {
+				return nil, nil, fmt.Sprintf("action %d (%q): its edit cannot be made whatever the documents say (rhun would answer an apply %s): %s",
+					i, title, code, why)
 			}
-			a.edit = gs
 		}
-		acts = append(acts, a)
+		acts = append(acts, codeAction{kind: w[0], title: string(title), edit: edit, data: data})
 	}
 	if c.rest() > 0 {
-		return nil, fmt.Sprintf("%d bytes after the %d actions N says", c.rest(), n)
+		return nil, nil, fmt.Sprintf("%d bytes after the %d actions N says", c.rest(), n)
 	}
-	return acts, ""
+	return acts, c.warns, ""
 }
 
-// wsEdit is an edit of a workspace edit: bytes start to end of its file's text become text
+// wsEdit is an edit of a workspace edit: its range as written, bytes start to end of its file's
+// text once checked, and the new text
 type wsEdit struct {
+	at         []string
 	start, end int
 	text       []byte
 }
 
-// wsGroup is a file of a workspace edit, its edits sorted as rhun sorts them
+// wsGroup is a file of a workspace edit: its PATH, VERSION (-1 for "-") and edits; once checked,
+// the text it names and its edits in the order rhun makes them
 type wsGroup struct {
-	t     place
-	edits []wsEdit
+	path    []byte
+	version int64
+	edits   []wsEdit
+	t       place
 }
 
-// checkWorkspaceEdit validates a workspace edit (12g) as rhun does before it changes anything:
-// each open document at its version, "-" only for a file that is not open, each range inside its
-// text, no overlaps, one group per file; only, when not nil, is the one document it may change.
-// A refused edit has the code rhun answers an apply request with (section 8) and the reason.
-func (h *host) checkWorkspaceEdit(b []byte, only *doc) ([]wsGroup, string, string) {
+// parseWorkspaceEdit reads a workspace edit (12g) as rhun does before it looks at any document or
+// file (ws_apply): the grammar and the caps. A refused edit has the code rhun answers an apply
+// request with (syntax or toobig) and the reason.
+func parseWorkspaceEdit(b []byte) ([]wsGroup, string, string) {
 	bad := func(code, format string, a ...any) ([]wsGroup, string, string) {
 		return nil, code, fmt.Sprintf(format, a...)
 	}
@@ -449,115 +514,70 @@ func (h *host) checkWorkspaceEdit(b []byte, only *doc) ([]wsGroup, string, strin
 		return bad("toobig", "the workspace edit is over 4 MB")
 	}
 	c := &cursor{b: b}
-	if l, ok := c.line(); ok && count(l) > 1000 {
-		return bad("toobig", "%s files: at most 1000", l)
+	l, ok := c.line()
+	n := -1
+	if w := c.fields(l); ok && len(w) == 1 {
+		n = count(w[0])
 	}
-	c.pos = 0
-	n, why := c.head(1000, "files")
-	if why != "" {
-		return bad("syntax", "%s", why)
+	switch {
+	case n < 0:
+		return bad("syntax", "the first line %q is not N, the number of files", l)
+	case n > 1000:
+		return bad("toobig", "%d files: at most 1000", n)
 	}
 	var groups []wsGroup
-	seen := map[string]bool{}
 	total := 0
 	for g := 1; g <= n; g++ {
 		l, ok := c.line()
 		if !ok {
 			return bad("syntax", "file %d has no header line (N says %d)", g, n)
 		}
-		w := words(l)
+		w := c.fields(l)
 		if len(w) != 3 {
 			return bad("syntax", "file %d's header %q is not PATH_LEN VERSION M", g, l)
 		}
-		pl, m := count(w[0]), count(w[2])
+		pl := count(w[0])
 		if pl < 1 || pl > 4096 {
 			return bad("syntax", "file %d: PATH_LEN %q is not 1 to 4096", g, w[0])
 		}
-		if m < 0 {
-			return bad("syntax", "file %d: M %q is not a count", g, w[2])
+		version := int64(-1)
+		if v := w[1]; v != "-" {
+			if len(v) > 18 || strings.Trim(v, "0123456789") != "" {
+				return bad("syntax", "file %d: VERSION %q is neither - nor a number of at most 18 digits", g, v)
+			}
+			version, _ = strconv.ParseInt(v, 10, 64)
 		}
-		if total += m; total > 100000 {
-			return bad("toobig", "over 100000 edits")
+		m := count(w[2])
+		if m < 0 {
+			return bad("syntax", "file %d: M %q is not a number of at most 10 digits", g, w[2])
 		}
 		path, ok := c.take(pl)
 		if !ok {
 			return bad("syntax", "file %d's path runs past the body", g)
 		}
-		t, code, why := h.resolve(path)
-		if why != "" {
-			return bad(code, "file %d: %s", g, why)
+		if total += m; total > 100000 {
+			return bad("toobig", "over 100000 edits")
 		}
-		key := t.path
-		if t.d != nil {
-			key = fmt.Sprintf("#%d", t.d.id)
-		}
-		if seen[key] {
-			return bad("syntax", "file %d: %s has a group already (one group per file)", g, path)
-		}
-		seen[key] = true
-		if only != nil && t.d != only {
-			return bad("refused", "file %d: %s is not the document asked about (#%d, %s)", g, path, only.id, only.path)
-		}
-		v := w[1]
-		switch {
-		case v == "-" && t.d != nil:
-			return bad("stale", "file %d: VERSION - for %s, which is open (at version %d): - is for a file that is not open", g, path, t.d.version)
-		case v == "-":
-		case len(v) > 18 || strings.Trim(v, "0123456789") != "":
-			return bad("syntax", "file %d: VERSION %q is neither a number nor -", g, v)
-		case t.d == nil:
-			return bad("nodoc", "file %d: VERSION %s for %s, which is not open: - is for a file that is not open", g, v, path)
-		default:
-			if x, _ := strconv.ParseInt(v, 10, 64); x != t.d.version {
-				return bad("stale", "file %d: VERSION %s for %s, which is at version %d", g, v, path, t.d.version)
-			}
-		}
-		d := t.at()
 		edits := make([]wsEdit, 0, m)
 		for e := 1; e <= m; e++ {
 			l, ok := c.line()
 			if !ok {
 				return bad("syntax", "file %d, edit %d has no header line (M says %d)", g, e, m)
 			}
-			w := words(l)
+			w := c.fields(l)
 			if len(w) != 5 {
 				return bad("syntax", "file %d, edit %d: %q is not L1 C1 L2 C2 LEN", g, e, l)
 			}
-			tl := count(w[4])
-			if tl < 0 {
-				return bad("syntax", "file %d, edit %d: LEN %q is not a length", g, e, w[4])
+			if why := numbers(w); why != "" {
+				return bad("syntax", "file %d, edit %d: %s", g, e, why)
 			}
-			text, ok := c.take(tl)
+			text, ok := c.take(count(w[4]))
 			if !ok {
 				return bad("syntax", "file %d, edit %d's text runs past the body", g, e)
 			}
-			a, z, why := span(d, w)
-			if why != "" {
-				return bad("badpos", "file %d, edit %d: %s", g, e, why)
-			}
-			edits = append(edits, wsEdit{a, z, text})
+			edits = append(edits, wsEdit{at: w[:4], text: text})
 		}
-		// rhun sorts a file's edits by where they start, an insertion keeping its place among those
-		// that start with it (at most 5000 out of order), then refuses one that starts inside the
-		// one before it
-		byStart := func(x, y wsEdit) int { return x.start - y.start }
-		if !slices.IsSortedFunc(edits, byStart) {
-			if len(edits) > 5000 {
-				return bad("toobig", "file %d: %d edits out of order (rhun sorts at most 5000: send them in order)", g, len(edits))
-			}
-			slices.SortStableFunc(edits, byStart)
-		}
-		for i := 1; i < len(edits); i++ {
-			if p, e := edits[i-1], edits[i]; p.end > e.start {
-				hint := ""
-				if e.start == e.end && e.start == p.start {
-					hint = ": an insertion where a replacement starts comes before it in the list"
-				}
-				return bad("badpos", "file %d: two edits overlap (bytes %d to %d and %d to %d of %s)%s", g,
-					p.start, p.end, e.start, e.end, path, hint)
-			}
-		}
-		groups = append(groups, wsGroup{t, edits})
+		groups = append(groups, wsGroup{path: path, version: version, edits: edits})
 	}
 	if c.rest() > 0 {
 		return bad("syntax", "%d bytes after the %d files N says", c.rest(), n)
@@ -565,9 +585,103 @@ func (h *host) checkWorkspaceEdit(b []byte, only *doc) ([]wsGroup, string, strin
 	return groups, "", ""
 }
 
+// editGrammar is what rhun refuses in a workspace edit whatever the documents say: its grammar and
+// caps, and each PATH's form
+func editGrammar(b []byte) ([]wsGroup, string, string) {
+	gs, code, why := parseWorkspaceEdit(b)
+	if why != "" {
+		return nil, code, why
+	}
+	for i, g := range gs {
+		if !pathOK(g.path) {
+			return nil, "nofile", fmt.Sprintf("file %d: %s", i+1, badPath(g.path))
+		}
+	}
+	return gs, "", ""
+}
+
+// checkWorkspaceEdit validates a workspace edit (12g) as rhun does before it changes anything, in
+// rhun's order: the whole grammar; then each file's document (an open one at its version, "-"
+// only while it has no unsaved changes; "-" for a file that is not open); then the files that are
+// not open, as rhun would open them; then each file's edits against its text, sorted, apart. only,
+// when not nil, is the one document it may change (a format). A refused edit has the code rhun
+// answers an apply request with (section 8) and the reason.
+func (h *host) checkWorkspaceEdit(b []byte, only *doc) ([]wsGroup, string, string) {
+	gs, code, why := parseWorkspaceEdit(b)
+	if why != "" {
+		return nil, code, why
+	}
+	bad := func(code, format string, a ...any) ([]wsGroup, string, string) {
+		return nil, code, fmt.Sprintf(format, a...)
+	}
+	for i := range gs {
+		g, n := &gs[i], i+1
+		if !pathOK(g.path) {
+			return bad("nofile", "file %d: %s", n, badPath(g.path))
+		}
+		d := h.openDoc(g.path)
+		switch {
+		case d == nil && g.path[0] == '#':
+			return bad("nodoc", "file %d: %s names a document rhun never opened", n, g.path)
+		case d == nil && g.version >= 0:
+			return bad("nodoc", "file %d: VERSION %d for %s, which is not open: - is for a file that is not open", n, g.version, g.path)
+		case d == nil:
+			continue
+		case g.version < 0 && d.dirty:
+			return bad("stale", "file %d: VERSION - for %s, which is open with unsaved changes (at version %d): - is for its text on disk", n, g.path, d.version)
+		case g.version >= 0 && g.version != d.version:
+			return bad("stale", "file %d: VERSION %d for %s, which is at version %d", n, g.version, g.path, d.version)
+		}
+		g.t = place{d: d, path: string(g.path), text: d.text}
+	}
+	for i := range gs {
+		g := &gs[i]
+		if g.t.d != nil {
+			continue
+		}
+		text, why, _ := loadFile(string(g.path))
+		if why != "" {
+			return bad("nofile", "file %d: %s is not open, and %s", i+1, g.path, why)
+		}
+		g.t = place{path: string(g.path), text: text}
+	}
+	for i := range gs {
+		g, n := &gs[i], i+1
+		if only != nil && g.t.d != only {
+			return bad("nofile", "file %d: %s is not the document asked about (#%d, %s)", n, g.path, only.id, only.path)
+		}
+		for _, p := range gs[:i] {
+			if g.t.d != nil && p.t.d == g.t.d || g.t.d == nil && p.t.d == nil && p.t.path == g.t.path {
+				return bad("syntax", "file %d: %s has a group already (one group per file)", n, g.path)
+			}
+		}
+		d := g.t.at()
+		for e := range g.edits {
+			x := &g.edits[e]
+			a, z, why := span(d, x.at)
+			if why != "" {
+				return bad("badpos", "file %d, edit %d: %s", n, e+1, why)
+			}
+			x.start, x.end = a, z
+		}
+		// rhun sorts them by start, then by end (an insertion before a replacement that starts
+		// where it is), equal ones keeping their order (we_cmp), then refuses one that starts
+		// before the one above it ends
+		slices.SortStableFunc(g.edits, func(x, y wsEdit) int { return cmp.Or(x.start-y.start, x.end-y.end) })
+		for e := 1; e < len(g.edits); e++ {
+			if p, x := g.edits[e-1], g.edits[e]; p.end > x.start {
+				return bad("badpos", "file %d: two edits overlap (bytes %d to %d and %d to %d of %s)", n,
+					p.start, p.end, x.start, x.end, g.path)
+			}
+		}
+	}
+	return gs, "", ""
+}
+
 // apply makes a checked workspace edit as rhun does: the files that are not open open, then each
 // file's edits are made from the last to the first and reported at the next frame: edits for a
-// document the extension hears, opened (at the version after them) for a file that just opened
+// document the extension hears, opened (at the version after them) for a file that just opened.
+// Nothing is saved: a document that changed has unsaved changes.
 func (h *host) apply(groups []wsGroup) {
 	for _, g := range groups {
 		d, fresh := g.t.d, g.t.d == nil
@@ -584,6 +698,9 @@ func (h *host) apply(groups []wsGroup) {
 			}
 		}
 		d.version += int64(len(recs))
+		if len(recs) > 0 {
+			d.dirty = true
+		}
 		switch {
 		case fresh:
 			h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
@@ -591,6 +708,23 @@ func (h *host) apply(groups []wsGroup) {
 			h.afterEdit(d, recs...)
 		}
 	}
+}
+
+// chooseAction is the user choosing a code action, as rhun does it: its edit, when it has one,
+// checked whole and made, then its data, when it has some, sent as the action event. An edit rhun
+// refuses changes nothing and sends nothing: why is its code and reason.
+func (h *host) chooseAction(a codeAction) string {
+	if len(a.edit) > 0 {
+		gs, code, why := h.checkWorkspaceEdit(a.edit, nil)
+		if why != "" {
+			return code + ": " + why
+		}
+		h.apply(gs)
+	}
+	if len(a.data) > 0 {
+		h.write(fmt.Sprintf("0 action %d\n%s", len(a.data), a.data))
+	}
+	return ""
 }
 
 // moved is where a position goes when an edit record is made: with the text around it
@@ -699,10 +833,14 @@ func (h *host) checkLangFeatures() {
 		if !ok {
 			continue
 		}
-		if n, why := h.checkLocations(m); why != "" {
+		n, warns, why := h.checkLocations(m)
+		for _, w := range warns {
+			h.warn(f, w)
+		}
+		if why != "" {
 			h.fail(f, why)
 		} else {
-			h.ok(fmt.Sprintf("answers %s requests with locations rhun can open (%d)", f, n))
+			h.ok(fmt.Sprintf("answers %s requests with locations rhun can list (%d)", f, n))
 		}
 	}
 	if has("symbols") {
@@ -722,25 +860,32 @@ func (h *host) checkLangFeatures() {
 	if has("actions") {
 		d := sample("actions")
 		if m, ok := h.langAsk("actions", fmt.Sprintf("actions %d %d 1 1 1 3", d.id, d.version)); ok {
-			acts, why := h.checkActions(m)
+			acts, warns, why := h.checkActions(m)
+			for _, w := range warns {
+				h.warn("actions", w)
+			}
 			if why != "" {
 				h.fail("actions", why)
 			} else {
 				h.ok(fmt.Sprintf("answers code action requests with actions rhun can list (%d)", len(acts)))
 			}
-			// the user chooses the first action that sends data back: its edit is made, then the
-			// event carries the data
-			for _, a := range acts {
-				if len(a.data) == 0 {
-					continue
-				}
-				h.apply(a.edit)
-				h.write(fmt.Sprintf("0 action %d\n%s", len(a.data), a.data))
-				if gone("actions", fmt.Sprintf("the action event of its action %q", a.title)) {
+			// the user chooses the first action that sends data back, else the first with an edit:
+			// its edit is checked and made, then the event carries the data
+			chosen := slices.IndexFunc(acts, func(a codeAction) bool { return len(a.data) > 0 })
+			if chosen < 0 {
+				chosen = slices.IndexFunc(acts, func(a codeAction) bool { return len(a.edit) > 0 })
+			}
+			if chosen >= 0 {
+				a := acts[chosen]
+				if why := h.chooseAction(a); why != "" {
+					h.fail("actions", fmt.Sprintf("its action %q, chosen at once, has an edit rhun refuses (nothing changes, and no action event is sent): %s", a.title, why))
+				} else if gone("actions", fmt.Sprintf("its chosen action %q", a.title)) {
 					return
+				} else if len(a.data) > 0 {
+					h.ok(fmt.Sprintf("takes the action event of its chosen action %q", a.title))
+				} else {
+					h.ok(fmt.Sprintf("its chosen action %q has an edit rhun can make", a.title))
 				}
-				h.ok(fmt.Sprintf("takes the action event of its chosen action %q", a.title))
-				break
 			}
 		}
 	}

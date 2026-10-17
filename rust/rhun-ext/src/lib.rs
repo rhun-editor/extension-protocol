@@ -752,7 +752,12 @@ impl Ext {
                     let rest = text.splitn(3, ' ').nth(2).unwrap_or("").to_string();
                     let mut ev = Event { name, fields: fields[2.min(fields.len())..].to_vec(), rest, body: Vec::new() };
                     if ev.name == "edits" || ev.name == "action" {
-                        let len: usize = ev.fields.last().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        // rhun sends at most 4 MB here: a larger length is not rhun's, and the
+                        // session ends rather than allocate it
+                        let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
+                            Some(n) if n <= 4 << 20 => n,
+                            _ => break,
+                        };
                         ev.body = vec![0; len];
                         if input.read_exact(&mut ev.body).is_err() {
                             break;

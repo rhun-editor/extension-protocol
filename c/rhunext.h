@@ -206,7 +206,10 @@ void rx_signature_answer(rx_buf *out, const char *signature, int from, int to, c
 /* Definition and references (12d): a location is a file by its absolute path, or with path NULL
  * the open document doc (an untitled one), and a range there (in the open document when the file
  * is open, else in the file on disk); preview is its line's text, trimmed (NULL for none). One
- * location opens at once, several make a list. Past 10000 or 1 MB the rest are left out. */
+ * location opens at once, several make a list. Past 10000 or 1 MB the rest are left out.
+ * rhun drops a whole answer for one field past its cap (12d), so the builders cut names, titles,
+ * details and previews to 1000 bytes and kind words to 40, at a character; a symbol or action whose
+ * name or title is then empty, and a location whose path is over 4096 bytes, are left out. */
 void rx_location(rx_locations *l, const char *path, rx_doc doc, rx_range r, const char *preview);
 /* Symbols (12e), in document order. kind is file module namespace package class method property
  * field constructor enum interface function variable constant string number boolean array object
@@ -218,17 +221,18 @@ void rx_symbol(rx_symbols *l, rx_range r, const char *kind, int depth, const cha
  * begin each file's edits with rx_wedit_file, then add them. They are made against one text, the
  * open document at version or with RX_ON_DISK the file on disk (rhun opens it), do not overlap,
  * and insertions at one position keep their order. rhun checks the whole edit before it changes
- * anything, and saves nothing. Past 4 MB, 1000 files or 100000 edits it cannot be sent (an edit
- * cut short would leave files half changed): none of it is. */
+ * anything, and saves nothing. Past 4 MB, 1000 files or 100000 edits, or with a path over 4096
+ * bytes, it cannot be sent (an edit cut short would leave files half changed): none of it is. */
 #define RX_ON_DISK (-1)
 void rx_wedit_file(rx_wedit *e, const char *path, rx_doc doc, int64_t version);
 void rx_wedit_edit(rx_wedit *e, rx_range r, const char *text, size_t len);
 /* nothing can be renamed there, and why (shown to the user): return rx_refuse(out, why); */
 int rx_refuse(rx_wedit *e, const char *why);
 /* Code actions (12f): kind quickfix (listed first), refactor, source or another word (NULL is
- * quickfix); title one line; edit (NULL for none) is applied when the action is chosen, and is used
- * up here (one that cannot be sent leaves the action out); data, len bytes of anything, comes back
- * to the action handler. Past 1000 actions or 4 MB the rest are left out. */
+ * quickfix); title one line (an empty one leaves the action out); edit (NULL for none) is applied
+ * when the action is chosen, and is used up here (one that cannot be sent leaves the action out);
+ * data, len bytes of anything, comes back to the action handler. Past 1000 actions or 4 MB the rest
+ * are left out. */
 void rx_action(rx_actions *l, const char *kind, const char *title, rx_wedit *edit, const void *data, size_t len);
 /* The bodies, appended to out, for answers built outside a handler; each empties its builder.
  * rx_wedit_finish returns 0, or -1 when the edit cannot be sent (e->fail and e->why say why) and
@@ -263,7 +267,8 @@ const char *rx_event_tail(const rx_event *ev, int n);
 #endif
 
 #define RX_MAXF 32
-#define RX_BODY_MAX ((long long)1 << 30)     /* the longest body read: rhun sends less */
+#define RX_BODY_MAX ((long long)1 << 30)     /* the longest reply body read (text, range, ask) */
+#define RX_EVENT_BODY_MAX ((long long)4 << 20)  /* an edits or action event's: rhun sends less */
 
 typedef struct rx_msg {
     char *line;
@@ -379,27 +384,47 @@ static int rx_split(char *line, char **f) {
     return n;
 }
 
-/* the last space-separated field of a line, as a number */
-static long long rx_last_num(const char *line) {
+/* the last space-separated field of a line as a body's length: a plain decimal of 1 to 10 digits
+ * and at most max, else -1 (checked before anything is allocated) */
+static long long rx_body_len(const char *line, long long max) {
     const char *s = strrchr(line, ' ');
-    return s ? atoll(s + 1) : -1;
+    if (!s || !s[1] || strlen(s + 1) > 10) return -1;
+    long long v = 0;
+    for (s++; *s; s++) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s - '0');
+    }
+    return v <= max ? v : -1;
 }
+
+/* the session is over: requests fail with why, and rx_run returns 1 once the queue is empty */
+static void rx_gone(rx_ext *ext, const char *why) {
+    ext->gone = 1;
+    snprintf(ext->error, sizeof ext->error, "closed %s", why);
+}
+
+static const char rx_bad_len[] = "a body's length that is not a decimal of at most 10 digits within its cap";
 
 /* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
 static int rx_has_body(const char *line) {
     return strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0;
 }
 
-/* reads the next message: a line, and a body when it is an edits or action event */
-static rx_msg *rx_read_msg(void) {
+/* reads the next message: a line, and a body when it is an edits or action event; NULL when the
+ * session is over (end of input, or a length rhun cannot have sent: its body is not read) */
+static rx_msg *rx_read_msg(rx_ext *ext) {
     char *line;
-    if (!rx_read_line(&line)) return NULL;
+    if (!rx_read_line(&line)) {
+        rx_gone(ext, "rhun went away");
+        return NULL;
+    }
     rx_msg *m = (rx_msg *)calloc(1, sizeof *m);
     if (!m) abort();
     m->line = line;
     if (rx_has_body(line)) {
-        long long n = rx_last_num(line);
-        if (n < 0 || n > RX_BODY_MAX || !(m->body = rx_read_body((size_t)n))) {
+        long long n = rx_body_len(line, RX_EVENT_BODY_MAX);
+        if (n < 0 || !(m->body = rx_read_body((size_t)n))) {
+            rx_gone(ext, n < 0 ? rx_bad_len : "rhun went away");
             free(line);
             free(m);
             return NULL;
@@ -449,8 +474,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     for (;;) {
         char *l;
         if (!rx_read_line(&l)) {
-            ext->gone = 1;
-            snprintf(ext->error, sizeof ext->error, "closed rhun went away");
+            rx_gone(ext, "rhun went away");
             return -1;
         }
         int is_ok = strncmp(l, "ok ", 3) == 0, is_err = strncmp(l, "error ", 6) == 0;
@@ -466,10 +490,10 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                 }
                 if (fields) rx_buf_str(fields, rest);
                 if (wants_body) {
-                    long long blen = rx_last_num(l);
-                    unsigned char *b = blen >= 0 && blen <= RX_BODY_MAX ? rx_read_body((size_t)blen) : NULL;
+                    long long blen = rx_body_len(l, RX_BODY_MAX);
+                    unsigned char *b = blen >= 0 ? rx_read_body((size_t)blen) : NULL;
                     if (!b) {
-                        ext->gone = 1;
+                        rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
                         free(l);
                         return -1;
                     }
@@ -487,9 +511,9 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
         if (!m) abort();
         m->line = l;
         if (rx_has_body(l)) {
-            long long blen = rx_last_num(l);
-            if (blen < 0 || blen > RX_BODY_MAX || !(m->body = rx_read_body((size_t)blen))) {
-                ext->gone = 1;
+            long long blen = rx_body_len(l, RX_EVENT_BODY_MAX);
+            if (blen < 0 || !(m->body = rx_read_body((size_t)blen))) {
+                rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
                 rx_free_msg(m);
                 return -1;
             }
@@ -813,6 +837,20 @@ void rx_signature_answer(rx_buf *out, const char *signature, int from, int to, c
 #define RX_WEDIT_FILES 1000                     /* a workspace edit (12g) */
 #define RX_WEDIT_EDITS 100000
 #define RX_WEDIT_BODY ((size_t)4 << 20)
+#define RX_TEXT_MAX 1000                        /* a name, title, detail or preview (12d) */
+#define RX_KIND_MAX 40                          /* a kind word */
+#define RX_PATH_MAX 4096
+
+/* how many of the n bytes of s fit in max, cut at the start of a character */
+static size_t rx_cut(const char *s, size_t n, size_t max) {
+    if (n <= max) return n;
+    n = max;
+    while (n > 0 && ((unsigned char)s[n] & 0xc0) == 0x80) n--;
+    return n;
+}
+
+/* a line or column as rhun reads it: not negative */
+static int rx_nn(int v) { return v < 0 ? 0 : v; }
 
 static void rx_buf_clear(rx_buf *b) {
     b->len = 0;
@@ -827,12 +865,15 @@ static void rx_add_line(rx_buf *b, const char *s, size_t n) {
         if (b->data[i] == '\n' || b->data[i] == '\r') b->data[i] = ' ';
 }
 
-/* a one-word field: s without spaces and control characters, or dflt when nothing is left */
+/* a one-word field: s without spaces and control characters, at most 40 bytes, or dflt when nothing
+ * is left */
 static void rx_add_word(rx_buf *b, const char *s, const char *dflt) {
     size_t at = b->len;
     for (; s && *s; s++)
-        if ((unsigned char)*s > ' ') rx_buf_add(b, s, 1);
+        if ((unsigned char)*s > ' ' && *s != 0x7f) rx_buf_add(b, s, 1);
     if (b->len == at) rx_buf_str(b, dflt);
+    b->len = at + rx_cut(b->data + at, b->len - at, RX_KIND_MAX);
+    b->data[b->len] = 0;
 }
 
 /* PATH (12d): the path, or #DOC */
@@ -869,9 +910,12 @@ void rx_location(rx_locations *l, const char *path, rx_doc doc, rx_range r, cons
     char tmp[32];
     const char *t = rx_target(path, doc, tmp, sizeof tmp), *p = preview ? preview : "";
     size_t tl = strlen(t), pl = strlen(p), mark = l->recs.len;
+    if (tl > RX_PATH_MAX) return;
     while (pl && rx_blank(p[0])) p++, pl--;
     while (pl && rx_blank(p[pl - 1])) pl--;
-    rx_buf_fmt(&l->recs, "%d %d %d %d %zu %zu\n", r.start.line, r.start.col, r.end.line, r.end.col, tl, pl);
+    pl = rx_cut(p, pl, RX_TEXT_MAX);
+    rx_buf_fmt(&l->recs, "%d %d %d %d %zu %zu\n", rx_nn(r.start.line), rx_nn(r.start.col), rx_nn(r.end.line),
+               rx_nn(r.end.col), tl, pl);
     rx_buf_add(&l->recs, t, tl);
     rx_add_line(&l->recs, p, pl);
     rx_keep(&l->recs, mark, &l->n, &l->full, RX_RECORDS_BODY);
@@ -882,8 +926,10 @@ void rx_symbol(rx_symbols *l, rx_range r, const char *kind, int depth, const cha
     if (l->full) return;
     if (!name) name = "";
     if (!detail) detail = "";
-    size_t nl = strlen(name), dl = strlen(detail), mark = l->recs.len;
-    rx_buf_fmt(&l->recs, "%d %d %d %d ", r.start.line, r.start.col, r.end.line, r.end.col);
+    size_t nl = rx_cut(name, strlen(name), RX_TEXT_MAX), dl = rx_cut(detail, strlen(detail), RX_TEXT_MAX);
+    size_t mark = l->recs.len;
+    if (!nl) return;
+    rx_buf_fmt(&l->recs, "%d %d %d %d ", rx_nn(r.start.line), rx_nn(r.start.col), rx_nn(r.end.line), rx_nn(r.end.col));
     rx_add_word(&l->recs, kind, "function");
     rx_buf_fmt(&l->recs, " %d %zu %zu\n", depth < 0 ? 0 : depth, nl, dl);
     rx_add_line(&l->recs, name, nl);
@@ -959,7 +1005,12 @@ void rx_wedit_file(rx_wedit *e, const char *path, rx_doc doc, int64_t version) {
         return;
     }
     char tmp[32];
-    rx_buf_str(&e->target, rx_target(path, doc, tmp, sizeof tmp));
+    const char *t = rx_target(path, doc, tmp, sizeof tmp);
+    if (strlen(t) > RX_PATH_MAX) {
+        rx_wedit_fail(e, "toobig", "a path over 4096 bytes");
+        return;
+    }
+    rx_buf_str(&e->target, t);
     e->version = version < 0 ? -1 : version;
     e->files++;
     e->open = 1;
@@ -980,7 +1031,8 @@ void rx_wedit_edit(rx_wedit *e, rx_range r, const char *text, size_t len) {
         rx_wedit_fail(e, "toobig", "over 4194304 bytes");
         return;
     }
-    rx_buf_fmt(&e->group, "%d %d %d %d %zu\n", r.start.line, r.start.col, r.end.line, r.end.col, len);
+    rx_buf_fmt(&e->group, "%d %d %d %d %zu\n", rx_nn(r.start.line), rx_nn(r.start.col), rx_nn(r.end.line),
+               rx_nn(r.end.col), len);
     rx_buf_add(&e->group, text, len);
     e->edits++;
     e->group_edits++;
@@ -1007,13 +1059,14 @@ void rx_action(rx_actions *l, const char *kind, const char *title, rx_wedit *edi
     rx_buf eb = {NULL, 0, 0};
     int bad = edit && rx_wedit_finish(edit, &eb) < 0;
     if (edit) rx_wedit_free(edit);
+    if (!title) title = "";
+    size_t tl = rx_cut(title, strlen(title), RX_TEXT_MAX), mark = l->recs.len;
+    if (!tl) bad = 1;                       /* no title: nothing to list */
     if (!bad && l->n >= RX_ACTIONS) l->full = 1;
     if (bad || l->full) {
         rx_buf_free(&eb);
         return;
     }
-    if (!title) title = "";
-    size_t tl = strlen(title), mark = l->recs.len;
     rx_add_word(&l->recs, kind, "quickfix");
     rx_buf_fmt(&l->recs, " %zu %zu %zu\n", tl, eb.len, len);
     rx_add_line(&l->recs, title, tl);
@@ -1186,8 +1239,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
         if (m) {
             ext->queue = m->next;
             if (!ext->queue) ext->queue_tail = NULL;
-        } else if (!(m = rx_read_msg())) {
-            return 1;
+        } else if (ext->gone || !(m = rx_read_msg(ext))) {
+            return 1;               /* nothing more can be read: the stream may be out of step */
         }
         char *copy = (char *)malloc(strlen(m->line) + 1);
         if (!copy) abort();

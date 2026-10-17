@@ -39,7 +39,10 @@ import time
 ENV = os.environ
 LOGFD = None
 if ENV.get('CONF_LOG'):
-    LOGFD = os.open(ENV['CONF_LOG'], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    # a confined extension may write only in its state folder: the log goes there when rhun says
+    # where it is, and run.py gathers every extension's log by time
+    path = os.path.join(ENV['RHUN_STATE'], 'conf.log') if ENV.get('RHUN_STATE') else ENV['CONF_LOG']
+    LOGFD = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 LOCK = threading.RLock()
 
 

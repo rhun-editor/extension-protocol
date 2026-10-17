@@ -9,6 +9,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -222,8 +223,8 @@ func checkPicture(body []byte) (int, string) {
 	return 0, ""
 }
 
-// sampleFor makes a document whose name matches the first of the patterns, the cursor's word "pr";
-// a document already open under that name is used again (rhun opens a file once)
+// sampleFor writes a file whose name matches the first of the patterns and opens it, the cursor's
+// word "pr"; a document already open under that name is used again (rhun opens a file once)
 func (h *host) sampleFor(patterns string) *doc {
 	p := strings.Fields(patterns)
 	name := "sample.txt"
@@ -242,6 +243,7 @@ func (h *host) sampleFor(patterns string) *doc {
 			return d
 		}
 	}
+	os.WriteFile(path, []byte("pr\n"), 0o644)
 	d := h.newDoc(path, langOf(name), []byte("pr\n"))
 	h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
 	return d

@@ -142,6 +142,7 @@ type doc struct {
 	text    []byte
 	cur     int // byte offsets
 	anchor  int
+	dirty   bool // unsaved changes: the text differs from the file (rhun's doc_dirty)
 }
 
 type host struct {
@@ -210,11 +211,60 @@ func (h *host) note(format string, a ...any) {
 	}
 }
 
+// newDoc opens a document with the text of its file: no unsaved changes
 func (h *host) newDoc(path, lang string, text []byte) *doc {
 	h.nextDoc++
 	d := &doc{id: h.nextDoc, lang: lang, path: path, text: text}
 	h.docs[d.id] = d
 	return d
+}
+
+// save writes a document to its file as the user saving it does, and tells a subscriber
+func (h *host) save(d *doc) {
+	os.WriteFile(d.path, d.text, 0o644)
+	d.dirty = false
+	if h.sub("saved") {
+		h.write(fmt.Sprintf("0 saved %d %d\n", d.id, d.version))
+	}
+}
+
+// loadFile reads a file as rhun opens it (doc_load): a regular file that is neither an image
+// (opened in an image tab) nor binary (a NUL in its first 8 KiB), its CRLF line ends made LF (a CR
+// alone stays, as do a byte order mark and bytes that are not UTF-8); else why not, and whether it
+// is an image
+func loadFile(path string) ([]byte, string, bool) {
+	st, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return nil, "there is no such file", false
+	case !st.Mode().IsRegular():
+		return nil, "it is not a regular file", false
+	}
+	data, err := os.ReadFile(path)
+	switch {
+	case err != nil:
+		return nil, "it cannot be read", false
+	case isImage(data):
+		return nil, "it is an image", true
+	case bytes.IndexByte(data[:min(len(data), 8192)], 0) >= 0:
+		return nil, "it is a binary file (a NUL in its first 8 KiB)", false
+	}
+	return bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")), "", false
+}
+
+// isImage says whether a file starts as an image rhun shows in an image tab: PNG, JPEG, GIF, BMP,
+// QOI (image_sniff; the formats it knows by their names are not told apart here)
+func isImage(b []byte) bool {
+	switch {
+	case bytes.HasPrefix(b, []byte("\x89PNG\r\n\x1a\n")), bytes.HasPrefix(b, []byte("\xff\xd8\xff")),
+		bytes.HasPrefix(b, []byte("GIF87a")), bytes.HasPrefix(b, []byte("GIF89a")),
+		len(b) >= 14 && bytes.HasPrefix(b, []byte("qoif")):
+		return true
+	case len(b) >= 18 && bytes.HasPrefix(b, []byte("BM")):
+		header := uint32(b[14]) | uint32(b[15])<<8 | uint32(b[16])<<16 | uint32(b[17])<<24
+		return slices.Contains([]uint32{12, 40, 52, 56, 64, 108, 124}, header)
+	}
+	return false
 }
 
 func (h *host) start() error {
@@ -542,6 +592,7 @@ func (h *host) handle(msg message) {
 		d.cur, d.anchor = a+len(b), a+len(b)
 		recs := records(a, e-a, b)
 		d.version += int64(len(recs))
+		d.dirty = d.dirty || len(recs) > 0
 		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
 		h.afterEdit(d, recs...)
 	case "apply":
@@ -589,6 +640,7 @@ func (h *host) handle(msg message) {
 		d.cur, d.anchor = lo+len(b), lo+len(b)
 		recs := records(lo, hi-lo, b)
 		d.version += int64(len(recs))
+		d.dirty = d.dirty || len(recs) > 0
 		h.write(fmt.Sprintf("ok %d %d\n", id, d.version))
 		h.afterEdit(d, recs...)
 	case "select":
@@ -645,8 +697,12 @@ func (h *host) handle(msg message) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(h.project, path)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
+		data, why, image := loadFile(path)
+		if image {
+			rerr("nodoc", "an image")
+			return
+		}
+		if why != "" {
 			rerr("nofile", "no such file")
 			return
 		}
@@ -1336,7 +1392,8 @@ func main() {
 		}
 	}
 
-	// 2b. the user types into main.go: the edits stream for subscribers; then the pointer rests
+	// 2b. the user types into main.go and saves it: the edits stream (and saved) for subscribers;
+	// then the pointer rests
 	if h.sub("edits") || h.sub("hover") {
 		d := h.docs[2]
 		h.activate(d.id)
@@ -1345,9 +1402,11 @@ func main() {
 		at := len("package main\n")
 		d.text = append(append(append([]byte{}, d.text[:at]...), typed...), d.text[at:]...)
 		d.version++
+		d.dirty = true
 		d.cur, d.anchor = at+len(typed), at+len(typed)
 		before := len(h.requests)
 		h.afterEdit(d, edit{at, 0, typed})
+		h.save(d) // and saves it
 		h.serve(700 * time.Millisecond)
 		if h.cmdExited() {
 			h.fail("edits", "the program exited on an edits event")

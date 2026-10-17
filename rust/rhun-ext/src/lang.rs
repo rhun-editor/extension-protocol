@@ -7,6 +7,37 @@ fn one_line(s: &str) -> String {
     s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
 }
 
+/// The most bytes of a name, title, detail or preview, and of a kind word, that rhun reads: a
+/// longer one would make it drop the whole answer, so the encoders cut them.
+pub const MAX_TEXT: usize = 1000;
+pub const MAX_KIND: usize = 40;
+/// The longest path rhun reads.
+pub const MAX_PATH: usize = 4096;
+
+/// One line, at most `max` bytes, cut at a character.
+fn field(s: &str, max: usize) -> String {
+    let mut s = one_line(s);
+    if s.len() > max {
+        let mut cut = max;
+        while !s.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.truncate(cut);
+    }
+    s
+}
+
+/// A kind word: no spaces, at most MAX_KIND bytes.
+fn kind_word(s: &str, default: &str) -> String {
+    let w: String = s.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
+    let w = field(&w, MAX_KIND);
+    if w.is_empty() {
+        default.to_string()
+    } else {
+        w
+    }
+}
+
 fn num<T: std::str::FromStr>(fields: &[String], i: usize) -> Option<T> {
     fields.get(i)?.parse().ok()
 }
@@ -133,13 +164,17 @@ impl Location {
     }
 
     pub fn text(mut self, text: &str) -> Location {
-        self.text = one_line(text.trim());
+        self.text = field(text.trim(), MAX_TEXT);
         self
     }
 
+    /// Its record, or nothing for a path rhun cannot take (empty, or over MAX_PATH bytes).
     fn encode(&self, out: &mut Vec<u8>) {
         let p = self.target.encode();
-        let t = one_line(&self.text);
+        if p.is_empty() || p.len() > MAX_PATH {
+            return;
+        }
+        let t = field(&self.text, MAX_TEXT);
         let r = self.range;
         out.extend_from_slice(
             format!("{} {} {} {} {} {}\n", r.start.line, r.start.col, r.end.line, r.end.col, p.len(), t.len()).as_bytes(),
@@ -156,6 +191,9 @@ pub fn encode_locations(locs: &[Location]) -> Vec<u8> {
     for l in locs {
         let mut one = Vec::new();
         l.encode(&mut one);
+        if one.is_empty() {
+            continue;
+        }
         if n == MAX_RECORDS || recs.len() + one.len() + 16 > MAX_BODY {
             break;
         }
@@ -248,17 +286,21 @@ pub struct Symbol {
 
 impl Symbol {
     pub fn new(range: Range, kind: SymbolKind, depth: u32, name: &str) -> Symbol {
-        Symbol { range, kind, depth, name: one_line(name), detail: String::new() }
+        Symbol { range, kind, depth, name: field(name, MAX_TEXT), detail: String::new() }
     }
 
     pub fn detail(mut self, text: &str) -> Symbol {
-        self.detail = one_line(text);
+        self.detail = field(text, MAX_TEXT);
         self
     }
 
+    /// Its record, or nothing for a symbol without a name.
     fn encode(&self, out: &mut Vec<u8>) {
-        let n = one_line(&self.name);
-        let d = one_line(&self.detail);
+        let n = field(&self.name, MAX_TEXT);
+        if n.is_empty() {
+            return;
+        }
+        let d = field(&self.detail, MAX_TEXT);
         let r = self.range;
         out.extend_from_slice(
             format!(
@@ -286,6 +328,9 @@ pub fn encode_symbols(syms: &[Symbol]) -> Vec<u8> {
     for s in syms {
         let mut one = Vec::new();
         s.encode(&mut one);
+        if one.is_empty() {
+            continue;
+        }
         if n == MAX_RECORDS || recs.len() + one.len() + 16 > MAX_BODY {
             break;
         }
@@ -362,6 +407,9 @@ impl WorkspaceEdit {
         let mut out = format!("{}\n", self.files.len()).into_bytes();
         for f in &self.files {
             let p = f.target.encode();
+            if p.is_empty() || p.len() > MAX_PATH {
+                return Err(format!("a path of {} bytes: 1 to {MAX_PATH}", p.len()));
+            }
             let v = f.version.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
             out.extend_from_slice(format!("{} {} {}\n", p.len(), v, f.edits.len()).as_bytes());
             out.extend_from_slice(p.as_bytes());
@@ -394,13 +442,7 @@ pub struct CodeAction {
 
 impl CodeAction {
     pub fn new(kind: &str, title: &str) -> CodeAction {
-        let kind: String = kind.chars().filter(|c| !c.is_whitespace()).collect();
-        CodeAction {
-            kind: if kind.is_empty() { "quickfix".to_string() } else { kind },
-            title: one_line(title),
-            edit: None,
-            data: Vec::new(),
-        }
+        CodeAction { kind: kind_word(kind, "quickfix"), title: field(title, MAX_TEXT), edit: None, data: Vec::new() }
     }
 
     pub fn edit(mut self, edit: WorkspaceEdit) -> CodeAction {
@@ -427,8 +469,11 @@ pub fn encode_actions(actions: &[CodeAction]) -> Vec<u8> {
             },
             None => Vec::new(),
         };
-        let title = one_line(&a.title);
-        let head = format!("{} {} {} {}\n", a.kind, title.len(), edit.len(), a.data.len());
+        let title = field(&a.title, MAX_TEXT);
+        if title.is_empty() {
+            continue;
+        }
+        let head = format!("{} {} {} {}\n", kind_word(&a.kind, "quickfix"), title.len(), edit.len(), a.data.len());
         if n == MAX_ACTIONS || recs.len() + head.len() + title.len() + edit.len() + a.data.len() + 16 > MAX_ACTIONS_BODY {
             break;
         }
@@ -521,5 +566,21 @@ mod tests {
         want.extend_from_slice(b"source 16 0 8\nOrganize importsorganize");
         assert_eq!(body, want);
         assert_eq!(CodeAction::new(" ", "t").kind, "quickfix");
+    }
+
+    #[test]
+    fn fields_rhun_would_refuse_are_cut_or_left_out() {
+        // a two-byte character across byte 1000 is left out whole
+        let long = format!("{}é{}", "x".repeat(999), "y".repeat(10));
+        let s = Symbol::new(r(1, 1, 1, 1), SymbolKind::Function, 0, &long);
+        assert_eq!(s.name, "x".repeat(999));
+        let body = encode_actions(&[CodeAction::new(&"k".repeat(50), &long), CodeAction::new("source", "")]);
+        assert!(body.starts_with(format!("1\n{} 999 0 0\n", "k".repeat(40)).as_bytes()));
+        let far = Location::new(Target::Path(format!("/{}", "p".repeat(4096))), r(1, 1, 1, 1));
+        let near = Location::new(Target::Path("/p".into()), r(1, 1, 1, 1));
+        assert!(encode_locations(&[far.clone(), near]).starts_with(b"1\n"));
+        assert!(encode_symbols(&[Symbol::new(r(1, 1, 1, 1), SymbolKind::Function, 0, "")]) == b"0\n");
+        let e = WorkspaceEdit::new().file(&format!("/{}", "p".repeat(4096)), None, vec![]);
+        assert!(e.encode().is_err());
     }
 }

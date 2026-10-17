@@ -9,6 +9,7 @@ Prints "ok NAME" or "FAIL NAME: what differed" per check; exits 1 on any failure
 import argparse
 import concurrent.futures
 import hashlib
+import glob
 import json
 import os
 import platform
@@ -73,6 +74,11 @@ def install_exts(dest, names):
                 os.makedirs(os.path.dirname(dp), exist_ok=True)
                 with open(sp, 'rb') as f:
                     data = f.read()
+                if b'EXT_PY_LOCAL' in data:
+                    # a copy of ext.py beside it: a confined extension reads only its own folder
+                    local = os.path.join(os.path.dirname(dp), 'ext.py')
+                    shutil.copyfile(EXT_PY, local)
+                    data = data.replace(b'EXT_PY_LOCAL', local.encode())
                 data = data.replace(b'EXT_PY', EXT_PY.encode())
                 with open(dp, 'wb') as f:
                     f.write(data)
@@ -364,6 +370,9 @@ def run_scenario(scn, rhun, keep=False):
     res.out = res.stdout.split('\n')
     res.segs = split_segments(res.out)
     res.recs = parse_log(d['log'])
+    for log in sorted(glob.glob(os.path.join(d['state'], 'rhun', 'extensions', '*', 'conf.log'))):
+        res.recs += parse_log(log)
+    res.recs.sort(key=lambda r: r.ts)
     build_msgs(res)
     # leak check: every extension process we saw must be gone now
     time.sleep(0.1)
@@ -1987,9 +1996,9 @@ def chk_reload(r):
     r.eq('no-second-opened-event', len(r.events('opened')), 1)
 
 
-plain('ev.reload-keeps-the-id', ['conf/full'],
+plain('ev.reload-keeps-the-id', ['conf/fullw'],
       ops=[["text", "a.txt"], ["writefile", "{PROJECT}/a.txt", "fresh from disk\n"], ["sleep", 3.0], ["text", "a.txt"], DONE],
-      script=std(pre=[OPEN_A], wait=5200), check=chk_reload)
+      script=std(pre=[OPEN_A], wait=5200, cmd=('cmd fullw.go', 'wait-ext fullw running')), check=chk_reload)
 
 # ================================================================ gate 4: register, option, prompts, term, cmd
 # The scripted extension is started by `cmd full.go`; its ops begin with `waitrun`, which takes that

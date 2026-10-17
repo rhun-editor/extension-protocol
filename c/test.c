@@ -90,11 +90,14 @@ static void symbols(void) {
     rx_symbols_finish(&l, &b);
     same(&b, "2\n1 1 3 2 struct 0 5 0\nPoint2 5 2 11 field 1 1 3\nxi32");
     rx_buf_clear(&b);
-    /* no kind is function; a kind is one word; a depth is not negative; name and detail one line */
+    /* no kind is function; a kind is one word; a depth is not negative; name and detail one line;
+     * a symbol without a name is left out */
     rx_symbol(&l, R(1, 1, 1, 1), NULL, -2, "a\nb", "c\rd");
-    rx_symbol(&l, R(1, 1, 1, 1), " enum member ", 0, NULL, NULL);
+    rx_symbol(&l, R(1, 1, 1, 1), " enum member ", 0, "e", NULL);
+    rx_symbol(&l, R(1, 1, 1, 1), "variable", 0, NULL, "no name");
+    rx_symbol(&l, R(1, 1, 1, 1), "variable", 0, "", NULL);
     rx_symbols_finish(&l, &b);
-    same(&b, "2\n1 1 1 1 function 0 3 3\na bc d1 1 1 1 enummember 0 0 0\n");
+    same(&b, "2\n1 1 1 1 function 0 3 3\na bc d1 1 1 1 enummember 0 1 0\ne");
     for (int i = 0; i < 10001; i++) rx_symbol(&l, R(1, 1, 1, 1), "variable", 0, "v", NULL);
     assert(l.n == 10000);
     rx_buf_clear(&b);
@@ -207,6 +210,79 @@ static void actions(void) {
     rx_buf_free(&want);
 }
 
+/* rhun drops a whole answer for one field past its cap (12d): names, titles, details and previews
+ * are cut to 1000 bytes at a character, kind words to 40; a symbol or action whose name or title is
+ * then empty, and a location whose path is over 4096 bytes, are left out; a workspace edit with such
+ * a path cannot be sent */
+static void cuts(void) {
+    char straddle[1011], exact[1001], kind[42], path[4098], line[1004];
+    memset(straddle, 'x', 999), straddle[999] = (char)0xc3, straddle[1000] = (char)0xa9;   /* é at 999 and 1000 */
+    memset(straddle + 1001, 'y', 9), straddle[1010] = 0;
+    memset(exact, 'x', 999), exact[999] = 'z', exact[1000] = 0;
+    memset(kind, 'k', 39), kind[39] = (char)0xc3, kind[40] = (char)0xa9, kind[41] = 0;
+    path[0] = '/', memset(path + 1, 'p', 4095), path[4096] = 'q', path[4097] = 0;    /* 4097 bytes */
+    memcpy(line, "a\nb", 3), memset(line + 3, 'c', 1000), line[1003] = 0;
+    rx_buf b = {NULL, 0, 0}, want = {NULL, 0, 0};
+
+    rx_locations l = {0};
+    rx_location(&l, path, 0, R(1, 1, 1, 1), "left out");
+    path[4096] = 0;                                                                    /* 4096 bytes */
+    rx_buf_fmt(&want, "  %s  ", straddle);
+    rx_location(&l, path, 0, R(1, 1, 1, 2), want.data);
+    rx_location(&l, NULL, 2, R(-1, 0, 7, 3), line);
+    rx_locations_finish(&l, &b);
+    rx_buf_clear(&want);
+    rx_buf_fmt(&want, "2\n1 1 1 2 4096 999\n%s%.999s0 0 7 3 2 1000\n#2a b%.997s", path, straddle, line + 3);
+    same(&b, want.data);
+
+    rx_symbols sy = {0};
+    rx_buf_clear(&b);
+    rx_symbol(&sy, R(1, 1, 1, 1), kind, 3, straddle, exact);
+    rx_symbol(&sy, R(2, 1, 2, 1), "\t", 0, "\n", NULL);         /* a space is a name; no kind left: function */
+    rx_symbols_finish(&sy, &b);
+    rx_buf_clear(&want);
+    rx_buf_fmt(&want, "2\n1 1 1 1 %.39s 3 999 1000\n%.999s%s2 1 2 1 function 0 1 0\n ", kind, straddle, exact);
+    same(&b, want.data);
+
+    rx_actions ac = {0};
+    rx_wedit e = {0};
+    rx_buf_clear(&b);
+    char k50[51];
+    memset(k50, 'k', 50), k50[50] = 0;
+    rx_action(&ac, k50, straddle, NULL, "d", 1);
+    rx_wedit_file(&e, NULL, 1, 2);
+    rx_wedit_edit(&e, R(1, 1, 1, 1), "x", 1);
+    rx_action(&ac, "source", "", &e, NULL, 0);                  /* no title: left out, the edit used up */
+    assert(e.body.data == NULL && e.group.data == NULL && e.files == 0);
+    rx_action(&ac, "a\x01" "b\x7f c", exact, NULL, NULL, 0);
+    rx_actions_finish(&ac, &b);
+    rx_buf_clear(&want);
+    rx_buf_fmt(&want, "2\n%.40s 999 0 1\n%.999sdabc 1000 0 0\n%s", k50, straddle, exact);
+    same(&b, want.data);
+
+    /* a workspace edit with a path over 4096 bytes cannot be sent; 4096 can */
+    rx_buf_clear(&b);
+    rx_wedit_file(&e, path, 0, RX_ON_DISK);
+    rx_wedit_edit(&e, R(1, 1, 1, 1), "x", 1);
+    assert(rx_wedit_finish(&e, &b) == 0 && b.len == strlen("1\n4096 - 1\n") + 4096 + strlen("1 1 1 1 1\nx"));
+    rx_buf_clear(&b);
+    path[4096] = 'q';
+    rx_wedit_file(&e, NULL, 1, 2);
+    rx_wedit_file(&e, path, 0, RX_ON_DISK);
+    rx_wedit_edit(&e, R(1, 1, 1, 1), "x", 1);
+    assert(rx_wedit_finish(&e, &b) == -1 && b.len == 0);
+    assert(strcmp(e.fail, "toobig") == 0 && strcmp(e.why, "a path over 4096 bytes") == 0);
+    rx_wedit_free(&e);
+    /* an action whose edit names such a path is left out */
+    rx_wedit_file(&e, path, 0, RX_ON_DISK);
+    rx_action(&ac, "quickfix", "far", &e, NULL, 0);
+    assert(!e.fail);
+    rx_actions_finish(&ac, &b);
+    same(&b, "0\n");
+    rx_buf_free(&b);
+    rx_buf_free(&want);
+}
+
 /* ---- rhun's requests answered by rx_run, through files in place of the pipes */
 
 static char seen[64];       /* each action event's data, then | */
@@ -286,17 +362,16 @@ static void on_ready(rx_ext *ext, const char *project, void *user) {
     assert(rx_status(ext, "") == 0);
 }
 
-/* runs an extension on input; what it wrote goes to got */
-static void run(const char *features, const rx_handlers *h, const char *input, rx_buf *got) {
+/* runs an extension on n bytes of input and returns what rx_run did; what it wrote goes to got */
+static int run_bytes(const char *features, const rx_handlers *h, const char *input, size_t n, rx_buf *got) {
     FILE *in = fopen("rhunext-test.in", "wb");
     assert(in != NULL);
-    size_t n = strlen(input), wrote = fwrite(input, 1, n, in);
+    size_t wrote = fwrite(input, 1, n, in);
     assert(wrote == n);
     fclose(in);
     FILE *r = freopen("rhunext-test.in", "rb", stdin), *w = freopen("rhunext-test.out", "wb", stdout);
     assert(r != NULL && w != NULL);
     int code = rx_run(features, h, NULL);
-    assert(code == 0);
     fflush(stdout);
     FILE *out = fopen("rhunext-test.out", "rb");
     assert(out != NULL);
@@ -304,6 +379,13 @@ static void run(const char *features, const rx_handlers *h, const char *input, r
     size_t k;
     while ((k = fread(chunk, 1, sizeof chunk, out)) > 0) rx_buf_add(got, chunk, k);
     fclose(out);
+    return code;
+}
+
+/* runs an extension on input until bye */
+static void run(const char *features, const rx_handlers *h, const char *input, rx_buf *got) {
+    int code = run_bytes(features, h, input, strlen(input), got);
+    assert(code == 0);
 }
 
 static void ok(rx_buf *want, int id, const char *body) {
@@ -391,13 +473,94 @@ static void dispatch(void) {
     rx_buf_free(&want);
 }
 
+/* ---- event lengths: checked before anything is allocated */
+
+static size_t big_len;          /* the action event's body, its length; then what the toast said */
+static int big_events, wait_result;
+static char wait_error[512];
+
+static void on_big_action(rx_ext *ext, const unsigned char *data, size_t len, void *user) {
+    (void)ext, (void)data, (void)user;
+    big_len = len;
+}
+
+static void on_any_event(rx_ext *ext, const rx_event *ev, void *user) {
+    (void)ext, (void)ev, (void)user;
+    big_events++;
+}
+
+static void on_ready_wait(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    wait_result = rx_toast(ext, "hi");
+    snprintf(wait_error, sizeof wait_error, "%s", rx_error(ext));
+    assert(rx_status(ext, "") == -1);          /* the session is over: no more requests */
+}
+
+static void on_ready_text(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    size_t n = 0;
+    assert(rx_text(ext, 1, &n, NULL) == NULL);
+    snprintf(wait_error, sizeof wait_error, "%s", rx_error(ext));
+}
+
+static void event_lengths(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.action = on_big_action;
+    h.event = on_any_event;
+    rx_buf got = {NULL, 0, 0}, in = {NULL, 0, 0};
+    /* 4 MB is read whole */
+    rx_buf_str(&in, "0 action 4194304\n");
+    for (int i = 0; i < 4096; i++) {
+        char k[1024];
+        memset(k, 'x', sizeof k);
+        rx_buf_add(&in, k, sizeof k);
+    }
+    rx_buf_str(&in, "0 bye\n");
+    assert(run_bytes("", &h, in.data, in.len, &got) == 0 && big_len == ((size_t)4 << 20) && big_events == 2);
+    /* past 4 MB, or not a plain decimal of at most 10 digits: the session ends there (1), and what
+     * follows is never read as messages */
+    const char *bad[] = {"0 action 4194305\n", "0 action 99999999999\n", "0 action +5\n", "0 action 5x\n",
+                         "0 action \n", "0 action -1\n", "0 edits 1 2 4194305\n", "0 edits 1 2 1e3\n"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        rx_buf_clear(&in);
+        rx_buf_clear(&got);
+        big_len = 7, big_events = 0;
+        rx_buf_fmt(&in, "%s0 run x.y 1\n0 bye\n", bad[i]);
+        assert(run_bytes("", &h, in.data, in.len, &got) == 1);
+        assert(big_len == 7 && big_events == 0);
+    }
+    /* while a request waits: it fails, rx_error says why, and rx_run returns once its handler does */
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_wait;
+    h.event = on_any_event;
+    rx_buf_clear(&got);
+    big_events = 0;
+    const char *input = "0 ready -\n0 action 4194305\nok 1\n0 run x.y 1\n0 bye\n";
+    assert(run_bytes("", &h, input, strlen(input), &got) == 1);
+    same(&got, "hello 1\n1 toast 2\nhi");
+    assert(wait_result == -1 && strncmp(wait_error, "closed a body's length", 22) == 0 && big_events == 1);
+    /* a reply's body is held to the same digits */
+    h.ready = on_ready_text;
+    rx_buf_clear(&got);
+    wait_error[0] = 0;
+    input = "0 ready -\nok 1 3 +5\nhello0 bye\n";
+    assert(run_bytes("", &h, input, strlen(input), &got) == 1);
+    same(&got, "hello 1\n1 text 1\n");
+    assert(strncmp(wait_error, "closed a body's length", 22) == 0);
+    rx_buf_free(&got);
+    rx_buf_free(&in);
+}
+
 int main(void) {
     old_tests();
     locations();
     symbols();
     wedits();
     actions();
+    cuts();
     dispatch();                 /* last: standard output goes to a file from here on */
+    event_lengths();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

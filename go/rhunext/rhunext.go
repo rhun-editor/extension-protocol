@@ -323,8 +323,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			}
 			e.pmu.Unlock()
 			if hasBody && len(res.reply.Args) >= 1 {
-				n, err := strconv.Atoi(res.reply.Args[len(res.reply.Args)-1])
-				if err != nil || n < 0 || n > 1<<30 {
+				n, ok := bodyLen(res.reply.Args[len(res.reply.Args)-1], maxReplyBody)
+				if !ok {
 					return nil, fmt.Errorf("a reply's length %q", res.reply.Args[len(res.reply.Args)-1])
 				}
 				body := make([]byte, n)
@@ -363,9 +363,11 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 0
 		}
 		if lenAt >= 0 {
-			n, err := strconv.Atoi(ev.Args[lenAt])
-			if err != nil || n < 0 || n > 1<<30 {
-				return nil, fmt.Errorf("an %s length %q", ev.Name, ev.Args[lenAt])
+			// checked before anything is allocated: a length rhun cannot have sent ends the
+			// session (the caller fails the requests waiting) rather than reading gigabytes
+			n, ok := bodyLen(ev.Args[lenAt], MaxEventBody)
+			if !ok {
+				return nil, fmt.Errorf("an %s length %q: not a decimal of at most 10 digits up to %d", ev.Name, ev.Args[lenAt], MaxEventBody)
 			}
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {
@@ -397,6 +399,32 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		return &Event{Name: hostRequest, Args: fields}, nil
 	}
 	return nil, nil
+}
+
+// MaxEventBody is the longest body an edits or action event may announce: rhun sends at most 1 MB
+// of edits a frame, and an action's data came in an answer of at most 4 MB.
+const MaxEventBody = 4 << 20
+
+// maxReplyBody is the longest body a reply (text, range, ask) is read with.
+const maxReplyBody = 1 << 30
+
+// bodyLen is a LEN field as rhun writes it, a plain decimal of 1 to 10 digits, when it is at most
+// max.
+func bodyLen(s string, max int64) (int, bool) {
+	if s == "" || len(s) > 10 {
+		return 0, false
+	}
+	var n int64
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(s[i]-'0')
+	}
+	if n > max {
+		return 0, false
+	}
+	return int(n), true
 }
 
 func (e *Ext) deliver(id int64, res result, ch chan result) {
