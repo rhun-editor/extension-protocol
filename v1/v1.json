@@ -163,6 +163,17 @@
       "maxLength": 200,
       "description": "one line shown on the Extensions page"
     },
+    "icon": {
+      "type": "string",
+      "pattern": "^[^/\\\\:][^\\\\:]*$",
+      "not": { "pattern": "\\.\\." },
+      "description": "a PNG in the extension's folder (at most 64 KB and 256 pixels a side, square, 128 recommended): the badge in the title bar, its dropdown and the Extensions page, drawn on color"
+    },
+    "color": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$",
+      "description": "the badge's background"
+    },
     "settings": {
       "type": "object",
       "description": "[settings]: the extension's own settings as KEY.FIELD = VALUE; shown on its page, sent as setting events (section 6d)",

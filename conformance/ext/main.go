@@ -16,6 +16,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image/png"
 	"io"
 	"os"
 	"os/exec"
@@ -42,6 +43,7 @@ type manifest struct {
 	commands                    []string // NAME.key
 	cmdValues                   map[string]string
 	description                 string
+	icon, color                 string
 	settings                    []string                     // keys, in manifest order
 	settingFields               map[string]map[string]string // key -> field -> value
 	needs                       map[string]string
@@ -94,6 +96,10 @@ func readManifest(dir string) (*manifest, error) {
 				m.on = v
 			case k == "description":
 				m.description = v
+			case k == "icon":
+				m.icon = v
+			case k == "color":
+				m.color = v
 			}
 		case "settings":
 			key, field, ok := strings.Cut(k, ".")
@@ -1057,6 +1063,32 @@ func (h *host) stopAndWait(name string, how func()) bool {
 	}
 }
 
+// iconProblem says why rhun would not show DIR's icon, or "" (section 2 of the spec: a PNG in the
+// folder, at most 64 KB and 256 pixels a side)
+func iconProblem(dir, icon string) string {
+	if strings.HasPrefix(icon, "/") || strings.ContainsAny(icon, "\\:") || strings.Contains(icon, "..") {
+		return "not a path inside the extension's folder"
+	}
+	data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(icon)))
+	if err != nil {
+		return "cannot be read"
+	}
+	if len(data) > 65536 {
+		return fmt.Sprintf("%d bytes (64 KB at most)", len(data))
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return "not a PNG"
+	}
+	if cfg.Width < 1 || cfg.Height < 1 || cfg.Width > 256 || cfg.Height > 256 {
+		return fmt.Sprintf("%dx%d pixels (256 a side at most)", cfg.Width, cfg.Height)
+	}
+	if _, err := png.Decode(bytes.NewReader(data)); err != nil {
+		return "cannot be decoded: " + err.Error()
+	}
+	return ""
+}
+
 func main() {
 	flag.Parse()
 	if flag.NArg() != 1 {
@@ -1155,6 +1187,14 @@ func main() {
 	}
 	if len(m.description) > 200 {
 		bad(fmt.Sprintf("description is %d bytes (200 at most)", len(m.description)))
+	}
+	if m.color != "" && !regexp.MustCompile(`^#[0-9a-fA-F]{6}$`).MatchString(m.color) {
+		bad(fmt.Sprintf("color = %s is not #rrggbb", m.color))
+	}
+	if m.icon != "" {
+		if why := iconProblem(dir, m.icon); why != "" {
+			bad("icon = " + m.icon + ": " + why + " (rhun shows the letter instead)")
+		}
 	}
 	for _, key := range m.settings {
 		f := m.settingFields[key]
@@ -1283,18 +1323,20 @@ func main() {
 	}
 	h.ok("survives an unknown event and an error reply")
 
-	// 4. fragmented input: one byte at a time
-	msg := fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0])
+	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
+	// counted (a command may do something only the first time, such as registering another)
+	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0])
+	h.write(seq)
+	h.serve(700 * time.Millisecond)
 	before := len(h.requests)
-	for i := range msg {
-		h.write(msg[i : i+1])
+	for i := range seq {
+		h.write(seq[i : i+1])
 		time.Sleep(2 * time.Millisecond)
 	}
 	h.serve(700 * time.Millisecond)
 	frag := len(h.requests) - before
-	// 5. coalesced input: several events in one write
 	before = len(h.requests)
-	h.write(fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0]))
+	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	coal := len(h.requests) - before
 	if frag == coal {
