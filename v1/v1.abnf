@@ -136,7 +136,8 @@ c-item        = range SP c-kind SP len SP len SP len SP len LF
 c-kind        = "text" / "method" / "function" / "field" / "variable" / "class" / "struct"
               / "interface" / "module" / "property" / "enum" / "keyword" / "snippet" / "constant"
               / "value" / "file" / "folder" / field
-c-extra       = ( "edit" SP range SP len / "doc" SP len / field *( SP field ) SP len ) LF
+c-extra       = ( "edit" SP range SP len / "doc" SP len / "cursor" SP num SP "0"
+                / field *( SP field ) SP len ) LF
               ; each record's LEN bytes follow its LF; unknown records are skipped
 
 ; ---- the body of a signature answer (12c): "FROM TO" LF, the signature LF, documentation

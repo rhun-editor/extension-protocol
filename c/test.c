@@ -552,7 +552,22 @@ static void event_lengths(void) {
     rx_buf_free(&in);
 }
 
+static void cursors(void) {
+    rx_list l = {0};
+    rx_range r = {{0, 0}, {0, 0}};
+    rx_list_item_cursor(&l, r, "function", "f", "f()", NULL, NULL, NULL, NULL, 0, 2);
+    rx_list_item_cursor(&l, r, "function", "g", "\xc3\xa9", NULL, NULL, NULL, NULL, 0, 1);   /* inside é */
+    rx_list_item_cursor(&l, r, "function", "h", NULL, NULL, NULL, NULL, NULL, 0, -1);
+    rx_buf out = {NULL, 0, 0};
+    rx_list_finish(&l, &out);
+    const char *want = "3 0\n0 0 0 0 function 1 3 0 11\nff()cursor 2 0\n0 0 0 0 function 1 2 0 0\ng\xc3\xa9"
+                       "0 0 0 0 function 1 1 0 0\nhh";
+    assert(out.len == strlen(want) && memcmp(out.data, want, out.len) == 0);
+    rx_buf_free(&out);
+}
+
 int main(void) {
+    cursors();
     old_tests();
     locations();
     symbols();

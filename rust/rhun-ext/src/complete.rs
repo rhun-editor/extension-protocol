@@ -139,6 +139,8 @@ pub struct CompletionItem {
     /// Other replacements made with the item (an import): not overlapping the item's range or
     /// each other.
     pub edits: Vec<(Range, String)>,
+    /// Where the cursor goes, in bytes into `insert` (a snippet's `$0`); `None`: after it.
+    pub cursor: Option<usize>,
 }
 
 fn one_line(s: &str) -> String {
@@ -171,6 +173,13 @@ impl CompletionItem {
         self
     }
 
+    /// The cursor `offset` bytes into the inserted text when the item is chosen (between
+    /// parentheses, a snippet's `$0`). An offset past it or inside a character is left out.
+    pub fn cursor(mut self, offset: usize) -> CompletionItem {
+        self.cursor = Some(offset);
+        self
+    }
+
     fn encode(&self, out: &mut Vec<u8>) {
         let mut extra = Vec::new();
         for (r, t) in &self.edits {
@@ -182,6 +191,11 @@ impl CompletionItem {
         if !self.doc.is_empty() {
             extra.extend_from_slice(format!("doc {}\n", self.doc.len()).as_bytes());
             extra.extend_from_slice(self.doc.as_bytes());
+        }
+        if let Some(c) = self.cursor {
+            if c <= self.insert.len() && self.insert.is_char_boundary(c) {
+                extra.extend_from_slice(format!("cursor {c} 0\n").as_bytes());
+            }
         }
         let label = one_line(&self.label);
         let detail = one_line(&self.detail);
@@ -348,6 +362,16 @@ mod tests {
             "2 0\n1 1 1 3 function 5 7 2 0\nprintprint()fn\
              1 1 1 3 module 3 3 0 45\nfmtfmtedit 0 0 0 0 11\nimport fmt\ndoc 11\nFormatting."
         );
+    }
+
+    #[test]
+    fn an_item_can_place_the_cursor() {
+        let r = Range::default();
+        let list = CompletionList::new(vec![
+            CompletionItem::new(r, Kind::Function, "f").insert("f()").cursor(2),
+            CompletionItem::new(r, Kind::Function, "g").insert("é").cursor(1),
+        ]);
+        assert_eq!(list.encode(), "2 0\n0 0 0 0 function 1 3 0 11\nff()cursor 2 0\n0 0 0 0 function 1 2 0 0\ngé");
     }
 
     #[test]

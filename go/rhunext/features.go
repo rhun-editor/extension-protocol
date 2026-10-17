@@ -348,6 +348,16 @@ type CompletionItem struct {
 	Detail string
 	Doc    string
 	Edits  []TextEdit
+	// where the cursor goes (WithCursor); without it, after Insert
+	cursor    int
+	hasCursor bool
+}
+
+// WithCursor puts the cursor offset bytes into Insert when the item is chosen (a snippet's $0,
+// between parentheses). An offset past Insert or inside a character is left out.
+func (it CompletionItem) WithCursor(offset int) CompletionItem {
+	it.cursor, it.hasCursor = offset, true
+	return it
 }
 
 // CompletionList answers a completion request; Incomplete: typing should ask again.
@@ -379,6 +389,10 @@ func (l CompletionList) Encode() []byte {
 		label, detail, insert := oneLine(it.Label), oneLine(it.Detail), it.Insert
 		if insert == "" {
 			insert = it.Label
+		}
+		if it.hasCursor && it.cursor >= 0 && it.cursor <= len(insert) &&
+			(it.cursor == len(insert) || utf8.RuneStart(insert[it.cursor])) {
+			fmt.Fprintf(&extra, "cursor %d 0\n", it.cursor)
 		}
 		kind := it.Kind
 		if kind == "" {

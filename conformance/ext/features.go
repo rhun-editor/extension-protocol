@@ -431,7 +431,8 @@ func checkCompletion(m message, d *doc) string {
 			return fmt.Sprintf("item %d's label is not UTF-8", i+1)
 		}
 		extra := b[pos+sizes[0]+sizes[1]+sizes[2] : pos+sizes[0]+sizes[1]+sizes[2]+sizes[3]]
-		if why := checkExtra(extra, d, start, end); why != "" {
+		insert := b[pos+sizes[0] : pos+sizes[0]+sizes[1]]
+		if why := checkExtra(extra, d, start, end, insert); why != "" {
 			return fmt.Sprintf("item %d: %s", i+1, why)
 		}
 		pos += sizes[0] + sizes[1] + sizes[2] + sizes[3]
@@ -444,7 +445,7 @@ func checkCompletion(m message, d *doc) string {
 
 // checkExtra validates an item's EXTRA records: each a header line whose last word is its length,
 // then that many bytes; an edit's range in the document, overlapping neither the item nor another
-func checkExtra(x []byte, d *doc, istart, iend int) string {
+func checkExtra(x []byte, d *doc, istart, iend int, insert []byte) string {
 	type span struct{ a, b int }
 	taken := []span{{istart, iend}}
 	for len(x) > 0 {
@@ -459,6 +460,16 @@ func checkExtra(x []byte, d *doc, istart, iend int) string {
 		n, err := strconv.Atoi(w[len(w)-1])
 		if err != nil || n < 0 || n > len(x)-e-1 {
 			return fmt.Sprintf("the EXTRA record %q: its length is not within the item", x[:e])
+		}
+		if w[0] == "cursor" {
+			// cursor OFFSET 0: the cursor that far into INSERT, at a character
+			off, err := strconv.Atoi(w[1])
+			if len(w) != 3 || w[2] != "0" || err != nil || off < 0 {
+				return fmt.Sprintf("%q is not cursor OFFSET 0", x[:e])
+			}
+			if off > len(insert) || (off < len(insert) && !utf8.RuneStart(insert[off])) {
+				return fmt.Sprintf("cursor %d is past INSERT or inside a character: rhun ignores it", off)
+			}
 		}
 		if w[0] == "edit" {
 			if len(w) != 6 {

@@ -199,6 +199,11 @@ void rx_list_item(rx_list *l, rx_range r, const char *kind, const char *label, c
 /* the same with extra edits made with it (an import), not overlapping r or each other */
 void rx_list_item_edits(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
                         const char *detail, const char *doc, const rx_range *edits, const char *const *texts, int nedits);
+/* the same with the cursor cursor bytes into insert when the item is chosen (a snippet's $0); -1,
+ * or an offset past insert or inside a character, leaves it after insert */
+void rx_list_item_cursor(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
+                         const char *detail, const char *doc, const rx_range *edits, const char *const *texts,
+                         int nedits, long cursor);
 void rx_list_finish(rx_list *l, rx_buf *out);
 /* signature help (12c): the active parameter's bytes in the signature, from -1 for none */
 void rx_signature_answer(rx_buf *out, const char *signature, int from, int to, const char *doc);
@@ -767,6 +772,12 @@ static size_t rx_one_line_len(const char *s) {
 
 void rx_list_item_edits(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
                         const char *detail, const char *doc, const rx_range *edits, const char *const *texts, int nedits) {
+    rx_list_item_cursor(l, r, kind, label, insert, detail, doc, edits, texts, nedits, -1);
+}
+
+void rx_list_item_cursor(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
+                         const char *detail, const char *doc, const rx_range *edits, const char *const *texts,
+                         int nedits, long cursor) {
     rx_buf extra = {NULL, 0, 0};
     for (int i = 0; i < nedits; i++) {
         size_t n = strlen(texts[i]);
@@ -782,6 +793,8 @@ void rx_list_item_edits(rx_list *l, rx_range r, const char *kind, const char *la
     if (!insert) insert = label;
     if (!detail) detail = "";
     size_t ll = rx_one_line_len(label), il = strlen(insert), dl = rx_one_line_len(detail);
+    if (cursor >= 0 && (size_t)cursor <= il && ((size_t)cursor == il || ((unsigned char)insert[cursor] & 0xc0) != 0x80))
+        rx_buf_fmt(&extra, "cursor %ld 0\n", cursor);
     size_t size = 64 + ll + il + dl + extra.len;
     if (l->n >= 4096 || l->items.len + size > (1u << 20) - 64) {
         l->more = 1;                    /* past the caps: typing asks again */

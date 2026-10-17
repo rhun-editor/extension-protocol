@@ -186,3 +186,15 @@ func (l *late) Ready(ext *Ext, project string) {
 }
 func (l *late) Run(ext *Ext, command string, doc Doc) {}
 func (l *late) Event(ext *Ext, ev Event)              {}
+
+func TestAnItemCanPlaceTheCursor(t *testing.T) {
+	l := CompletionList{Items: []CompletionItem{
+		CompletionItem{Kind: KindFunction, Label: "f", Insert: "f()"}.WithCursor(2),
+		CompletionItem{Kind: KindFunction, Label: "g", Insert: "é"}.WithCursor(1),
+		{Kind: KindFunction, Label: "h"},
+	}}
+	want := "3 0\n0 0 0 0 function 1 3 0 11\nff()cursor 2 0\n0 0 0 0 function 1 2 0 0\ngé0 0 0 0 function 1 1 0 0\nhh"
+	if got := string(l.Encode()); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
