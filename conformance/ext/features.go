@@ -51,6 +51,14 @@ func (h *host) hostReply(fields []string, msg message) bool {
 		return false
 	}
 	delete(h.hostReqs, id)
+	switch {
+	case msg.err != nil:
+		h.fail("answers", fmt.Sprintf("the answer %q: %v", msg.line, msg.err))
+	case fields[0] == "error" && len(fields) < 3:
+		h.fail("answers", fmt.Sprintf("%q is not error ID CODE TEXT", msg.line))
+	case fields[0] == "ok" && len(fields) != 3:
+		h.fail("answers", fmt.Sprintf("%q is not ok ID LEN: an answer to rhun's request always says its length", msg.line))
+	}
 	h.hostAnswers[id] = msg
 	return true
 }
@@ -110,6 +118,12 @@ var shapeArgs = map[string][3]int{ // numbers before the color, has text, minimu
 	"rect": {4, 0, 0}, "rrect": {5, 0, 0}, "line": {5, 0, 0}, "poly": {1, 0, 2}, "fill": {0, 0, 3},
 	"circle": {3, 0, 0}, "ring": {4, 0, 0}, "pie": {5, 0, 0}, "text": {2, 1, 0},
 }
+
+// sizes are the fixed numbers that are widths, heights, radii or stroke widths: never negative
+var sizes = map[string][]int{
+	"rect": {2, 3}, "rrect": {2, 3, 4}, "line": {4}, "poly": {0}, "circle": {2}, "ring": {2, 3},
+	"pie": {2}, "clip": {2, 3},
+}
 var numRe = regexp.MustCompile(`^-?[0-9]{1,7}(\.[0-9]{1,9})?$`)
 var colorRe = regexp.MustCompile(`^(#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?|fg|muted|bg|panel|border|accent|error|warning|success|c[1-8])$`)
 
@@ -138,6 +152,11 @@ func checkPicture(body []byte) (int, string) {
 					return n, fmt.Sprintf("%q is not a number", x)
 				}
 			}
+			for _, j := range sizes["clip"] {
+				if strings.HasPrefix(w[1+j], "-") {
+					return n, "clip: a negative size"
+				}
+			}
 			shapes++
 			continue
 		}
@@ -152,6 +171,11 @@ func checkPicture(body []byte) (int, string) {
 				return n, fmt.Sprintf("%s: number %d is missing or not one", w[0], j+1)
 			}
 			k++
+		}
+		for _, j := range sizes[w[0]] {
+			if strings.HasPrefix(w[1+j], "-") {
+				return n, fmt.Sprintf("%s: number %d is a size and negative", w[0], j+1)
+			}
 		}
 		if spec[1] == 1 { // text: SIZE ALIGN COLOR TEXT
 			if k+2 >= len(w) {
@@ -267,7 +291,7 @@ func (h *host) checkFeatures() {
 		h.hostSeq++
 		h.write(fmt.Sprintf("0 cancel %d\n", h.hostSeq))
 		m, ok = h.ask(fmt.Sprintf("frobnicate %d %d 1 3 invoked -", d.id, d.version))
-		if ok && strings.HasPrefix(m.line, "error ") && strings.Fields(m.line)[2] == "unknown" {
+		if f := strings.Fields(m.line); ok && len(f) >= 3 && f[0] == "error" && f[2] == "unknown" {
 			h.ok("answers a request it does not know with error ID unknown")
 		} else {
 			h.fail("requests", fmt.Sprintf("a request it does not know must be answered error ID unknown; got %q", m.line))
@@ -316,6 +340,9 @@ func checkCompletion(m message, d *doc) string {
 	if len(f) != 3 || f[0] != "ok" {
 		return fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
 	}
+	if m.err != nil {
+		return m.err.Error()
+	}
 	b := m.body
 	if len(b) > 1<<20 {
 		return "the list is over 1 MB"
@@ -333,12 +360,6 @@ func checkCompletion(m message, d *doc) string {
 		return fmt.Sprintf("N %q is not 0 to 4096", head[0])
 	}
 	pos := nl + 1
-	lines := bytes.Split(d.text, []byte("\n"))
-	inDoc := func(l, c string) bool {
-		li, e1 := strconv.Atoi(l)
-		ci, e2 := strconv.Atoi(c)
-		return e1 == nil && e2 == nil && li >= 1 && li <= len(lines) && ci >= 1 && ci <= len(lines[li-1])+1
-	}
 	for i := 0; i < n; i++ {
 		e := bytes.IndexByte(b[pos:], '\n')
 		if e < 0 {
@@ -348,21 +369,28 @@ func checkCompletion(m message, d *doc) string {
 		if len(h) != 9 {
 			return fmt.Sprintf("item %d's header %q is not L1 C1 L2 C2 KIND LABEL_LEN INSERT_LEN DETAIL_LEN EXTRA_LEN", i+1, b[pos:pos+e])
 		}
-		if !inDoc(h[0], h[1]) || !inDoc(h[2], h[3]) {
-			return fmt.Sprintf("item %d's range %s %s %s %s is not in the document", i+1, h[0], h[1], h[2], h[3])
+		start, why := d.position(h[0], h[1])
+		if why != "" {
+			return fmt.Sprintf("item %d's range starts badly: %s", i+1, why)
 		}
-		sizes := make([]int, 4)
-		total := 0
-		for j := range sizes {
-			v, err := strconv.Atoi(h[5+j])
-			if err != nil || v < 0 {
-				return fmt.Sprintf("item %d: %q is not a length", i+1, h[5+j])
-			}
-			sizes[j] = v
-			total += v
+		end, why := d.position(h[2], h[3])
+		if why != "" {
+			return fmt.Sprintf("item %d's range ends badly: %s", i+1, why)
+		}
+		if end < start {
+			return fmt.Sprintf("item %d's range ends before it starts", i+1)
 		}
 		pos += e + 1
-		if pos+total > len(b) {
+		sizes := make([]int, 4)
+		for j := range sizes {
+			v, err := strconv.Atoi(h[5+j])
+			if err != nil || v < 0 || v > len(b)-pos {
+				return fmt.Sprintf("item %d: %q is not a length within the body", i+1, h[5+j])
+			}
+			sizes[j] = v
+		}
+		if sizes[0] > len(b)-pos || sizes[1] > len(b)-pos-sizes[0] || sizes[2] > len(b)-pos-sizes[0]-sizes[1] ||
+			sizes[3] > len(b)-pos-sizes[0]-sizes[1]-sizes[2] {
 			return fmt.Sprintf("item %d's bytes run past the body", i+1)
 		}
 		label := b[pos : pos+sizes[0]]
@@ -373,10 +401,59 @@ func checkCompletion(m message, d *doc) string {
 		if !utf8.Valid(label) {
 			return fmt.Sprintf("item %d's label is not UTF-8", i+1)
 		}
-		pos += total
+		extra := b[pos+sizes[0]+sizes[1]+sizes[2] : pos+sizes[0]+sizes[1]+sizes[2]+sizes[3]]
+		if why := checkExtra(extra, d, start, end); why != "" {
+			return fmt.Sprintf("item %d: %s", i+1, why)
+		}
+		pos += sizes[0] + sizes[1] + sizes[2] + sizes[3]
 	}
 	if pos != len(b) {
 		return fmt.Sprintf("%d bytes after the %d items N says", len(b)-pos, n)
+	}
+	return ""
+}
+
+// checkExtra validates an item's EXTRA records: each a header line whose last word is its length,
+// then that many bytes; an edit's range in the document, overlapping neither the item nor another
+func checkExtra(x []byte, d *doc, istart, iend int) string {
+	type span struct{ a, b int }
+	taken := []span{{istart, iend}}
+	for len(x) > 0 {
+		e := bytes.IndexByte(x, '\n')
+		if e < 0 {
+			return "an EXTRA record without its header line"
+		}
+		w := strings.Fields(string(x[:e]))
+		if len(w) < 2 {
+			return fmt.Sprintf("the EXTRA record %q has no length", x[:e])
+		}
+		n, err := strconv.Atoi(w[len(w)-1])
+		if err != nil || n < 0 || n > len(x)-e-1 {
+			return fmt.Sprintf("the EXTRA record %q: its length is not within the item", x[:e])
+		}
+		if w[0] == "edit" {
+			if len(w) != 6 {
+				return fmt.Sprintf("%q is not edit L1 C1 L2 C2 LEN", x[:e])
+			}
+			a, why := d.position(w[1], w[2])
+			if why != "" {
+				return "an extra edit starts badly: " + why
+			}
+			b, why := d.position(w[3], w[4])
+			if why != "" {
+				return "an extra edit ends badly: " + why
+			}
+			if b < a {
+				return "an extra edit ends before it starts"
+			}
+			for _, t := range taken {
+				if a < t.b && t.a < b {
+					return "an extra edit overlaps the item's range or another edit"
+				}
+			}
+			taken = append(taken, span{a, b})
+		}
+		x = x[e+1+n:]
 	}
 	return ""
 }
@@ -386,6 +463,12 @@ func checkSignature(m message) string {
 	f := strings.Fields(m.line)
 	if len(f) != 3 || f[0] != "ok" {
 		return fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
+	}
+	if n, err := strconv.Atoi(f[2]); err != nil || n < 0 {
+		return fmt.Sprintf("%q: LEN is not a length", m.line)
+	}
+	if m.err != nil {
+		return m.err.Error()
 	}
 	if len(m.body) == 0 {
 		return ""

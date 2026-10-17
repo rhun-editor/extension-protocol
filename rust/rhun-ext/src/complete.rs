@@ -278,21 +278,23 @@ impl SignatureHelp {
         self
     }
 
+    /// The body rhun reads, at most 64 KB: the documentation is cut (at a character) to fit; a
+    /// signature that does not fit on its own is no answer, which hides the help.
     pub fn encode(&self) -> String {
         let sig = one_line(&self.signature);
         let (a, b) = match self.active {
             Some((a, b)) if a <= b && b <= sig.len() => (a as i64, b as i64),
             _ => (-1, -1),
         };
-        let mut s = format!("{a} {b}\n{sig}\n{}", self.doc);
-        if s.len() > 65536 {
-            let mut cut = 65536;
-            while !s.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            s.truncate(cut);
+        let head = format!("{a} {b}\n{sig}\n");
+        if head.len() > 65536 {
+            return String::new();
         }
-        s
+        let mut cut = (65536 - head.len()).min(self.doc.len());
+        while !self.doc.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        head + &self.doc[..cut]
     }
 }
 
@@ -361,6 +363,9 @@ mod tests {
         let s = SignatureHelp::new("fn add(a: i32, b: i32)").active_param("b: i32").doc("Adds.");
         assert_eq!(s.encode(), "15 21\nfn add(a: i32, b: i32)\nAdds.");
         assert_eq!(SignatureHelp::new("x").encode(), "-1 -1\nx\n");
+        let long = SignatureHelp::new("f()").doc(&"é".repeat(40000)).encode();
+        assert!(long.len() <= 65536 && long.starts_with("-1 -1\nf()\n"));
+        assert_eq!(SignatureHelp::new(&"x".repeat(70000)).encode(), "");
     }
 
     #[test]

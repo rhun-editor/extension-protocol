@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 type probe struct {
@@ -145,3 +146,43 @@ func TestALongListIsCutAndMarkedIncomplete(t *testing.T) {
 		t.Fatal(string(l.Encode()[:10]))
 	}
 }
+
+func TestSignatureFitsIn64KB(t *testing.T) {
+	long := SignatureHelp{Signature: "x", ActiveFrom: -1, Doc: strings.Repeat("a", 65527) + "é"}.Encode()
+	if len(long) > 65536 || !utf8.Valid(long) {
+		t.Fatalf("%d bytes, valid %v", len(long), utf8.Valid(long))
+	}
+	if got := (SignatureHelp{Signature: strings.Repeat("x", 70000)}).Encode(); len(got) != 0 {
+		t.Fatal("a signature over 64 KB is no answer")
+	}
+}
+
+func TestARequestAfterRhunWentAwayFails(t *testing.T) {
+	toExt, hostW := io.Pipe()
+	hostR, fromExt := io.Pipe()
+	got := make(chan error, 1)
+	h := &late{got: got}
+	go RunOn(toExt, fromExt, io.Discard, h)
+	br := bufio.NewReader(hostR)
+	br.ReadString('\n')
+	io.WriteString(hostW, "0 ready -\n")
+	hostW.Close()
+	go io.Copy(io.Discard, br)
+	select {
+	case err := <-got:
+		if err == nil {
+			t.Fatal("the request succeeded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the request waited forever")
+	}
+}
+
+type late struct{ got chan error }
+
+func (l *late) Ready(ext *Ext, project string) {
+	time.Sleep(200 * time.Millisecond)
+	l.got <- ext.Toast("hi")
+}
+func (l *late) Run(ext *Ext, command string, doc Doc) {}
+func (l *late) Event(ext *Ext, ev Event)              {}

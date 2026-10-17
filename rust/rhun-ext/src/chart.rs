@@ -149,7 +149,9 @@ impl Chart {
     }
 
     fn value(&self, series: usize, index: usize) -> f64 {
-        self.series.get(series).and_then(|s| s.values.get(index)).copied().filter(|v| v.is_finite()).unwrap_or(0.0)
+        // finite and within what a span can hold without overflowing
+        let v = self.series.get(series).and_then(|s| s.values.get(index)).copied().filter(|v| v.is_finite());
+        v.unwrap_or(0.0).clamp(-1e15, 1e15)
     }
 
     fn count(&self) -> usize {
@@ -231,7 +233,8 @@ impl Chart {
         let step = nice_step((hi - lo) / want as f64);
         let lo = (lo / step).floor() * step;
         let hi = (hi / step).ceil() * step;
-        let ticks: Vec<f64> = (0..=((hi - lo) / step).round() as usize).map(|k| lo + k as f64 * step).collect();
+        let n = ((hi - lo) / step).round().clamp(1.0, 100.0) as usize;
+        let ticks: Vec<f64> = (0..=n).map(|k| lo + k as f64 * step).collect();
         let tick_w = ticks.iter().map(|t| m.width(TextSize::Small, &compact(*t))).fold(0.0, f32::max);
         let x0 = PAD + tick_w + 8.0;
         let x1 = w - PAD;
@@ -476,9 +479,12 @@ mod tests {
         let mut c = Chart::bar("t", &["a", "b", "c"], vec![Series::new("s", vec![1.0, 5.0, 3.0])]);
         let d = c.draw(400.0, 300.0, &m);
         assert!(d.hovered.is_none());
-        // the middle column is item 1
-        assert_eq!(d.hit(200.0, 200.0), Some(Hit { series: 0, index: 1 }));
-        c.pointer = Some((200.0, 200.0));
+        // the second bar (the second rect in the series color) is item 1
+        let bar: Vec<f32> = d.picture.body().lines().filter(|l| l.starts_with("rect ") && l.ends_with(" c1")).nth(1).unwrap()
+            .split(' ').skip(1).take(4).map(|v| v.parse().unwrap()).collect();
+        let (x, y) = (bar[0] + bar[2] / 2.0, bar[1] + bar[3] / 2.0);
+        assert_eq!(d.hit(x, y), Some(Hit { series: 0, index: 1 }));
+        c.pointer = Some((x, y));
         let d2 = c.draw(400.0, 300.0, &m);
         assert_eq!(d2.hovered, Some(Hit { series: 0, index: 1 }));
         assert!(d2.picture.body().contains(" panel\n"));
@@ -511,6 +517,12 @@ mod tests {
         let c = Chart::bar("", &["a", "b"], vec![Series::new("s", vec![-2.0, 4.0])]);
         let body = c.draw(300.0, 200.0, &m).picture.body().to_string();
         assert!(body.contains("-2"));
+    }
+
+    #[test]
+    fn huge_values_still_draw() {
+        let c = Chart::bar("", &["a", "b"], vec![Series::new("s", vec![-1e308, 1e308])]);
+        assert!(c.draw(600.0, 400.0, &Metrics::default()).picture.len() > 2);
     }
 
     #[test]

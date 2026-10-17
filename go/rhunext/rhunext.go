@@ -152,6 +152,7 @@ type Ext struct {
 	done   chan struct{}
 	fmu    sync.Mutex
 	agreed map[string]bool // the features rhun agreed to (section 12), from the features event
+	closed error           // set (under pmu) once rhun's end of the pipe is gone: requests fail at once
 }
 
 type result struct {
@@ -198,6 +199,9 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 		for {
 			ev, err := ext.readMessage(br)
 			if err != nil {
+				// a request waiting in a handler (a Complete that asked for the text) fails now,
+				// not when the handler returns
+				ext.failPending(err)
 				errc <- err
 				return
 			}
@@ -312,7 +316,10 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			}
 			e.pmu.Unlock()
 			if hasBody && len(res.reply.Args) >= 1 {
-				n, _ := strconv.Atoi(res.reply.Args[len(res.reply.Args)-1])
+				n, err := strconv.Atoi(res.reply.Args[len(res.reply.Args)-1])
+				if err != nil || n < 0 || n > 1<<30 {
+					return nil, fmt.Errorf("a reply's length %q", res.reply.Args[len(res.reply.Args)-1])
+				}
 				body := make([]byte, n)
 				if _, err := io.ReadFull(br, body); err != nil {
 					return nil, err
@@ -342,7 +349,10 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		}
 		ev := &Event{Name: fields[1], Args: fields[2:]}
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
-			n, _ := strconv.Atoi(ev.Args[2])
+			n, err := strconv.Atoi(ev.Args[2])
+			if err != nil || n < 0 || n > 1<<30 {
+				return nil, fmt.Errorf("an edits length %q", ev.Args[2])
+			}
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {
 				return nil, err
@@ -387,6 +397,9 @@ func (e *Ext) deliver(id int64, res result, ch chan result) {
 func (e *Ext) failPending(err error) {
 	e.pmu.Lock()
 	defer e.pmu.Unlock()
+	if e.closed == nil {
+		e.closed = err
+	}
 	for id, ch := range e.pend {
 		ch <- result{err: err}
 		delete(e.pend, id)
@@ -417,6 +430,10 @@ func (e *Ext) Request(verb string, body []byte, args ...string) (Reply, error) {
 	}
 	ch := make(chan result, 1)
 	e.pmu.Lock()
+	if e.closed != nil {
+		e.pmu.Unlock()
+		return Reply{}, e.closed
+	}
 	e.pend[id] = ch
 	if verb == "text" || verb == "range" || verb == "ask" {
 		e.bodies[id] = true

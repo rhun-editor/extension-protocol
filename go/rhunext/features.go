@@ -11,6 +11,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // The features of section 12.
@@ -403,18 +404,27 @@ type SignatureHelp struct {
 	Doc                  string
 }
 
-// Encode is the body rhun reads (section 12c).
+// Encode is the body rhun reads (section 12c), at most 64 KB: the documentation is cut at a
+// character to fit; a signature that does not fit on its own is no answer (it hides the help).
 func (s SignatureHelp) Encode() []byte {
 	sig := oneLine(s.Signature)
 	a, b := s.ActiveFrom, s.ActiveTo
 	if a < 0 || b < a || b > len(sig) {
 		a, b = -1, -1
 	}
-	out := fmt.Sprintf("%d %d\n%s\n%s", a, b, sig, s.Doc)
-	if len(out) > 65536 {
-		out = out[:65536]
+	head := fmt.Sprintf("%d %d\n%s\n", a, b, sig)
+	if len(head) > 65536 {
+		return nil
 	}
-	return []byte(out)
+	doc := s.Doc
+	if len(head)+len(doc) > 65536 {
+		cut := 65536 - len(head)
+		for cut > 0 && !utf8.RuneStart(doc[cut]) {
+			cut--
+		}
+		doc = doc[:cut]
+	}
+	return []byte(head + doc)
 }
 
 // Completer answers completion requests (feature complete).

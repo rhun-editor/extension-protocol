@@ -167,3 +167,25 @@ fn rhun_going_away_fails_waiting_requests() {
     done.join().unwrap().unwrap();
     assert_eq!(got.lock().unwrap().as_deref(), Some("Err(\"closed\")"));
 }
+
+#[test]
+fn a_request_after_rhun_went_away_fails_at_once() {
+    let (to_ext, ext_in) = channel::<Vec<u8>>();
+    let (ext_out, from_ext) = channel();
+    struct Late(Arc<Mutex<Option<String>>>);
+    impl Handler for Late {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            thread::sleep(Duration::from_millis(200)); // rhun closes meanwhile
+            *self.0.lock().unwrap() = Some(format!("{:?}", ext.toast("hi").map_err(|e| e.code)));
+        }
+    }
+    let got = Arc::new(Mutex::new(None));
+    let l = Late(got.clone());
+    let done = thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &[], l));
+    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    assert_eq!(host.line(), "hello 1");
+    host.send("0 ready -\n");
+    drop(host);
+    done.join().unwrap().unwrap();
+    assert_eq!(got.lock().unwrap().as_deref(), Some("Err(\"closed\")"));
+}

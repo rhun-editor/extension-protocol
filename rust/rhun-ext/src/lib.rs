@@ -28,6 +28,8 @@
 //! spec) are asked for by name in [`run`]: [`Feature::Views`] for pictures in tabs of their own,
 //! [`Feature::Complete`] and [`Feature::Signature`] for language support.
 
+#![allow(clippy::needless_doctest_main)]
+
 pub mod chart;
 pub mod complete;
 pub mod picture;
@@ -41,6 +43,18 @@ use std::thread;
 
 pub use complete::{CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest};
 pub use picture::{Color, Picture};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whole_ranges() {
+        assert_eq!(whole_range(b"ab\ncd"), Range::new(Pos::new(1, 1), Pos::new(2, 3)));
+        assert_eq!(whole_range(b"ab\n"), Range::new(Pos::new(1, 1), Pos::new(2, 1)));
+        assert_eq!(whole_range(b""), Range::new(Pos::new(1, 1), Pos::new(1, 1)));
+    }
+}
 
 /// The protocol version this crate speaks.
 pub const PROTOCOL: u32 = 1;
@@ -160,7 +174,7 @@ pub fn parse_edits(body: &[u8]) -> Result<Vec<Edit>, String> {
         }
         let num = |s: &str| s.parse::<usize>().map_err(|_| format!("not a number: {s}"));
         let (start, del, len) = (num(f[0])?, num(f[1])?, num(f[2])?);
-        if nl + 1 + len > body.len() {
+        if len > body.len() - (nl + 1) {
             return Err("an edit longer than the body".into());
         }
         out.push(Edit { start, del, ins: body[nl + 1..nl + 1 + len].to_vec() });
@@ -172,12 +186,19 @@ pub fn parse_edits(body: &[u8]) -> Result<Vec<Edit>, String> {
 /// Applies edit records to the text they were made against.
 pub fn apply_edits(text: &mut Vec<u8>, edits: &[Edit]) -> Result<(), String> {
     for e in edits {
-        if e.start + e.del > text.len() {
+        if e.start.checked_add(e.del).map_or(true, |end| end > text.len()) {
             return Err("an edit outside the text".into());
         }
         text.splice(e.start..e.start + e.del, e.ins.iter().copied());
     }
     Ok(())
+}
+
+/// The range that covers all of a text: from 1:1 to the end of its last line.
+pub fn whole_range(text: &[u8]) -> Range {
+    let line = text.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
+    let last = text.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+    Range::new(Pos::new(1, 1), Pos::new(line, (text.len() - last) as u32 + 1))
 }
 
 /// The severity of a diagnostic.
@@ -376,6 +397,17 @@ enum Msg {
 
 type Waiter = Sender<Result<Reply, Error>>;
 
+/// Requests waiting for their replies, and whether rhun has gone (then none may wait).
+#[derive(Default)]
+struct Pending {
+    waiters: HashMap<u64, (String, Waiter)>,
+    closed: bool,
+}
+
+fn closed_error() -> Error {
+    Error { code: "closed".into(), text: "rhun went away".into() }
+}
+
 struct Shared {
     out: Box<dyn Write + Send>,
     next_id: u64,
@@ -385,7 +417,7 @@ struct Shared {
 #[derive(Clone)]
 pub struct Ext {
     shared: Arc<Mutex<Shared>>,
-    pending: Arc<Mutex<HashMap<u64, (String, Waiter)>>>,
+    pending: Arc<Mutex<Pending>>,
     features: Arc<Mutex<Vec<String>>>,
 }
 
@@ -404,7 +436,7 @@ where
 {
     let ext = Ext {
         shared: Arc::new(Mutex::new(Shared { out: Box::new(output), next_id: 1 })),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        pending: Arc::new(Mutex::new(Pending::default())),
         features: Arc::new(Mutex::new(Vec::new())),
     };
     let mut hello = String::from("hello 1");
@@ -442,23 +474,31 @@ impl Ext {
     /// verb takes one) and waits for rhun's answer.
     pub fn request(&self, verb_and_args: &str, body: Option<&[u8]>) -> Result<Reply, Error> {
         let (tx, rx) = channel();
+        let verb = verb_and_args.split(' ').next().unwrap_or("").to_string();
         let id = {
+            let mut p = self.pending.lock().unwrap();
+            if p.closed {
+                return Err(closed_error());
+            }
+            // ids are 1 to 2147483647 (section 3), and one in flight is never used again
             let mut s = self.shared.lock().unwrap();
-            let id = s.next_id;
-            s.next_id += 1;
+            let mut id = s.next_id;
+            while p.waiters.contains_key(&id) {
+                id = if id >= 2_147_483_647 { 1 } else { id + 1 };
+            }
+            s.next_id = if id >= 2_147_483_647 { 1 } else { id + 1 };
+            p.waiters.insert(id, (verb, tx));
             id
         };
-        let verb = verb_and_args.split(' ').next().unwrap_or("").to_string();
-        self.pending.lock().unwrap().insert(id, (verb, tx));
         let line = match body {
             Some(b) => format!("{id} {verb_and_args} {}", b.len()),
             None => format!("{id} {verb_and_args}"),
         };
         if let Err(e) = self.write(&line, body.unwrap_or(&[])) {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending.lock().unwrap().waiters.remove(&id);
             return Err(Error { code: "io".into(), text: e.to_string() });
         }
-        rx.recv().unwrap_or_else(|_| Err(Error { code: "closed".into(), text: "rhun went away".into() }))
+        rx.recv().unwrap_or_else(|_| Err(closed_error()))
     }
 
     // ---- documents ----
@@ -621,7 +661,7 @@ impl Ext {
             match fields[0].as_str() {
                 "ok" | "error" => {
                     let id: u64 = fields.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-                    let waiter = self.pending.lock().unwrap().remove(&id);
+                    let waiter = self.pending.lock().unwrap().waiters.remove(&id);
                     let verb = waiter.as_ref().map(|w| w.0.as_str()).unwrap_or("");
                     let mut body = Vec::new();
                     if fields[0] == "ok" && matches!(verb, "text" | "range" | "ask") {
@@ -673,10 +713,13 @@ impl Ext {
                 }
             }
         }
-        // rhun is gone: every waiting request fails, the handler loop ends
-        for (_, (_, w)) in self.pending.lock().unwrap().drain() {
-            let _ = w.send(Err(Error { code: "closed".into(), text: "rhun went away".into() }));
+        // rhun is gone: every waiting request fails, later ones fail at once, the handler loop ends
+        let mut p = self.pending.lock().unwrap();
+        p.closed = true;
+        for (_, (_, w)) in p.waiters.drain() {
+            let _ = w.send(Err(closed_error()));
         }
+        drop(p);
         let _ = tx.send(Msg::End);
     }
 

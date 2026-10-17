@@ -305,7 +305,9 @@ func (h *host) reader() {
 		f := strings.Split(s, " ")
 		// section 12: an answer to one of rhun's requests is ok ID LEN and its body, always
 		if len(f) == 3 && f[0] == "ok" {
-			if n, e := strconv.ParseInt(f[2], 10, 64); e == nil && n >= 0 && n <= 1<<20 {
+			if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n > 1<<20 {
+				m.err = fmt.Errorf("LEN %q is not 0 to 1 MB", f[2])
+			} else {
 				m.body = make([]byte, n)
 				if _, e := io.ReadFull(h.stdout, m.body); e != nil {
 					m.err = fmt.Errorf("the body of %q ended early: %w", s, e)

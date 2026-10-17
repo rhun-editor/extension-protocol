@@ -161,6 +161,7 @@ rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at);
 #endif
 
 #define RX_MAXF 32
+#define RX_BODY_MAX ((long long)1 << 30)     /* the longest body read: rhun sends less */
 
 typedef struct rx_msg {
     char *line;
@@ -179,12 +180,17 @@ struct rx_ext {
 
 void rx_buf_add(rx_buf *b, const void *data, size_t len) {
     if (b->len + len + 1 > b->cap) {
+        /* bytes from the buffer itself move with it */
+        const char *src = (const char *)data;
+        int inside = b->data && src >= b->data && src < b->data + b->cap;
+        size_t at = inside ? (size_t)(src - b->data) : 0;
         size_t cap = b->cap ? b->cap * 2 : 256;
         while (cap < b->len + len + 1) cap *= 2;
         char *d = (char *)realloc(b->data, cap);
         if (!d) abort();
         b->data = d;
         b->cap = cap;
+        if (inside) data = d + at;
     }
     if (len) memcpy(b->data + b->len, data, len);
     b->len += len;
@@ -240,6 +246,7 @@ static int rx_read_line(char **out) {
 }
 
 static unsigned char *rx_read_body(size_t n) {
+    if (n > (size_t)RX_BODY_MAX) return NULL;
     unsigned char *body = (unsigned char *)malloc(n + 1);
     if (!body) abort();
     if (n && fread(body, 1, n, stdin) != n) {
@@ -285,7 +292,7 @@ static rx_msg *rx_read_msg(void) {
     m->line = line;
     if (strncmp(line, "0 edits ", 8) == 0) {
         long long n = rx_last_num(line);
-        if (n < 0 || n > (1 << 30) || !(m->body = rx_read_body((size_t)n))) {
+        if (n < 0 || n > RX_BODY_MAX || !(m->body = rx_read_body((size_t)n))) {
             free(line);
             free(m);
             return NULL;
@@ -318,6 +325,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
         snprintf(ext->error, sizeof ext->error, "closed rhun went away");
         return -1;
     }
+    /* ids are 1 to 2147483647 (section 3); requests here wait one at a time, so wrapping is safe */
+    if (ext->next_id >= 2147483647) ext->next_id = 0;
     int64_t id = ++ext->next_id;
     char head[64];
     snprintf(head, sizeof head, "%lld ", (long long)id);
@@ -351,7 +360,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                 if (fields) rx_buf_str(fields, rest);
                 if (wants_body) {
                     long long blen = rx_last_num(l);
-                    unsigned char *b = blen >= 0 ? rx_read_body((size_t)blen) : NULL;
+                    unsigned char *b = blen >= 0 && blen <= RX_BODY_MAX ? rx_read_body((size_t)blen) : NULL;
                     if (!b) {
                         ext->gone = 1;
                         free(l);
@@ -372,7 +381,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
         m->line = l;
         if (strncmp(l, "0 edits ", 8) == 0) {
             long long blen = rx_last_num(l);
-            if (blen < 0 || !(m->body = rx_read_body((size_t)blen))) {
+            if (blen < 0 || blen > RX_BODY_MAX || !(m->body = rx_read_body((size_t)blen))) {
                 ext->gone = 1;
                 rx_free_msg(m);
                 return -1;
@@ -485,18 +494,32 @@ int rx_unview(rx_ext *ext, int64_t view) {
 
 /* ---- pictures */
 
+/* a number as the protocol writes it, at most two decimals, whatever the C locale says */
 static void rx_num(rx_buf *b, double v) {
     if (!(v == v)) v = 0;                       /* NaN */
     if (v > 9999999) v = 9999999;
     if (v < -9999999) v = -9999999;
+    long long cents = (long long)(v * 100 + (v < 0 ? -0.5 : 0.5));
     char s[48];
-    snprintf(s, sizeof s, "%.2f", v);
-    char *e = s + strlen(s) - 1;
-    while (*e == '0') *e-- = 0;
-    if (*e == '.') *e = 0;
-    if (strcmp(s, "-0") == 0) strcpy(s, "0");
+    int neg = cents < 0;
+    if (neg) cents = -cents;
+    long long whole = cents / 100, frac = cents % 100;
+    if (frac == 0) snprintf(s, sizeof s, "%s%lld", neg && whole ? "-" : "", whole);
+    else if (frac % 10 == 0) snprintf(s, sizeof s, "%s%lld.%lld", neg ? "-" : "", whole, frac / 10);
+    else snprintf(s, sizeof s, "%s%lld.%02lld", neg ? "-" : "", whole, frac);
     rx_buf_add(b, " ", 1);
     rx_buf_str(b, s);
+}
+
+/* a decimal number as rhun writes it, whatever the C locale says */
+static double rx_atof(const char *s) {
+    double v = 0, scale = 1;
+    int neg = *s == '-';
+    if (neg) s++;
+    for (; *s >= '0' && *s <= '9'; s++) v = v * 10 + (*s - '0');
+    if (*s == '.')
+        for (s++; *s >= '0' && *s <= '9'; s++) scale /= 10, v += (*s - '0') * scale;
+    return neg ? -v : v;
 }
 
 static double rx_pos0(double v) { return v < 0 ? 0 : v; }
@@ -645,10 +668,19 @@ void rx_list_finish(rx_list *l, rx_buf *out) {
 void rx_signature_answer(rx_buf *out, const char *signature, int from, int to, const char *doc) {
     size_t sl = rx_one_line_len(signature);
     if (from < 0 || to < from || (size_t)to > sl) from = to = -1;
-    rx_buf_fmt(out, "%d %d\n", from, to);
+    char head[32];
+    int hl = snprintf(head, sizeof head, "%d %d\n", from, to);
+    if ((size_t)hl + sl + 1 > 65536) return;   /* a signature over 64 KB: no answer hides the help */
+    rx_buf_add(out, head, (size_t)hl);
     rx_buf_add(out, signature, sl);
     rx_buf_add(out, "\n", 1);
-    if (doc) rx_buf_str(out, doc);
+    if (!doc) return;
+    size_t room = 65536 - ((size_t)hl + sl + 1), dl = strlen(doc);
+    if (dl > room) {
+        dl = room;
+        while (dl > 0 && ((unsigned char)doc[dl] & 0xc0) == 0x80) dl--;   /* not inside a character */
+    }
+    rx_buf_add(out, doc, dl);
 }
 
 rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at) {
@@ -702,14 +734,14 @@ static void rx_view_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char
     memset(&ev, 0, sizeof ev);
     ev.kind = f[3];
     double v[16] = {0};
-    for (int i = 4; i < n && i - 4 < 16; i++) v[i - 4] = atof(f[i]);
+    for (int i = 4; i < n && i - 4 < 16; i++) v[i - 4] = rx_atof(f[i]);
     if (strcmp(ev.kind, "size") == 0) {
         ev.width = v[0], ev.height = v[1];
     } else if (strcmp(ev.kind, "metrics") == 0) {
         static const char *names[4] = {"small", "normal", "large", "mono"};
         for (int i = 4; i + 2 < n; i += 3)
             for (int k = 0; k < 4; k++)
-                if (strcmp(f[i], names[k]) == 0) ev.advance[k] = atof(f[i + 1]), ev.line_height[k] = atof(f[i + 2]);
+                if (strcmp(f[i], names[k]) == 0) ev.advance[k] = rx_atof(f[i + 1]), ev.line_height[k] = rx_atof(f[i + 2]);
     } else {
         ev.x = v[0], ev.y = v[1], ev.dy = v[2];
     }
