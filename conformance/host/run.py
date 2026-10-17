@@ -1358,7 +1358,8 @@ NEEDS_STEPS = [
     ('toast-needs-nothing', ["toast", "hi"], ('ok',)),
     ('status-needs-nothing', ["status", "st"], ('ok',)),
     ('cancel-needs-nothing', ["cancel", 999], ('ok',)),
-    ('open-needs-nothing', ["open", 0, 0, "{PROJECT}/main.go"], ('okv',)),
+    ('open-closed-file-needs-read', ["open", 0, 0, "{PROJECT}/main.go"], ('errx', 'error %(id)d needs file=read')),
+    ('open-existing-tab-needs-nothing', ["open", 0, 0, "{PROJECT}/a.txt"], ('okv',)),
     DONE,
 ]
 N_OPS, N_CASES = split_steps(NEEDS_STEPS)

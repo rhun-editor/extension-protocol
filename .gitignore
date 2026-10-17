@@ -3,3 +3,6 @@ dist/
 rust/rhun-ext/target/
 rust/rhun-ext/Cargo.lock
 /ext
+
+# Executable and non-executable host conformance fixtures.
+!conformance/host/manifests/conf/*/bin/
