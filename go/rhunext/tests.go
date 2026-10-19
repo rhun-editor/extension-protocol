@@ -618,8 +618,9 @@ func (p *TestProcess) ExitCode() int {
 type TestReporter struct {
 	ext   *Ext
 	run   int64
+	send  sync.Mutex // one flush at a time: the loop's and Flush's keep their order
 	mu    sync.Mutex
-	queue []TestResult
+	queue []reportEntry
 	kick  chan struct{}
 	done  chan struct{}
 	err   error
@@ -649,26 +650,71 @@ func (r *TestReporter) loop() {
 	}
 }
 
+// reportEntry is a result, or items to add (a subtest found while running) before the results
+// that follow it
+type reportEntry struct {
+	result TestResult
+	parent string
+	items  []TestItem
+}
+
 func (r *TestReporter) flush() {
+	r.send.Lock()
+	defer r.send.Unlock()
 	r.mu.Lock()
 	q := r.queue
 	r.queue = nil
 	r.mu.Unlock()
-	if len(q) > 0 {
-		if err := r.ext.ReportTests(r.run, q...); err != nil {
-			r.mu.Lock()
-			if r.err == nil {
-				r.err = err
+	var batch []TestResult
+	fail := func(err error) {
+		r.mu.Lock()
+		if r.err == nil {
+			r.err = err
+		}
+		r.mu.Unlock()
+	}
+	send := func() {
+		if len(batch) > 0 {
+			if err := r.ext.ReportTests(r.run, batch...); err != nil {
+				fail(err)
 			}
-			r.mu.Unlock()
+			batch = nil
 		}
 	}
+	for _, en := range q {
+		if en.items != nil {
+			send()
+			if err := r.ext.SetTestItems(en.parent, en.items, false); err != nil {
+				fail(err)
+			}
+			continue
+		}
+		batch = append(batch, en.result)
+	}
+	send()
+}
+
+// Flush sends what is queued now, from the calling goroutine (before a ReportCoverage, say).
+func (r *TestReporter) Flush() {
+	r.flush()
 }
 
 // Add queues results.
 func (r *TestReporter) Add(rs ...TestResult) {
 	r.mu.Lock()
-	r.queue = append(r.queue, rs...)
+	for _, x := range rs {
+		r.queue = append(r.queue, reportEntry{result: x})
+	}
+	r.mu.Unlock()
+}
+
+// AddItems queues items to add under parent, sent before the results queued after them.
+func (r *TestReporter) AddItems(parent string, items ...TestItem) {
+	if len(items) == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.queue = append(r.queue, reportEntry{parent: parent, items: items})
 	r.mu.Unlock()
 }
 
