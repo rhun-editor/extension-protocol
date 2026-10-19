@@ -189,14 +189,15 @@ type host struct {
 	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
 
-	features    map[string]bool // section 12: agreed after hello
-	views       map[int64]bool  // views it opened
-	nextView    int64
-	pictures    int               // draw requests that passed
-	hostSeq     int64             // the last id of a request the checker sent
-	hostReqs    map[int64]string  // those waiting for an answer
-	hostAnswers map[int64]message // and the answers
-	saveScope   *saveScope
+	features      map[string]bool // section 12: agreed after hello
+	views         map[int64]bool  // views it opened
+	nextView      int64
+	pictures      int               // draw requests that passed
+	hostSeq       int64             // the last id of a request the checker sent
+	debugSessions int64             // debuggers: sessions debug-start "started"
+	hostReqs      map[int64]string  // those waiting for an answer
+	hostAnswers   map[int64]message // and the answers
+	saveScope     *saveScope
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -370,7 +371,8 @@ type message struct {
 
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
-	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true} // source control: scm.go
+	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
+	"debug-start": true} // debuggers: debug.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1062,6 +1064,8 @@ func (h *host) handle(msg message) {
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
+	case "debug-start":
+		h.debugStart(id, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
