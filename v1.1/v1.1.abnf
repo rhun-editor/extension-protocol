@@ -73,3 +73,8 @@ sha          = 40HEXDIG / 64HEXDIG
 ; commit-message: rhun asks; body BRANCH_LEN DIFF_LEN LF <BRANCH><DIFF>; the answer is the message
 feature      =/ "commit-message"
 host-request =/ id SP "commit-message" SP len
+
+; quickdiff: rhun asks for a file's base text (ok ID LEN + the bytes, ok ID 0 for none)
+feature      =/ "quickdiff"
+host-request =/ id SP "quickdiff" SP doc SP version
+request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"

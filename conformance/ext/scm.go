@@ -171,6 +171,7 @@ func (h *host) checkScm() {
 	if h.features["git-data"] && h.m.needs["git"] != "read" {
 		h.fail("needs", "git-data agreed after hello but [needs] has no git = read: every request is refused")
 	}
+	h.checkQuickDiff()
 	if !h.features["commit-message"] || !provider {
 		return
 	}
@@ -191,5 +192,47 @@ func (h *host) checkScm() {
 		default:
 			h.ok("answers commit-message requests with a message rhun takes")
 		}
+	}
+}
+
+// quickdiffRefresh answers quickdiff-refresh LEN + a path or "-"
+func (h *host) quickdiffRefresh(id int64, args []string, msg message, reply func(string), rerr func(string, string)) {
+	if !h.features["quickdiff"] {
+		h.fail("quickdiff", "quickdiff-refresh without quickdiff agreed after hello")
+		rerr("unknown", "no such request")
+		return
+	}
+	if len(args) != 1 || args[0] != strconv.Itoa(len(msg.body)) || len(msg.body) == 0 ||
+		strings.ContainsAny(string(msg.body), "\x00\r\n") {
+		h.fail("request grammar", "quickdiff-refresh takes LEN and a path (or -) of that length")
+		rerr("syntax", "cannot parse the line")
+		return
+	}
+	reply(fmt.Sprintf("ok %d", id))
+	h.ok("asks for fresh quick-diff bases")
+}
+
+// checkQuickDiff: a quick-diff provider answers with a base text (or none) for a file it matches
+func (h *host) checkQuickDiff() {
+	pats := h.m.provides["quickdiff"]
+	if h.features["quickdiff"] && pats == "" {
+		h.fail("provides", "quickdiff agreed after hello but [provides] has no quickdiff patterns: rhun never asks")
+	}
+	if pats != "" && !h.features["quickdiff"] {
+		h.fail("provides", "[provides] quickdiff without saying quickdiff after hello 1: rhun never asks")
+	}
+	if !h.features["quickdiff"] || pats == "" {
+		return
+	}
+	d := h.sampleFor(pats)
+	h.serve(300 * time.Millisecond)
+	m, ok := h.ask(fmt.Sprintf("quickdiff %d %d", d.id, d.version))
+	switch f := strings.Fields(m.line); {
+	case !ok:
+		h.fail("quickdiff", "no answer to a quickdiff request within 3 s")
+	case len(f) > 0 && f[0] == "error":
+		h.warn("quickdiff", "a quickdiff request answered "+m.line+" (rhun keeps what it shows)")
+	default:
+		h.ok(fmt.Sprintf("answers quickdiff requests (a base of %d bytes)", len(m.body)))
 	}
 }

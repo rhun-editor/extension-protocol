@@ -508,6 +508,19 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 				}
 			}
 		}
+	case FeatureQuickDiff:
+		q, is := h.(QuickDiffProvider)
+		if is && e.Has(FeatureQuickDiff) && len(f) == 4 {
+			id, e1 := strconv.ParseInt(f[0], 10, 64)
+			doc, e2 := strconv.ParseInt(f[2], 10, 64)
+			ver, e3 := strconv.ParseInt(f[3], 10, 64)
+			if e1 == nil && e2 == nil && e3 == nil && doc > 0 && ver >= 0 {
+				known = true
+				if b, ok := q.QuickDiff(e, QuickDiffRequest{ID: id, Doc: Doc(doc), Version: ver}); ok {
+					body = b
+				}
+			}
+		}
 	case FeatureCommitMessage:
 		id, _ := strconv.ParseInt(f[0], 10, 64)
 		source := e.sourceFor(id)

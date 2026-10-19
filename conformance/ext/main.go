@@ -357,7 +357,7 @@ type message struct {
 
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
-	"git-log": true, "git-show": true, "git-diff-open": true} // source control: scm.go
+	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true} // source control: scm.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1047,6 +1047,8 @@ func (h *host) handle(msg message) {
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
+	case "quickdiff-refresh":
+		h.quickdiffRefresh(id, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")

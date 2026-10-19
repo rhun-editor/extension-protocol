@@ -158,3 +158,37 @@ func TestGitDataRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type qdProbe struct{ ready chan *Ext }
+
+func (p *qdProbe) Ready(e *Ext, _ string) { p.ready <- e }
+func (p *qdProbe) Run(*Ext, string, Doc)  {}
+func (p *qdProbe) Event(*Ext, Event)      {}
+func (p *qdProbe) QuickDiff(e *Ext, req QuickDiffRequest) ([]byte, bool) {
+	if req.Doc == 2 {
+		return nil, false
+	}
+	return []byte("base\n"), true
+}
+
+func TestQuickDiffProvider(t *testing.T) {
+	p := &qdProbe{ready: make(chan *Ext, 1)}
+	s := startHost(t, []string{FeatureQuickDiff}, p)
+	s.expect("hello 1 quickdiff")
+	s.send("0 features quickdiff\n0 ready /project\n")
+	ext := <-p.ready
+	s.send("3 quickdiff 1 0\n")
+	s.answer(3, "base\n")
+	s.send("4 quickdiff 2 0\n")
+	s.expect("ok 4 0")
+	done := make(chan error, 1)
+	go func() { done <- ext.QuickDiffRefresh(context.Background(), "") }()
+	s.expect("1 quickdiff-refresh 1")
+	readBody(t, s, "-")
+	s.send("ok 1\n")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	s.send("0 bye\n")
+	<-s.done
+}

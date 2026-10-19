@@ -380,3 +380,32 @@ func ParseCommitMessageRequest(id int64, body []byte, ctx context.Context) (Comm
 	r := CommitMessageRequest{ID: id, Branch: f.bytes(bl), Diff: f.bytes(dl), Context: ctx}
 	return r, f.ok()
 }
+
+// FeatureQuickDiff: rhun asks a provider for a file's base text, for the gutter marks.
+const FeatureQuickDiff = "quickdiff"
+
+// QuickDiffRequest asks for the base text of an open document.
+type QuickDiffRequest struct {
+	ID      int64
+	Doc     Doc
+	Version int64
+}
+
+// QuickDiffProvider answers quickdiff requests: the base bytes, or ok false to leave the gutter
+// marks to git.
+type QuickDiffProvider interface {
+	QuickDiff(ext *Ext, req QuickDiffRequest) (base []byte, ok bool)
+}
+
+// QuickDiffRefresh asks rhun to ask again for the bases of a file (absolute path), or of every
+// file with path "".
+func (e *Ext) QuickDiffRefresh(ctx context.Context, path string) error {
+	if !e.Has(FeatureQuickDiff) {
+		return &Error{Code: "unknown", Text: "quickdiff was not negotiated"}
+	}
+	if path == "" {
+		path = "-"
+	}
+	_, err := e.RequestContext(ctx, "quickdiff-refresh", []byte(path), strconv.Itoa(len(path)))
+	return err
+}

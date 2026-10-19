@@ -133,6 +133,30 @@ impl CommitMessageRequest {
     }
 }
 
+/// `quickdiff`: rhun asks for a file's base text (feature `quickdiff`,
+/// [`crate::Handler::quickdiff`]): the bytes rhun compares the document with for the gutter marks,
+/// or `None` to leave the marks to git.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickDiffRequest {
+    pub id: u64,
+    pub doc: Doc,
+    pub version: i64,
+}
+
+impl QuickDiffRequest {
+    /// `DOC VERSION`, the fields after the verb.
+    pub fn parse(id: u64, fields: &[String]) -> Option<QuickDiffRequest> {
+        if fields.len() != 2 {
+            return None;
+        }
+        Some(QuickDiffRequest {
+            id,
+            doc: fields[0].parse().ok().filter(|d: &i64| *d > 0)?,
+            version: fields[1].parse().ok().filter(|v: &i64| *v >= 0)?,
+        })
+    }
+}
+
 /// The checks rhun applies to a commit message: trimmed of spaces, tabs and line breaks, 1 to
 /// 8192 bytes, no control characters but tab, CR and LF. `Err` says why.
 pub fn check_commit_message(message: &str) -> Result<&str, String> {
@@ -232,6 +256,19 @@ impl Ext {
         Ok(self
             .request(&format!("git-show {rev}"), Some(path.as_bytes()))?
             .body)
+    }
+
+    /// Asks rhun to ask again for the quick-diff bases of a file (absolute path), or of every file
+    /// with `None` (feature `quickdiff`), for example after the extension's own commit.
+    pub fn quickdiff_refresh(&self, path: Option<&str>) -> Result<(), Error> {
+        if !self.has(Feature::QuickDiff) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "quickdiff was not negotiated".into(),
+            });
+        }
+        self.request("quickdiff-refresh", Some(path.unwrap_or("-").as_bytes()))?;
+        Ok(())
     }
 
     /// Opens rhun's diff view of a file from `rev1` to `rev2` (`None`: the file in the work tree).

@@ -59,7 +59,7 @@ pub use lang::{
 pub use picture::{Color, Picture};
 pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
-    LogEntry, LogOf,
+    LogEntry, LogOf, QuickDiffRequest,
 };
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
@@ -155,6 +155,9 @@ pub enum Feature {
     GitData,
     /// Commit messages for Generate: [`Handler::commit_message`]; `[provides] commit_message = yes`.
     CommitMessage,
+    /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
+    /// `[provides] quickdiff = PATTERNS`.
+    QuickDiff,
 }
 
 impl Feature {
@@ -177,6 +180,7 @@ impl Feature {
             Feature::WorkspaceWatch => "workspace_watch",
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
+            Feature::QuickDiff => "quickdiff",
         }
     }
 }
@@ -566,6 +570,11 @@ pub trait Handler: Send {
         _req: &CommitMessageRequest,
     ) -> Result<String, String> {
         Err("no commit messages here".to_string())
+    }
+    /// rhun asks for a file's quick-diff base (feature `quickdiff`): its bytes, or `None` to
+    /// leave the gutter marks to git.
+    fn quickdiff(&mut self, _ext: &Ext, _req: &QuickDiffRequest) -> Option<Vec<u8>> {
+        None
     }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
@@ -1270,6 +1279,10 @@ impl Ext {
                                     Err(why) => Err(("refused", why)),
                                 }
                             })
+                        }
+                        "quickdiff" if self.has(Feature::QuickDiff) => {
+                            QuickDiffRequest::parse(id, &fields)
+                                .map(|r| Ok(h.quickdiff(self, &r).unwrap_or_default()))
                         }
                         "commit-message" if self.has(Feature::CommitMessage) => {
                             CommitMessageRequest::parse(id, &req_body).map(|r| {

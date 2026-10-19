@@ -38,6 +38,7 @@ typedef struct { int line, col; } rx_pos;       /* 1-based line, 1-based byte co
 typedef struct { rx_pos start, end; } rx_range; /* half-open */
 typedef struct rx_ext rx_ext;
 struct rx_commit_message_ask_s;                  /* source control: rx_commit_message_ask */
+struct rx_quickdiff_ask_s;                       /* and rx_quickdiff_ask */
 
 /* bytes that grow: pictures, answers, anything built piece by piece */
 typedef struct { char *data; size_t len, cap; } rx_buf;
@@ -148,6 +149,9 @@ typedef struct {
      * message to out and return 1; append why not and return -1 (the user sees it); 0 for
      * "unknown". req's strings live until it returns. */
     int (*commit_message)(rx_ext *ext, const struct rx_commit_message_ask_s *req, rx_buf *out, void *user);
+    /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
+     * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
+    int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -229,6 +233,9 @@ int rx_check_commit_message(const char *m, size_t n, size_t *start, size_t *len)
 /* what commit_message gets: a cancel event names id */
 typedef struct rx_commit_message_ask_s { int64_t id; const char *branch, *diff; size_t branch_len, diff_len; } rx_commit_message_ask;
 int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, rx_commit_message_ask *out);
+/* what quickdiff gets; rx_quickdiff_refresh asks rhun to ask again for a file (NULL: every file) */
+typedef struct rx_quickdiff_ask_s { int64_t id; rx_doc doc; int64_t version; } rx_quickdiff_ask;
+int rx_quickdiff_refresh(rx_ext *ext, const char *path);
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -1063,6 +1070,17 @@ void rx_git_repo_free(rx_git_repo_info *r) { rx_buf_free(&r->body); memset(r, 0,
 void rx_git_status_free(rx_git_status_list *s) { free(s->entries); rx_buf_free(&s->body); memset(s, 0, sizeof *s); }
 void rx_blame_free(rx_blame *b) { free(b->commits); free(b->runs); rx_buf_free(&b->body); memset(b, 0, sizeof *b); }
 void rx_log_free(rx_log *l) { free(l->entries); rx_buf_free(&l->body); memset(l, 0, sizeof *l); }
+
+int rx_quickdiff_refresh(rx_ext *ext, const char *path) {
+    if (!rx_has(ext, "quickdiff")) {
+        snprintf(ext->error, sizeof ext->error, "unknown quickdiff was not negotiated");
+        return -1;
+    }
+    if (!path) path = "-";
+    char line[64];
+    snprintf(line, sizeof line, "quickdiff-refresh %zu", strlen(path));
+    return rx_request(ext, line, path, strlen(path), NULL, NULL);
+}
 
 int rx_cmd(rx_ext *ext, const char *name) {
     rx_buf line = {NULL, 0, 0};
@@ -2353,6 +2371,12 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             req.kind = f[4];
             if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
         }
+    } else if (strcmp(verb, "quickdiff") == 0 && n == 4 && h->quickdiff && rx_has(ext, "quickdiff")) {
+        rx_quickdiff_ask req;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
+            rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
+            rx_positive_num(f[3], INT64_MAX, &req.version))
+            ok = h->quickdiff(ext, &req, &body, user);
     } else if (strcmp(verb, "commit-message") == 0 && n == 3 && h->commit_message && rx_has(ext, "commit-message")) {
         rx_commit_message_ask req;
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
