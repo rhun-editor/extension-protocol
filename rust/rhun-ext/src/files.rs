@@ -185,7 +185,8 @@ impl Ext {
         let mut cancelled = false;
         let mut failure = None;
         loop {
-            match rx.recv() {
+            // without threads (wasm32-wasip1) the batches are read here
+            match self.recv_wait(&rx).ok_or(()) {
                 Ok(StreamItem::Batch(b)) => {
                     if cancelled || failure.is_some() {
                         continue;

@@ -152,6 +152,9 @@ func (h *host) askBody(line string, b []byte, wait time.Duration) (message, bool
 		if err == nil && msg.line != "" {
 			h.handle(msg)
 		}
+		if h.cmdExited() {
+			break
+		}
 	}
 	delete(h.hostReqs, id)
 	h.write(fmt.Sprintf("0 cancel %d\n", id))

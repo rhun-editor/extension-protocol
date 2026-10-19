@@ -6,6 +6,8 @@ package rhunext
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -287,18 +289,28 @@ const OnDisk int64 = -1
 
 // FileEdit is the edits of one file, all made against one text: the open document at Version,
 // or the file on disk (Version OnDisk, or any negative). They must not overlap; insertions at
-// one position keep their order.
+// one position keep their order. With feature workspace-edits, Hashed says the file on disk must
+// still hash to Hash (Fnv1a64 of its bytes: PRE fnv1a64:HEX); without it, it is sent as "-".
 type FileEdit struct {
 	Target  Target
 	Version int64
 	Edits   []TextEdit
+	Hashed  bool
+	Hash    uint64
 }
 
 // WorkspaceEdit is edits across files (section 12g): rhun checks all of them before it changes
-// anything, opens the files that are not open, and applies each file's edits as one undo step.
-// Nothing is saved.
+// anything. Without feature workspace-edits it opens the files that are not open and applies each
+// file's edits as one undo step, saving nothing; with it the edit is one transaction (files that
+// are not open are edited on disk, and it undoes as one step), named by Label, with the
+// confirmation list forced by Confirm; with file-operations Ops create, rename and delete files.
+// The body lists creates, then Files, then renames, then deletes (rhun's phases); Entry maps an
+// error's ENTRY back.
 type WorkspaceEdit struct {
-	Files []FileEdit
+	Files   []FileEdit
+	Ops     []FileOp
+	Label   string
+	Confirm bool
 }
 
 // AddDoc adds edits for an open document, made against its text at version.
@@ -312,8 +324,11 @@ func (w *WorkspaceEdit) AddFile(path string, version int64, edits ...TextEdit) {
 	w.Files = append(w.Files, FileEdit{Target: Target{Path: path}, Version: version, Edits: edits})
 }
 
-// Empty reports whether the edit changes nothing.
+// Empty reports whether the edit changes nothing: no file operation and no edit.
 func (w WorkspaceEdit) Empty() bool {
+	if len(w.Ops) > 0 {
+		return false
+	}
 	for _, f := range w.Files {
 		if len(f.Edits) > 0 {
 			return false
@@ -322,59 +337,42 @@ func (w WorkspaceEdit) Empty() bool {
 	return true
 }
 
-// Encode is the body rhun reads (section 12g), or why it cannot be one: over MaxEditFiles,
-// MaxEdits or MaxEditBody, or a path over MaxPath bytes. An edit cut short would leave the files
-// half changed, so none is sent.
+// Encode is the body rhun reads with workspace-edits and file-operations agreed (section 12g and
+// protocol 1.1), or why it cannot be one: over MaxEditFiles entries (files and operations),
+// MaxEdits or MaxEditBody, or a path that is empty or over MaxPath bytes. An edit cut short would
+// leave the files half changed, so none is sent. Without Ops, hashes, Label and Confirm it is
+// exactly the 12g body.
 func (w WorkspaceEdit) Encode() ([]byte, error) {
-	if len(w.Files) > MaxEditFiles {
-		return nil, fmt.Errorf("%d files: at most %d", len(w.Files), MaxEditFiles)
+	b, bad := w.encodeWith(editCaps{ws: true, ops: true})
+	if bad != nil {
+		return nil, encodeErr(bad)
 	}
-	edits := 0
-	for _, f := range w.Files {
-		edits += len(f.Edits)
-	}
-	if edits > MaxEdits {
-		return nil, fmt.Errorf("%d edits: at most %d", edits, MaxEdits)
-	}
-	tooBig := fmt.Errorf("over %d bytes", MaxEditBody)
-	var b bytes.Buffer
-	fmt.Fprintf(&b, "%d\n", len(w.Files))
-	for _, f := range w.Files {
-		p, v := f.Target.String(), "-"
-		if len(p) > MaxPath {
-			return nil, fmt.Errorf("a path over %d bytes", MaxPath)
-		}
-		if f.Version >= 0 {
-			v = itoa(f.Version)
-		}
-		fmt.Fprintf(&b, "%d %s %d\n", len(p), v, len(f.Edits))
-		b.WriteString(p)
-		for _, e := range f.Edits {
-			head := fmt.Sprintf("%s %d\n", rangeFields(e.Range), len(e.Text))
-			if b.Len()+len(head)+len(e.Text) > MaxEditBody {
-				return nil, tooBig
-			}
-			b.WriteString(head)
-			b.WriteString(e.Text)
-		}
-		if b.Len() > MaxEditBody {
-			return nil, tooBig
-		}
-	}
-	return b.Bytes(), nil
+	return b, nil
 }
 
 // Apply asks rhun to make a workspace edit (the apply request; needs documents = write): checked
 // whole, then each document changed as one undo step, files that are not open opened in tabs,
 // unsaved. For a language server's workspace/applyEdit. An edit that cannot be encoded is
-// returned as Encode's error without asking; rhun refusing it is an *Error (syntax, nofile,
-// nodoc, stale, readonly, badpos, toobig), and then nothing changed.
+// returned as an error without asking (an *Error with code unknown for file operations rhun did
+// not agree); rhun refusing it is an *Error (syntax, nofile, nodoc, stale, readonly, badpos,
+// toobig), and then nothing changed. With FeatureWorkspaceEdits agreed the edit is a transaction
+// (files that are not open edited on disk, one undo) and a refusal is an *ApplyError naming the
+// entry at fault (it unwraps to the *Error).
 func (e *Ext) Apply(edit WorkspaceEdit) error {
-	body, err := edit.Encode()
-	if err != nil {
-		return err
+	return e.ApplyContext(context.Background(), edit)
+}
+
+// ApplyContext is Apply with cancellation.
+func (e *Ext) ApplyContext(ctx context.Context, edit WorkspaceEdit) error {
+	body, bad := edit.encodeWith(e.editCaps())
+	if bad != nil {
+		return encodeErr(bad)
 	}
-	_, err = e.Request("apply", body, itoa(int64(len(body))))
+	_, err := e.RequestContext(ctx, "apply", body, itoa(int64(len(body))))
+	var re *Error
+	if err != nil && e.Has(FeatureWorkspaceEdits) && errors.As(err, &re) {
+		return applyError(re)
+	}
 	return err
 }
 
@@ -402,6 +400,12 @@ type CodeAction struct {
 // title, those whose edit cannot be encoded, and those past MaxActions or MaxActionsBody are left
 // out.
 func EncodeActions(actions []CodeAction) []byte {
+	return encodeActionsWith(actions, editCaps{ws: true, ops: true})
+}
+
+// encodeActionsWith is EncodeActions for a rhun that agreed caps: an action whose edit needs a
+// feature it did not agree is left out.
+func encodeActionsWith(actions []CodeAction, caps editCaps) []byte {
 	var recs bytes.Buffer
 	n := 0
 	for _, a := range actions {
@@ -411,7 +415,7 @@ func EncodeActions(actions []CodeAction) []byte {
 		}
 		var edit []byte
 		if a.Edit != nil {
-			b, err := a.Edit.Encode()
+			b, err := a.Edit.encodeWith(caps)
 			if err != nil {
 				continue
 			}
@@ -493,7 +497,7 @@ func (e *Ext) answerLang(h Handler, verb string, f []string) (body []byte, rerr 
 	case "actions":
 		a, is := h.(ActionProvider)
 		if req, ok := parseActionsRequest(f); is && ok {
-			return EncodeActions(a.Actions(e, req)), nil, true
+			return encodeActionsWith(a.Actions(e, req), e.editCaps()), nil, true
 		}
 	case "rename":
 		r, is := h.(Renamer)
@@ -502,22 +506,39 @@ func (e *Ext) answerLang(h Handler, verb string, f []string) (body []byte, rerr 
 			if err != nil {
 				return nil, &Error{Code: "refused", Text: err.Error()}, true
 			}
-			return encodeEdit(w)
+			return e.encodeEdit(w)
 		}
 	case "format":
 		fm, is := h.(Formatter)
 		if req, ok := parseFormatRequest(f); is && ok {
-			return encodeEdit(fm.Format(e, req))
+			return encodeEditV1(fm.Format(e, req))
+		}
+	case "linked":
+		l, is := h.(LinkedEditor)
+		if req, ok := parseLinkedRequest(f); is && ok && e.Has(FeatureLinkedEditing) {
+			return l.Linked(e, req).Encode(), nil, true
 		}
 	}
 	return nil, nil, false
 }
 
-// encodeEdit is a workspace edit's answer: its body, or toobig.
-func encodeEdit(w WorkspaceEdit) ([]byte, *Error, bool) {
-	b, err := w.Encode()
+// encodeEditV1 is a format or save-actions answer: 12g's grammar whatever was agreed (one open
+// document), so a hash goes as "-", a label and confirm are left out and file operations are
+// unknown.
+func encodeEditV1(w WorkspaceEdit) ([]byte, *Error, bool) {
+	b, err := w.encodeWith(editCaps{})
 	if err != nil {
-		return nil, &Error{Code: "toobig", Text: err.Error()}, true
+		return nil, err, true
+	}
+	return b, nil, true
+}
+
+// encodeEdit is a workspace edit's answer for the features rhun agreed: its body, or the error
+// to answer with (toobig, or unknown for file operations it did not agree).
+func (e *Ext) encodeEdit(w WorkspaceEdit) ([]byte, *Error, bool) {
+	b, err := w.encodeWith(e.editCaps())
+	if err != nil {
+		return nil, err, true
 	}
 	return b, nil, true
 }
