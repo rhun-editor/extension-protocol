@@ -100,11 +100,20 @@ const (
 	SevHint    Severity = "hint"
 )
 
-// Diagnostic is one mark: a half-open range, a severity and a one-line message.
+// Diagnostic is one mark: a half-open range, a severity and a one-line message. The other fields
+// travel only with Ext.FileDiagnostics (protocol 1.1): ID, a token of [A-Za-z0-9_.:-] unique in the
+// set, comes back in code-actions requests (CodeActionsRequest.Diagnostics); Code and Source show
+// as source(code); Href is an http(s) link explaining the code; Tags; Related places.
 type Diagnostic struct {
 	Range    Range
 	Severity Severity
 	Message  string
+	ID       string
+	Code     string
+	Source   string
+	Href     string
+	Tags     []DiagnosticTag
+	Related  []RelatedInfo
 }
 
 // Handler receives events. Methods are called on one goroutine, in order, so an extension's
@@ -435,10 +444,12 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "cancel" && len(ev.Args) == 1 {
 			if id, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil && id > 0 {
 				e.cancelSource(id)
+				e.cancelLang(id)
 			}
 		}
 		if ev.Name == "bye" {
 			e.cancelSources(false)
+			e.cancelAllLang()
 		}
 		// tests: a process's output and end go to its streams here, never through the handler
 		if ev.Name == "test-out" && len(ev.Args) == 3 {
@@ -568,6 +579,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 				return nil, err
 			}
 		}
+		if len(fields) > 2 && bodiedRequests[fields[1]] {
+			n, ok := bodyLen(fields[len(fields)-1], MaxRequestBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s request's length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		e.beginLang(id)
 		return ev, nil
 	}
 	return nil, nil

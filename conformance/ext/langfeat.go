@@ -47,13 +47,42 @@ var symbolKinds = func() map[string]bool {
 	return m
 }()
 
-// patterns are the file patterns [provides] gives a feature, "" for none ("no" is none)
+// patterns are the file patterns in force for a feature, "" for none: what a provides request
+// set (provider-scope), else the manifest's
 func (h *host) patterns(f string) string {
+	key := provideKey(f)
+	if v, ok := h.scope[key]; ok {
+		if v == "-" {
+			return ""
+		}
+		return v
+	}
+	return h.manifestPatterns(f)
+}
+
+// manifestPatterns are the file patterns [provides] gives a feature, "" for none ("no" is none)
+func (h *host) manifestPatterns(f string) string {
 	p := strings.TrimSpace(h.m.provides[provideKey(f)])
 	if p == "no" {
 		return ""
 	}
 	return p
+}
+
+// partsSaid says what came in parts before the answer to request id (query-stream), or ""
+func (h *host) partsSaid(id int64, what string) string {
+	q := h.queries[id]
+	if q == nil || q.parts+q.progresses == 0 {
+		return ""
+	}
+	said := ""
+	if q.parts > 0 {
+		said = fmt.Sprintf(", and %d %s in %d parts before it", q.items, what, q.parts)
+	}
+	if q.progresses > 0 {
+		said += fmt.Sprintf(", after %d progress reports", q.progresses)
+	}
+	return said
 }
 
 // matches says whether a path's file name matches one of the patterns: * for all, *.go a suffix,
@@ -69,10 +98,16 @@ func matches(patterns, path string) bool {
 }
 
 // provider says whether the extension provides an agreed feature for a document: it then hears
-// the document's edits as if it subscribed to them
+// the document's edits as if it subscribed to them. Protocol 1.1's keys count when their feature
+// was agreed (actions also with code-actions).
 func (h *host) provider(d *doc) bool {
 	for _, f := range providerFeatures {
 		if h.features[f] && matches(h.patterns(f), d.path) {
+			return true
+		}
+	}
+	for k, f := range providesKeys {
+		if !strings.HasSuffix(k, ".triggers") && (h.features[f] || k == "actions" && h.features["code-actions"]) && matches(h.patterns(k), d.path) {
 			return true
 		}
 	}
@@ -800,6 +835,8 @@ func (h *host) errorAnswer(f string, m message) bool {
 var langWaits = map[string]time.Duration{
 	"definition": 5 * time.Second, "references": 10 * time.Second, "symbols": 5 * time.Second,
 	"actions": 3 * time.Second, "rename": 15 * time.Second, "format": 10 * time.Second, "save-actions": 2 * time.Second,
+	"declaration": 5 * time.Second, "type-definition": 5 * time.Second, "implementation": 10 * time.Second,
+	"code-actions": 3 * time.Second, "range-format": 10 * time.Second, "type-format": 500 * time.Millisecond,
 }
 
 // langAsk sends one of the requests of 12d to 12h and returns its answer: false, after failing f,
@@ -839,14 +876,11 @@ func (h *host) checkLangFeatures() {
 			return false
 		}
 	}
-	for _, f := range []string{"definition", "references"} {
-		if !has(f) {
-			continue
-		}
-		d := sample(f)
+	locations := func(f, key string) {
+		d := sample(key)
 		m, ok := h.langAsk(f, fmt.Sprintf("%s %d %d 1 1 invoked -", f, d.id, d.version))
 		if !ok {
-			continue
+			return
 		}
 		n, warns, why := h.checkLocations(m)
 		for _, w := range warns {
@@ -855,7 +889,18 @@ func (h *host) checkLangFeatures() {
 		if why != "" {
 			h.fail(f, why)
 		} else {
-			h.ok(fmt.Sprintf("answers %s requests with locations rhun can list (%d)", f, n))
+			h.ok(fmt.Sprintf("answers %s requests with locations rhun can list (%d%s)", f, n, h.partsSaid(h.lastAsk, "locations")))
+		}
+	}
+	for _, f := range []string{"definition", "references"} {
+		if has(f) {
+			locations(f, f)
+		}
+	}
+	// navigation (1.1): declaration, type definition, implementation, as definition
+	for _, nav := range navigation {
+		if h.features["navigation"] && h.patterns(nav.key) != "" {
+			locations(nav.verb, nav.key)
 		}
 	}
 	if has("symbols") {
@@ -872,7 +917,10 @@ func (h *host) checkLangFeatures() {
 			}
 		}
 	}
-	if has("actions") {
+	if h.features["code-actions"] && h.patterns("actions") != "" {
+		// code-actions (1.1) in place of v1's actions
+		h.askCodeActions(sample("actions"))
+	} else if has("actions") {
 		d := sample("actions")
 		if m, ok := h.langAsk("actions", fmt.Sprintf("actions %d %d 1 1 1 3", d.id, d.version)); ok {
 			acts, warns, why := h.checkActions(m)
@@ -903,6 +951,10 @@ func (h *host) checkLangFeatures() {
 				}
 			}
 		}
+	}
+	// prepare-rename (1.1): F2 asks the rename provider first
+	if has("rename") && h.features["prepare-rename"] {
+		h.askPrepareRename(sample("rename"))
 	}
 	for _, f := range []string{"rename", "format", "save-actions"} {
 		if !has(f) {
@@ -937,6 +989,10 @@ func (h *host) checkLangFeatures() {
 		if gone(f, "the edits of its "+f) {
 			return
 		}
+	}
+	// partial-format (1.1): Format Selection, and typing a trigger
+	if h.features["partial-format"] && h.askPartialFormat(sample, gone) {
+		return
 	}
 }
 

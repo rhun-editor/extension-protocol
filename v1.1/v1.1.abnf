@@ -224,3 +224,83 @@ r-diff-close  = "diff-close" SP doc
 ; linked-editing: answered "ok ID LEN" and "N" LF (0, or 2 to 64), N lines of range LF, and
 ; optionally the record "word" SP len LF with that many printable ASCII bytes
 host-request =/ id SP "linked" SP doc SP version SP pos
+
+; Language features (v1.1.md "Language features"). Each kind's answer keeps v1's host-reply.
+feature      =/ "query-stream" / "provider-scope" / "complete-items" / "signature-list"
+feature      =/ "hover-query" / "navigation" / "selection-ranges" / "hierarchy"
+              / "workspace-symbols" / "prepare-rename" / "partial-format" / "code-actions"
+              / "file-diagnostics" / "document-links"
+
+; query-stream: parts and progress on one of rhun's pending requests, REQ (rhun's id).
+request      =/ id SP r-query-part / id SP r-query-progress
+r-query-part = "query-part" SP id SP len
+              ; LEN bytes in the grammar of REQ's answer: its count line and that many records;
+              ; only kinds that take parts (complete, definition, references, ...)
+r-query-progress = "query-progress" SP id SP percent SP len
+              ; LEN bytes: one line of at most 200 bytes, possibly empty
+percent      = "-" / num                             ; 0 .. 100
+
+; provider-scope: the values rhun uses for a [provides] KEY until the process stops.
+request      =/ id SP r-provides
+r-provides   = "provides" SP field SP ( "*" / "-" / field *( SP field ) )
+              ; "*" the manifest's values, "-" none, else a subset of the manifest's own values
+
+; complete-items: EXTRA records of a completion item, read with complete-items agreed.
+c-extra      =/ "resolve" SP ( "0" / "1" ) SP len LF   ; EDITS, then LEN (at most 16384) bytes of data
+c-extra      =/ "replace" SP range SP "0" LF          ; starts where the item's range starts
+c-extra      =/ "commit" SP len LF                     ; 1 to 16 printable ASCII characters follow
+c-extra      =/ ( "filter" / "suffix" ) SP len LF      ; one line follows
+c-extra      =/ ( "preselect" / "deprecated" / "adjust" ) SP "0" LF
+c-extra      =/ "after" SP ( "signature" / "complete" ) SP "0" LF
+host-request =/ id SP "complete-resolve" SP doc SP version SP len
+              ; followed by the item's LEN bytes of resolve data; VERSION is the list's
+r-extra      = ( "detail" SP len / "doc" SP len / "edit" SP range SP len
+              / "after" SP ( "signature" / "complete" ) SP "0" ) LF
+              ; the answer's body: r-extra records only, each followed by its LEN bytes
+
+; signature-list: rhun sends signatures in place of signature; the answer holds every overload.
+host-request =/ id SP "signatures" SP doc SP version SP pos SP h-kind SP h-char
+sl-head      = num SP num LF                         ; N 1 .. 32, ACTIVE zero-based
+sl-item      = ( num / "-1" ) SP ( num / "-1" ) SP len SP len LF
+              ; FROM TO (the active parameter, or -1 -1), SIG_LEN DOC_LEN; SIG (one line) and
+              ; DOC follow; an empty body hides the help
+
+; navigation: Go to Declaration, Type Definition and Implementation. The answer is a locations
+; body (l-head and l-item records, v1 12d); parts are allowed (query-stream).
+host-request =/ id SP ( "declaration" / "type-definition" / "implementation" ) SP doc SP version
+                SP pos SP "invoked" SP "-"
+
+; prepare-rename: F2 asks the document's rename provider first. The answer's body is empty (the
+; word at the cursor) or pr-head and PLEN bytes of placeholder (one line); error ID refused TEXT
+; refuses, and TEXT is shown.
+host-request =/ id SP "prepare-rename" SP doc SP version SP pos SP "invoked" SP "-"
+pr-head      = range SP len LF                       ; PLEN at most 200
+
+; partial-format: the answer is a workspace edit (v1 12g) for DOC only.
+host-request =/ id SP "range-format" SP doc SP version SP range SP num SP yes-no SP yes-no
+                SP yes-no                            ; TAB_WIDTH SPACES TRIM FINAL
+host-request =/ id SP "type-format" SP doc SP version SP pos SP field SP num SP yes-no SP yes-no
+                SP yes-no                            ; LINE COL after CHAR (or "newline"), then as above
+yes-no       = "yes" / "no"
+
+; code-actions: in place of actions for a provider that agreed it (the [provides] key stays
+; actions). KINDS is "-" or at most 32 kinds; DIAGS "-" or at most 64 comma-separated diagnostic ids.
+host-request =/ id SP "code-actions" SP doc SP version SP range SP ( "invoked" / "auto" )
+                SP ( "-" / hkind *( "," hkind ) ) SP ( "-" / field )
+hkind        = 1*( ALPHA / DIGIT / "_" / "-" ) *( "." 1*( ALPHA / DIGIT / "_" / "-" ) )
+              ; at most 128 bytes; an action matches a kind it equals or descends from
+ca-head      = num LF                                ; N, at most 1000
+ca-item      = hkind SP len SP len SP len LF         ; KIND TITLE_LEN EDIT_LEN EXTRA_LEN
+              ; TITLE (one line), EDIT (a workspace edit, or empty) and EXTRA follow; an action
+              ; with no edit, resolve data or command, and not disabled, is left out
+ca-extra     = ( "preferred" SP "0" / "disabled" SP len / "resolve" SP len / cmd-ref
+              / "fixes" SP len ) LF
+              ; each followed by its LEN bytes: the reason (one line, at most 1000), the resolve
+              ; data (at most 16384), space-separated diagnostic ids
+cmd-ref      = "command" SP name SP len
+              ; command-args' command reference: one of the extension's own commands, then
+              ; ARGS_LEN (at most 8192) bytes of ARGS, handed back as "0 run EXT.NAME DOC ref LEN"
+host-request =/ id SP "code-action-resolve" SP doc SP version SP len
+              ; followed by the chosen action's LEN bytes of resolve data
+car-head     = len SP len LF
+              ; EDIT_LEN EXTRA_LEN: the edit (a workspace edit, or empty), then cmd-ref records only

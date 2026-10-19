@@ -1030,3 +1030,531 @@ fn diff_and_reveal_take_uris() {
     drop(host);
     assert!(done.join().unwrap().is_ok());
 }
+
+// ---- protocol 1.1 language features (go/rhunext/query_test.go, the same bytes)
+
+/// A session with a handler: rhun's end, and the extension's thread.
+fn session<H: Handler + 'static>(
+    features: Vec<Feature>,
+    handler: H,
+) -> (Host, thread::JoinHandle<io::Result<()>>) {
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &features,
+            handler,
+        )
+    });
+    let host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    (host, done)
+}
+
+fn answer(host: &mut Host, id: u32, body: &str) {
+    assert_eq!(host.line(), format!("ok {id} {}", body.len()));
+    assert_eq!(host.body(body.len()), body);
+}
+
+fn rg(l1: u32, c1: u32, l2: u32, c2: u32) -> Range {
+    Range::new(Pos::new(l1, c1), Pos::new(l2, c2))
+}
+
+struct QueryProbe(Sender<String>);
+
+impl QueryProbe {
+    fn locations(
+        &self,
+        req: &rhun_ext::PosRequest,
+        out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::Location> {
+        use rhun_ext::{Location, Target};
+        if out.progress(Some(40), "Indexing\nall").is_err() {
+            return Vec::new();
+        }
+        let part = [Location::new(Target::Doc(req.doc), rg(1, 1, 1, 2)).text("a")];
+        if let Err(e) = out.part_locations(&part) {
+            self.0
+                .send(format!("{} {}", e.code, out.is_cancelled()))
+                .unwrap();
+            return Vec::new();
+        }
+        vec![Location::new(Target::Doc(req.doc), rg(2, 1, 2, 2)).text("b")]
+    }
+}
+
+impl Handler for QueryProbe {
+    fn references_stream(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::PosRequest,
+        out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::Location> {
+        self.locations(req, out)
+    }
+    fn definition_stream(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::PosRequest,
+        out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::Location> {
+        self.locations(req, out)
+    }
+    fn complete(&mut self, _ext: &Ext, _req: &CompleteRequest) -> CompletionList {
+        let mut it = CompletionItem::new(rg(2, 5, 2, 7), Kind::Text, "print")
+            .resolve(b"r1", true)
+            .replace(rg(2, 5, 2, 9))
+            .commit("..(\x01")
+            .filter("prt")
+            .suffix("(s)");
+        it.preselect = true;
+        it.deprecated = true;
+        it.adjust = true;
+        it.after_signature = true;
+        CompletionList::new(vec![it])
+    }
+    fn complete_resolve(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::ResolveRequest,
+    ) -> rhun_ext::Resolution {
+        rhun_ext::Resolution {
+            doc: format!("Docs {}", String::from_utf8_lossy(&req.data)),
+            detail: Some("fn print()".into()),
+            edits: vec![rhun_ext::TextEdit::new(rg(1, 1, 1, 1), "use x;\n")],
+            ..Default::default()
+        }
+    }
+    fn signatures(
+        &mut self,
+        _ext: &Ext,
+        _req: &SignatureRequest,
+    ) -> Option<rhun_ext::SignatureList> {
+        let sig = |label: &str, active, doc: &str| rhun_ext::SignatureInfo {
+            label: label.into(),
+            active: Some(active),
+            doc: doc.into(),
+        };
+        Some(rhun_ext::SignatureList {
+            signatures: vec![
+                sig("f(a)", (2, 3), ""),
+                sig("f(a, b)", (5, 6), "two"),
+                sig("f()", (9, 12), ""),
+            ],
+            active: 1,
+        })
+    }
+}
+
+#[test]
+fn query_stream_parts_and_progress() {
+    let (tx, cancelled) = channel();
+    let (mut host, done) = session(
+        vec![Feature::References, Feature::QueryStream],
+        QueryProbe(tx),
+    );
+    assert_eq!(host.line(), "hello 1 references query-stream");
+    host.send("0 features references query-stream\n0 ready -\n");
+    host.send("7 references 4 2 1 1 invoked -\n");
+    assert_eq!(host.line(), "1 query-progress 7 40 12");
+    assert_eq!(host.body(12), "Indexing all");
+    host.send("ok 1\n");
+    let part = "1\n1 1 1 2 2 1\n#4a";
+    assert_eq!(host.line(), format!("2 query-part 7 {}", part.len()));
+    assert_eq!(host.body(part.len()), part);
+    host.send("ok 2\n");
+    answer(&mut host, 7, "1\n2 1 2 2 2 1\n#4b");
+    // a part answered cancelled stops the handler
+    host.send("8 definition 4 2 1 1 invoked -\n");
+    assert_eq!(host.line(), "3 query-progress 8 40 12");
+    host.body(12);
+    host.send("ok 3\n");
+    assert_eq!(host.line(), format!("4 query-part 8 {}", part.len()));
+    host.body(part.len());
+    host.send("error 4 cancelled\n");
+    assert_eq!(
+        cancelled.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "cancelled true"
+    );
+    answer(&mut host, 8, "0\n");
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_stream_without_the_feature_is_refused_locally() {
+    let (tx, _cancelled) = channel();
+    let (mut host, done) = session(vec![Feature::References], QueryProbe(tx));
+    assert_eq!(host.line(), "hello 1 references");
+    host.send("0 features references\n0 ready -\n");
+    host.send("7 references 4 2 1 1 invoked -\n");
+    answer(&mut host, 7, "0\n"); // progress failed (unknown): the handler gave up
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn rhuns_cancel_stops_a_stream_and_parts_come_from_any_thread() {
+    use rhun_ext::{Location, PosRequest, Stream, Target};
+    struct Worker(Sender<String>);
+    impl Handler for Worker {
+        fn references_stream(
+            &mut self,
+            _ext: &Ext,
+            req: &PosRequest,
+            out: &Stream,
+        ) -> Vec<Location> {
+            let first = vec![Location::new(Target::Doc(req.doc), rg(1, 1, 1, 2))];
+            let s = out.clone();
+            let sent = thread::spawn(move || s.part_locations(&first))
+                .join()
+                .unwrap();
+            let again = out.part_locations(&[]).map_err(|e| e.code);
+            self.0
+                .send(format!(
+                    "{:?} {} {:?}",
+                    sent.map_err(|e| e.code),
+                    out.is_cancelled(),
+                    again
+                ))
+                .unwrap();
+            Vec::new()
+        }
+    }
+    let (tx, got) = channel();
+    let (mut host, done) = session(vec![Feature::References, Feature::QueryStream], Worker(tx));
+    assert_eq!(host.line(), "hello 1 references query-stream");
+    host.send("0 features references query-stream\n0 ready -\n");
+    host.send("9 references 4 2 1 1 invoked -\n");
+    let part = "1\n1 1 1 2 2 0\n#4";
+    assert_eq!(host.line(), format!("1 query-part 9 {}", part.len()));
+    assert_eq!(host.body(part.len()), part);
+    // rhun withdraws the request while the part waits: the next part is not sent
+    host.send("0 cancel 9\nok 1\n");
+    assert_eq!(
+        got.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "Ok(()) true Err(\"cancelled\")"
+    );
+    answer(&mut host, 9, "0\n");
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn complete_items_records_resolve_and_signature_lists() {
+    let (tx, _) = channel();
+    let feats = vec![
+        Feature::Complete,
+        Feature::CompleteItems,
+        Feature::SignatureList,
+    ];
+    let (mut host, done) = session(feats, QueryProbe(tx));
+    assert_eq!(
+        host.line(),
+        "hello 1 complete complete-items signature-list"
+    );
+    host.send("0 features complete complete-items signature-list\n0 ready -\n");
+    host.send("3 complete 4 2 2 7 invoked -\n");
+    let extra =
+        "resolve 1 2\nr1replace 2 5 2 9 0\ncommit 2\n.(filter 3\nprtsuffix 3\n(s)preselect 0\n\
+                 deprecated 0\nadjust 0\nafter signature 0\n";
+    let item = format!("2 5 2 7 text 5 5 0 {}\nprintprint{extra}", extra.len());
+    answer(&mut host, 3, &format!("1 0\n{item}"));
+    host.send("4 complete-resolve 4 2 2\nr1");
+    answer(
+        &mut host,
+        4,
+        "detail 10\nfn print()doc 7\nDocs r1edit 1 1 1 1 7\nuse x;\n",
+    );
+    host.send("5 signatures 4 2 2 7 invoked -\n");
+    answer(
+        &mut host,
+        5,
+        "3 1\n2 3 4 0\nf(a)5 6 7 3\nf(a, b)two-1 -1 3 0\nf()",
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+
+    // without the features: both are unknown, and the resolve request's body is read past
+    let (tx, _) = channel();
+    let (mut host, done) = session(vec![Feature::Complete], QueryProbe(tx));
+    assert_eq!(host.line(), "hello 1 complete");
+    host.send("0 features complete\n4 complete-resolve 4 2 2\nr15 signatures 4 2 2 7 invoked -\n");
+    assert_eq!(host.line(), "error 4 unknown no such request");
+    assert_eq!(host.line(), "error 5 unknown no such request");
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_request_body_rhun_never_sends_ends_the_session() {
+    for len in ["65537", "+1", "99999999999", "x"] {
+        struct Quiet;
+        impl Handler for Quiet {}
+        let (mut host, done) = session(vec![Feature::CompleteItems], Quiet);
+        assert_eq!(host.line(), "hello 1 complete-items");
+        host.send(&format!(
+            "0 features complete-items\n4 complete-resolve 4 2 {len}\n"
+        ));
+        done.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn provides_needs_the_feature() {
+    struct Scope(Sender<Vec<String>>);
+    impl Handler for Scope {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            let code = |r: Result<(), rhun_ext::Error>| {
+                r.map(|_| "ok".to_string()).unwrap_or_else(|e| e.code)
+            };
+            let mut got = vec![code(ext.provides("definition", &["*.go"]))];
+            if ext.has(Feature::ProviderScope) {
+                got.push(code(ext.withdraw("references")));
+                got.push(code(ext.provides_manifest("complete.triggers")));
+                got.push(code(ext.provides("bad key", &["*"])));
+            }
+            ext.toast("after").unwrap();
+            self.0.send(got).unwrap();
+        }
+    }
+    let (tx, got) = channel();
+    let (mut host, done) = session(vec![Feature::ProviderScope], Scope(tx));
+    assert_eq!(host.line(), "hello 1 provider-scope");
+    host.send("0 features provider-scope\n0 ready -\n");
+    assert_eq!(host.line(), "1 provides definition *.go");
+    host.send("ok 1\n");
+    assert_eq!(host.line(), "2 provides references -");
+    host.send("error 2 refused no\n");
+    assert_eq!(host.line(), "3 provides complete.triggers *");
+    host.send("ok 3\n");
+    assert_eq!(host.line(), "4 toast 5");
+    host.body(5);
+    host.send("ok 4\n");
+    assert_eq!(
+        got.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ["ok", "refused", "ok", "syntax"]
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+
+    // without the feature nothing is sent
+    let (tx, got) = channel();
+    let (mut host, done) = session(vec![], Scope(tx));
+    assert_eq!(host.line(), "hello 1");
+    host.send("0 ready -\n");
+    assert_eq!(host.line(), "1 toast 5");
+    host.body(5);
+    host.send("ok 1\n");
+    assert_eq!(
+        got.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ["unknown"]
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+// ---- navigation, prepare-rename, partial-format, code-actions (go/rhunext/actions_test.go, the
+// same bytes)
+
+struct ActionsProbe;
+
+impl Handler for ActionsProbe {
+    fn declaration(&mut self, _ext: &Ext, req: &rhun_ext::PosRequest) -> Vec<rhun_ext::Location> {
+        use rhun_ext::{Location, Target};
+        vec![Location::new(Target::Doc(req.doc), rg(1, 1, 1, 2)).text("d")]
+    }
+    fn implementation_stream(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::PosRequest,
+        out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::Location> {
+        use rhun_ext::{Location, Target};
+        let _ = out.part_locations(&[Location::new(Target::Doc(req.doc), rg(1, 1, 1, 2))]);
+        vec![Location::new(Target::Doc(req.doc), rg(2, 1, 2, 2))]
+    }
+    fn prepare_rename(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::PosRequest,
+    ) -> Result<Option<rhun_ext::PreparedRename>, String> {
+        match req.at.line {
+            9 => Err("You cannot rename a keyword".into()),
+            8 => Ok(None),
+            _ => Ok(Some(rhun_ext::PreparedRename::new(
+                rg(2, 9, 2, 14),
+                "total",
+            ))),
+        }
+    }
+    fn range_format(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::RangeFormatRequest,
+    ) -> rhun_ext::WorkspaceEdit {
+        let mut w = rhun_ext::WorkspaceEdit::new();
+        if req.trim && !req.final_newline && req.tab_width == 4 && req.spaces {
+            w = w.doc(
+                req.doc,
+                req.version,
+                vec![rhun_ext::TextEdit::new(req.range, "x")],
+            );
+        }
+        w
+    }
+    fn type_format(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::TypeFormatRequest,
+    ) -> rhun_ext::WorkspaceEdit {
+        let mut w = rhun_ext::WorkspaceEdit::new();
+        if req.ch == "newline" {
+            w = w.doc(
+                req.doc,
+                req.version,
+                vec![rhun_ext::TextEdit::new(Range::new(req.at, req.at), "  ")],
+            );
+        }
+        w
+    }
+    fn code_actions(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::CodeActionsRequest,
+    ) -> Vec<rhun_ext::Action> {
+        use rhun_ext::{Action, CommandRef};
+        vec![
+            Action::new("quickfix", "Fix")
+                .preferred()
+                .resolve(b"R")
+                .fixes(&["d1"]),
+            Action::new("refactor.extract", "Extract").command(CommandRef::new("extract", b"a b")),
+            Action::new("quickfix", "Cannot").disabled("No fix here"),
+            Action::new("quickfix", "Nothing"),
+        ]
+    }
+    fn code_action_resolve(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::ActionResolveRequest,
+    ) -> Result<rhun_ext::ResolvedAction, String> {
+        if req.data == b"no" {
+            return Err("The fix\nis gone".into());
+        }
+        let text = String::from_utf8_lossy(&req.data);
+        let w = rhun_ext::WorkspaceEdit::new().doc(
+            req.doc,
+            req.version,
+            vec![rhun_ext::TextEdit::new(rg(1, 1, 1, 1), &text)],
+        );
+        Ok(rhun_ext::ResolvedAction {
+            edit: Some(w),
+            command: Some(rhun_ext::CommandRef::new("fix", b"z")),
+        })
+    }
+}
+
+#[test]
+fn navigation_rename_format_and_actions() {
+    let feats = vec![
+        Feature::Navigation,
+        Feature::PrepareRename,
+        Feature::PartialFormat,
+        Feature::CodeActions,
+        Feature::QueryStream,
+    ];
+    let (mut host, done) = session(feats, ActionsProbe);
+    assert_eq!(
+        host.line(),
+        "hello 1 navigation prepare-rename partial-format code-actions query-stream"
+    );
+    host.send(
+        "0 features navigation prepare-rename partial-format code-actions query-stream\n0 ready -\n",
+    );
+    host.send("2 declaration 4 7 1 1 invoked -\n");
+    answer(&mut host, 2, "1\n1 1 1 2 2 1\n#4d");
+    host.send("3 prepare-rename 4 7 2 10 invoked -\n");
+    answer(&mut host, 3, "2 9 2 14 5\ntotal");
+    host.send("4 prepare-rename 4 7 9 1 invoked -\n");
+    assert_eq!(host.line(), "error 4 refused You cannot rename a keyword");
+    host.send("5 prepare-rename 4 7 8 1 invoked -\n");
+    answer(&mut host, 5, "");
+    host.send("6 range-format 4 7 1 1 2 1 4 yes yes no\n");
+    answer(&mut host, 6, "1\n2 7 1\n#41 1 2 1 1\nx");
+    host.send("7 type-format 4 7 3 5 newline 4 yes no yes\n");
+    answer(&mut host, 7, "1\n2 7 1\n#43 5 3 5 2\n  ");
+    host.send("8 code-actions 4 7 1 1 1 1 invoked quickfix -\n");
+    answer(
+        &mut host,
+        8,
+        "2\nquickfix 3 0 33\nFixpreferred 0\nresolve 1\nRfixes 2\nd1quickfix 6 0 23\nCannotdisabled 11\nNo fix here",
+    );
+    host.send("9 code-actions 4 7 1 1 1 1 invoked - d1,d2\n");
+    answer(
+        &mut host,
+        9,
+        "3\nquickfix 3 0 33\nFixpreferred 0\nresolve 1\nRfixes 2\nd1refactor.extract 7 0 21\n\
+         Extractcommand extract 3\na bquickfix 6 0 23\nCannotdisabled 11\nNo fix here",
+    );
+    host.send("10 code-action-resolve 4 7 1\nR");
+    answer(
+        &mut host,
+        10,
+        "21 15\n1\n2 7 1\n#41 1 1 1 1\nRcommand fix 1\nz",
+    );
+    host.send("11 code-action-resolve 4 7 2\nno");
+    assert_eq!(host.line(), "error 11 refused The fix is gone");
+    host.send("12 code-actions 4 7 1 1 1 1 auto refactor -\n");
+    answer(
+        &mut host,
+        12,
+        "1\nrefactor.extract 7 0 21\nExtractcommand extract 3\na b",
+    );
+    // implementation streams a part first; type definition has no answer of its own
+    host.send("13 implementation 4 7 1 1 invoked -\n");
+    let part = "1\n1 1 1 2 2 0\n#4";
+    assert_eq!(host.line(), format!("1 query-part 13 {}", part.len()));
+    assert_eq!(host.body(part.len()), part);
+    host.send("ok 1\n");
+    answer(&mut host, 13, "1\n2 1 2 2 2 0\n#4");
+    host.send("14 type-definition 4 7 1 1 invoked -\n");
+    answer(&mut host, 14, "0\n");
+    // requests that do not parse are unknown
+    host.send("15 range-format 4 7 1 1 2 1 4 yes yes\n");
+    assert!(host.line().starts_with("error 15 unknown"));
+    host.send("16 code-actions 4 7 1 1 1 1 later - -\n");
+    assert!(host.line().starts_with("error 16 unknown"));
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+
+    // without the features every request is unknown, and the resolve request's body is read past
+    let (mut host, done) = session(vec![Feature::Rename, Feature::Format], ActionsProbe);
+    assert_eq!(host.line(), "hello 1 rename format");
+    host.send("0 features rename format\n0 ready -\n");
+    for (id, req) in [
+        (2, "declaration 4 7 1 1 invoked -\n"),
+        (3, "type-definition 4 7 1 1 invoked -\n"),
+        (4, "implementation 4 7 1 1 invoked -\n"),
+        (5, "prepare-rename 4 7 2 10 invoked -\n"),
+        (6, "range-format 4 7 1 1 2 1 4 yes yes no\n"),
+        (7, "type-format 4 7 3 5 newline 4 yes no yes\n"),
+        (8, "code-actions 4 7 1 1 1 1 invoked - -\n"),
+        (9, "code-action-resolve 4 7 1\nR"),
+    ] {
+        host.send(&format!("{id} {req}"));
+        assert_eq!(host.line(), format!("error {id} unknown no such request"));
+    }
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}

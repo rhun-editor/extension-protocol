@@ -28,7 +28,11 @@
 //! spec) are asked for by name in [`run`]: [`Feature::Views`] for pictures in tabs of their own,
 //! [`Feature::Complete`], [`Feature::Signature`], [`Feature::Definition`], [`Feature::References`],
 //! [`Feature::Symbols`], [`Feature::Actions`], [`Feature::Rename`] and [`Feature::Format`] for
-//! language support (the [`Handler`] methods of the same names answer them).
+//! language support (the [`Handler`] methods of the same names answer them). Protocol 1.1 adds
+//! [`Feature::QueryStream`] (parts and progress through a [`Stream`]), [`Feature::ProviderScope`]
+//! ([`Ext::provides`]), [`Feature::CompleteItems`], [`Feature::SignatureList`],
+//! [`Feature::Navigation`], [`Feature::PrepareRename`], [`Feature::PartialFormat`] and
+//! [`Feature::CodeActions`].
 //!
 //! Built for `wasm32-wasip1` (rhun runs such extensions itself, in any system: see
 //! `run.wasm32-wasip1` in the spec), the crate needs no threads: a request reads rhun's input
@@ -46,6 +50,7 @@
 #![allow(clippy::needless_doctest_main)]
 
 pub mod ai;
+pub mod actions;
 pub mod chart;
 pub mod complete;
 pub mod editor;
@@ -54,6 +59,7 @@ pub mod lang;
 pub mod notebook;
 pub mod picture;
 pub mod scm;
+pub mod query;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
@@ -65,13 +71,19 @@ pub mod resources;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_os = "wasi"))]
 use std::thread;
 
+pub use actions::{
+    encode_code_actions, Action, ActionResolveRequest, CodeActionsRequest, CommandRef,
+    PreparedRename, RangeFormatRequest, ResolvedAction, TypeFormatRequest,
+};
 pub use complete::{
-    CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
+    CompleteRequest, CompletionItem, CompletionList, Kind, Resolution, ResolveRequest,
+    SignatureHelp, SignatureInfo, SignatureList, SignatureRequest,
 };
 pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show};
 pub use edits::{Change, Located, OrderError};
@@ -85,6 +97,7 @@ pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
     LogEntry, LogOf, QuickDiffRequest,
 };
+pub use query::Stream;
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
@@ -237,6 +250,33 @@ pub enum Feature {
     Diff,
     /// Linked editing ranges: [`Handler::linked`].
     LinkedEditing,
+    /// Parts of long answers and progress on rhun's pending requests: [`Stream`] (protocol 1.1).
+    QueryStream,
+    /// Narrowing `[provides]` while running: [`Ext::provides`] (protocol 1.1).
+    ProviderScope,
+    /// Completion items with resolve data, a replace range, commit characters and more:
+    /// [`CompletionItem`]'s fields and [`Handler::complete_resolve`] (protocol 1.1).
+    CompleteItems,
+    /// Every overload in signature help: [`Handler::signatures`] (protocol 1.1).
+    SignatureList,
+    /// Go to Declaration, Type Definition and Implementation: [`Handler::declaration`],
+    /// [`Handler::type_definition`], [`Handler::implementation`] (protocol 1.1).
+    Navigation,
+    /// What F2 selects and fills the prompt with: [`Handler::prepare_rename`] (protocol 1.1).
+    PrepareRename,
+    /// Format Selection and formatting as you type: [`Handler::range_format`] and
+    /// [`Handler::type_format`] (protocol 1.1).
+    PartialFormat,
+    /// Code actions with hierarchical kinds, resolve data and commands, in place of v1's
+    /// `actions`: [`Handler::code_actions`] and [`Handler::code_action_resolve`] (protocol 1.1).
+    CodeActions,
+    // Protocol 1.1 features this crate names but does not answer yet.
+    HoverQuery,
+    SelectionRanges,
+    Hierarchy,
+    WorkspaceSymbols,
+    FileDiagnostics,
+    DocumentLinks,
 }
 
 impl Feature {
@@ -276,6 +316,20 @@ impl Feature {
             Feature::Reveal => "reveal",
             Feature::Diff => "diff",
             Feature::LinkedEditing => "linked-editing",
+            Feature::QueryStream => "query-stream",
+            Feature::ProviderScope => "provider-scope",
+            Feature::CompleteItems => "complete-items",
+            Feature::SignatureList => "signature-list",
+            Feature::HoverQuery => "hover-query",
+            Feature::Navigation => "navigation",
+            Feature::SelectionRanges => "selection-ranges",
+            Feature::Hierarchy => "hierarchy",
+            Feature::WorkspaceSymbols => "workspace-symbols",
+            Feature::PrepareRename => "prepare-rename",
+            Feature::PartialFormat => "partial-format",
+            Feature::CodeActions => "code-actions",
+            Feature::FileDiagnostics => "file-diagnostics",
+            Feature::DocumentLinks => "document-links",
         }
     }
 }
@@ -843,6 +897,104 @@ pub trait Handler: Send {
     }
     /// The last tab showing a virtual document of this extension closed.
     fn content_closed(&mut self, _ext: &Ext, _uri: &str) {}
+
+    // Protocol 1.1 language features. The `*_stream` methods are what rhun's requests call; by
+    // default they answer with the methods above. `out` sends parts and progress (query-stream).
+    /// A completion list that may come in parts: the first part replaces what the extension said
+    /// before in the session, later parts and the answer add to it.
+    fn complete_stream(
+        &mut self,
+        ext: &Ext,
+        req: &CompleteRequest,
+        _out: &Stream,
+    ) -> CompletionList {
+        self.complete(ext, req)
+    }
+    /// Definition locations that may come in parts; the answer holds the rest.
+    fn definition_stream(&mut self, ext: &Ext, req: &PosRequest, _out: &Stream) -> Vec<Location> {
+        self.definition(ext, req)
+    }
+    /// References that may come in parts; the answer holds the rest.
+    fn references_stream(&mut self, ext: &Ext, req: &PosRequest, _out: &Stream) -> Vec<Location> {
+        self.references(ext, req)
+    }
+    /// rhun resolves the selected item with its resolve data (complete-items).
+    fn complete_resolve(&mut self, _ext: &Ext, _req: &ResolveRequest) -> Resolution {
+        Resolution::default()
+    }
+    /// rhun asks for every overload (signature-list; it then sends this instead of `signature`);
+    /// `None` hides the help.
+    fn signatures(&mut self, _ext: &Ext, _req: &SignatureRequest) -> Option<SignatureList> {
+        None
+    }
+    /// rhun asks where the symbol at the cursor is declared (navigation): as
+    /// [`Handler::definition`].
+    fn declaration(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// rhun asks where the type of the symbol at the cursor is defined (navigation).
+    fn type_definition(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// rhun asks for the implementations of the symbol at the cursor (navigation).
+    fn implementation(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// Declarations that may come in parts; the answer holds the rest.
+    fn declaration_stream(&mut self, ext: &Ext, req: &PosRequest, _out: &Stream) -> Vec<Location> {
+        self.declaration(ext, req)
+    }
+    /// Type definitions that may come in parts; the answer holds the rest.
+    fn type_definition_stream(
+        &mut self,
+        ext: &Ext,
+        req: &PosRequest,
+        _out: &Stream,
+    ) -> Vec<Location> {
+        self.type_definition(ext, req)
+    }
+    /// Implementations that may come in parts; the answer holds the rest.
+    fn implementation_stream(
+        &mut self,
+        ext: &Ext,
+        req: &PosRequest,
+        _out: &Stream,
+    ) -> Vec<Location> {
+        self.implementation(ext, req)
+    }
+    /// F2 asks before the rename prompt opens (prepare-rename): the range to select and the name
+    /// to start with; `None` for the word at the cursor; why nothing can be renamed there (shown
+    /// to the user; neither the prompt nor a file rename follows).
+    fn prepare_rename(
+        &mut self,
+        _ext: &Ext,
+        _req: &PosRequest,
+    ) -> Result<Option<PreparedRename>, String> {
+        Ok(None)
+    }
+    /// rhun asks to format a range of a document (partial-format): edits for that document only.
+    fn range_format(&mut self, _ext: &Ext, _req: &RangeFormatRequest) -> WorkspaceEdit {
+        WorkspaceEdit::default()
+    }
+    /// A trigger character was typed (partial-format): edits for that document only, applied
+    /// while it is still at the request's version.
+    fn type_format(&mut self, _ext: &Ext, _req: &TypeFormatRequest) -> WorkspaceEdit {
+        WorkspaceEdit::default()
+    }
+    /// rhun asks for code actions (code-actions, in place of [`Handler::actions`]). Actions whose
+    /// kind does not match the kinds asked ([`CodeActionsRequest::wants`]) are left out.
+    fn code_actions(&mut self, _ext: &Ext, _req: &CodeActionsRequest) -> Vec<Action> {
+        Vec::new()
+    }
+    /// The user chose an action with resolve data and no edit (code-actions): its edit and
+    /// command; an error says nothing comes.
+    fn code_action_resolve(
+        &mut self,
+        _ext: &Ext,
+        _req: &ActionResolveRequest,
+    ) -> Result<ResolvedAction, String> {
+        Err("nothing to resolve".to_string())
+    }
 }
 
 enum Msg {
@@ -896,6 +1048,8 @@ pub struct Ext {
     features: Arc<Mutex<Vec<String>>>,
     inline: Option<Arc<Inline>>,
     procs: testing::Procs,
+    /// rhun's pending requests to the extension, and whether each was cancelled (query.rs)
+    queries: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
 }
 
 /// Speaks the protocol over standard input and output until rhun stops the extension, with
@@ -921,6 +1075,7 @@ where
         features: Arc::new(Mutex::new(Vec::new())),
         inline: None,
         procs: Arc::default(),
+        queries: Arc::new(Mutex::new(HashMap::new())),
     };
     let mut hello = String::from("hello 1");
     for f in features {
@@ -1549,6 +1704,7 @@ impl Ext {
         }
         drop(p);
         testing::tests_gone(&self.procs);
+        self.cancel_query(None);
     }
 
     /// Reads one message: a reply goes to its waiter (Delivered); End when rhun's input ends or
@@ -1686,6 +1842,14 @@ impl Ext {
                     if ev.name == "features" {
                         *self.features.lock().unwrap() = ev.fields.clone();
                     }
+                    if ev.name == "cancel" {
+                        if let Some(id) = ev.fields.first().and_then(|v| v.parse().ok()) {
+                            self.cancel_query(Some(id));
+                        }
+                    }
+                    if ev.name == "bye" {
+                        self.cancel_query(None);
+                    }
                     return Msg::Event(ev);
                 }
                 id => {
@@ -1693,7 +1857,8 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
-                        // a request followed by a body: its length is the last field
+                        // a request followed by a body: its length is the last field (1 to 10
+                        // digits); a longer or malformed one is not rhun's, and the session ends
                         let body_max: Option<usize> = match verb.as_str() {
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
                             "commit-message" => Some(4 << 20),
@@ -1705,11 +1870,15 @@ impl Ext {
                             "tool" | "agent-prompt" => Some(4 << 20),
                             // a notebook body: 64 MB at most, and its path
                             "nb-open" | "nb-save" => Some(notebook::BODY_MAX + 65536),
+                            // protocol 1.1 language queries (at most 64 KiB)
+                            v if query::BODIED.contains(&v) && !rest.is_empty() => {
+                                Some(query::MAX_REQUEST_BODY)
+                            }
                             _ => None,
                         };
                         let mut body = Vec::new();
                         if let Some(max) = body_max {
-                            let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
+                            let len: usize = match rest.last().and_then(|v| body_len(v)) {
                                 Some(n) if n <= max => n,
                                 _ => return Msg::End,
                             };
@@ -1876,19 +2045,93 @@ impl Ext {
                     fields,
                     body: req_body,
                 } => {
+                    let out = self.stream(id);
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
-                            .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
+                            .map(|r| Ok(h.complete_stream(self, &r, &out).encode_bytes())),
+                        "complete-resolve" if self.has(Feature::CompleteItems) => {
+                            ResolveRequest::parse(id, &fields, &data)
+                                .map(|r| Ok(h.complete_resolve(self, &r).encode().into_bytes()))
+                        }
                         "signature" => SignatureRequest::parse(&fields).map(|r| {
                             Ok(h.signature(self, &r)
                                 .map(|s| s.encode())
                                 .unwrap_or_default()
                                 .into_bytes())
                         }),
-                        "definition" => PosRequest::parse(&fields)
-                            .map(|r| Ok(lang::encode_locations(&h.definition(self, &r)))),
-                        "references" => PosRequest::parse(&fields)
-                            .map(|r| Ok(lang::encode_locations(&h.references(self, &r)))),
+                        "signatures" if self.has(Feature::SignatureList) => {
+                            SignatureRequest::parse(&fields).map(|r| {
+                                Ok(h.signatures(self, &r)
+                                    .map(|l| l.encode())
+                                    .unwrap_or_default()
+                                    .into_bytes())
+                            })
+                        }
+                        "definition" => PosRequest::parse(&fields).map(|r| {
+                            Ok(lang::encode_locations(&h.definition_stream(self, &r, &out)))
+                        }),
+                        "references" => PosRequest::parse(&fields).map(|r| {
+                            Ok(lang::encode_locations(&h.references_stream(self, &r, &out)))
+                        }),
+                        "declaration" if self.has(Feature::Navigation) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(lang::encode_locations(
+                                    &h.declaration_stream(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "type-definition" if self.has(Feature::Navigation) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(lang::encode_locations(
+                                    &h.type_definition_stream(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "implementation" if self.has(Feature::Navigation) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(lang::encode_locations(
+                                    &h.implementation_stream(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "prepare-rename" if self.has(Feature::PrepareRename) => {
+                            PosRequest::parse(&fields).map(|r| match h.prepare_rename(self, &r) {
+                                Ok(p) => Ok(p.map(|p| p.encode()).unwrap_or_default()),
+                                Err(why) => Err(("refused", why)),
+                            })
+                        }
+                        "range-format" if self.has(Feature::PartialFormat) => {
+                            RangeFormatRequest::parse(&fields).map(|r| {
+                                h.range_format(self, &r)
+                                    .encode()
+                                    .map_err(|why| ("toobig", why))
+                            })
+                        }
+                        "type-format" if self.has(Feature::PartialFormat) => {
+                            TypeFormatRequest::parse(&fields).map(|r| {
+                                h.type_format(self, &r)
+                                    .encode()
+                                    .map_err(|why| ("toobig", why))
+                            })
+                        }
+                        "code-actions" if self.has(Feature::CodeActions) => {
+                            CodeActionsRequest::parse(id, &fields).map(|r| {
+                                let acts: Vec<Action> = h
+                                    .code_actions(self, &r)
+                                    .into_iter()
+                                    .filter(|a| r.wants(&a.kind_word()))
+                                    .collect();
+                                Ok(encode_code_actions(&acts))
+                            })
+                        }
+                        "code-action-resolve" if self.has(Feature::CodeActions) => {
+                            ActionResolveRequest::parse(id, &fields, &data).map(|r| {
+                                match h.code_action_resolve(self, &r) {
+                                    Ok(res) => res.encode().map_err(|why| ("toobig", why)),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
                         "symbols" => PosRequest::parse(&fields)
                             .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
                         "actions" => ActionsRequest::parse(&fields).map(|r| {
@@ -2036,6 +2279,7 @@ impl Ext {
                         }
                         None => self.write(&format!("error {id} unknown no such request"), &[]),
                     };
+                    self.finish_query(id);
                 }
             }
         }
@@ -2076,6 +2320,14 @@ fn refusal_code(code: &str) -> &'static str {
         "cancelled" => "cancelled",
         _ => "refused",
     }
+}
+
+/// A body's length as rhun writes it: a plain decimal of 1 to 10 digits.
+fn body_len(s: &str) -> Option<usize> {
+    if s.is_empty() || s.len() > 10 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn parse_view_event(ev: &Event) -> Option<(View, ViewEvent)> {

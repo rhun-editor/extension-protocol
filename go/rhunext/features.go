@@ -349,6 +349,24 @@ type CompletionItem struct {
 	Detail string
 	Doc    string
 	Edits  []TextEdit
+	// complete-items (protocol 1.1; sent only when rhun agreed it): Resolve is data rhun hands
+	// back in a complete-resolve request when the item is selected (at most 16 KB), ResolveEdits
+	// says the resolution may add edits (accepting then waits for it); Replace is the range that
+	// replaces the rest of the word (it starts where Range does); typing one of Commit's characters
+	// accepts the item; Filter is matched instead of Label; Suffix is drawn after Label; Adjust
+	// indents Insert's later lines like the insertion line; AfterSignature and AfterComplete ask
+	// for signature help or a new list after accepting
+	Resolve        []byte
+	ResolveEdits   bool
+	Replace        *Range
+	Commit         string
+	Filter         string
+	Suffix         string
+	Preselect      bool
+	Deprecated     bool
+	Adjust         bool
+	AfterSignature bool
+	AfterComplete  bool
 	// where the cursor goes (WithCursor); without it, after Insert
 	cursor          int
 	hasCursor       bool
@@ -406,6 +424,7 @@ func (l CompletionList) Encode() []byte {
 			(it.cursor == len(insert) || utf8.RuneStart(insert[it.cursor])) {
 			fmt.Fprintf(&extra, "cursor %d 0\n", it.cursor)
 		}
+		extra.Write(itemExtra(it))
 		kind := it.Kind
 		if kind == "" {
 			kind = KindText
@@ -483,7 +502,15 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 	var body []byte
 	var rerr *Error
 	known := false
-	switch f[1] {
+	nid, _ := strconv.ParseInt(id, 10, 64)
+	defer e.finishLang(nid)
+	verb := f[1]
+	if b, re, ok := e.answerQuery(h, nid, f[1], f[2:], reqBody); ok {
+		body, rerr, known = b, re, true
+		verb = "" // answered
+	}
+	switch verb {
+	case "":
 	case "content":
 		if c, is := h.(ContentProvider); is && e.Has(FeatureURIs) && len(f) >= 3 {
 			known = true

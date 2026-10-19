@@ -229,6 +229,14 @@ type host struct {
 	warnedConsent bool               // said once that a disk change needs the user's consent
 	diffs         map[int64]string   // the diff tabs it opened: "LEFT RIGHT TITLE"
 	selectionsSet map[int64][]string // select-many's selections per document
+
+	// protocol 1.1 language features (query.go)
+	asked     map[string]bool   // the features hello named
+	scope     map[string]string // [provides] values set by provides, "-" for withdrawn
+	scoped    bool              // a provides was served (said once)
+	queries   map[int64]*query  // rhun's requests: parts, progress, the hard limit
+	withdrawn map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
+	lastAsk   int64             // the last request asked
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -426,7 +434,8 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"secret-set":     true,                                                        // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
-	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true} // notebooks: notebook.go
+	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go
+	"query-part": true, "query-progress": true} // language features: query.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1153,6 +1162,23 @@ func (h *host) handle(msg message) {
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	case "select-many", "reveal", "show-locations", "diff", "diff-close":
 		h.editorRequest(id, verb, args, msg, reply, rerr)
+	case "query-part", "query-progress":
+		if len(args) == 0 {
+			h.fail("request grammar", verb+" takes LEN last")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[len(args)-1])
+		if !ok {
+			return
+		}
+		if verb == "query-part" {
+			h.queryPart(args, b, reply, rerr, id)
+		} else {
+			h.queryProgress(args, b, reply, rerr, id)
+		}
+	case "provides":
+		h.providesRequest(line, reply, rerr, id)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1327,6 +1353,7 @@ func (h *host) expectHello() bool {
 	}
 	h.ok("hello 1 as the first line")
 	h.views, h.hostReqs, h.hostAnswers = map[int64]bool{}, map[int64]string{}, map[int64]message{}
+	h.scope, h.scoped, h.queries, h.withdrawn = map[string]string{}, false, map[int64]*query{}, map[int64]bool{}
 	h.agree(line)
 	return true
 }
@@ -1461,26 +1488,23 @@ func main() {
 			bad(fmt.Sprintf("[subscribe] %s is not an event with a subscription", k))
 		}
 	}
-	for k := range m.provides {
+	for k, v := range m.provides {
 		notebook := k == "notebook" || k == "notebook.title" || k == "notebook.kernel" // v1.1 notebooks
-		if notebook && k == "notebook.kernel" && m.provides[k] != "yes" && m.provides[k] != "no" {
+		if notebook && k == "notebook.kernel" && v != "yes" && v != "no" {
 			bad("[provides] notebook.kernel is yes or no")
 		}
 		if k == "commit_message" || k == "scm" { // source control: yes or no
-			if v := m.provides[k]; v != "yes" && v != "no" {
+			if v != "yes" && v != "no" {
 				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))
 			}
 			continue
 		}
-		if k == "quickdiff" {
+		// keys of other features: quickdiff (scm.go), schemes (resources.go), linked (editor.go)
+		if k == "quickdiff" || k == "schemes" || k == "linked" || notebook {
 			continue
 		}
-		known := k == "complete.triggers" || k == "signature.triggers" || k == "schemes" || notebook
-		for _, f := range providerFeatures {
-			known = known || k == provideKey(f)
-		}
-		if !known {
-			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
+		if why := providesKeyProblem(k, v); why != "" {
+			bad(why)
 		}
 	}
 	for k, v := range m.needs {
