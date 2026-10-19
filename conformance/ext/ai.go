@@ -272,7 +272,7 @@ func (h *host) checkAI() {
 	if h.features["tools"] {
 		for _, t := range h.m.tools {
 			input := "test"
-			m, ok := h.askBody(fmt.Sprintf("tool %s rhun-tests/checker %d", t, len(input)), []byte(input))
+			m, ok := h.askBody("tool "+t+" rhun-tests/checker", []byte(input), 3*time.Second)
 			switch {
 			case !ok:
 				h.fail("tools", "no answer to a call of tool "+t+" within 3 s")
@@ -291,7 +291,7 @@ func (h *host) checkAI() {
 	}
 	if h.features["agent-prompts"] {
 		text := "hello"
-		m, ok := h.askBody(fmt.Sprintf("agent-prompt - %d", len(text)), []byte(text))
+		m, ok := h.askBody("agent-prompt -", []byte(text), 3*time.Second)
 		switch {
 		case !ok:
 			h.fail("agent-prompts", "no answer to agent-prompt within 3 s")
@@ -305,28 +305,6 @@ func (h *host) checkAI() {
 		}
 	}
 	_ = strconv.Itoa
-}
-
-// askBody is ask for a request with a body: the line, then exactly the body's bytes
-func (h *host) askBody(line string, body []byte) (message, bool) {
-	h.hostSeq++
-	id := h.hostSeq
-	h.hostReqs[id] = line
-	h.write(fmt.Sprintf("%d %s\n%s", id, line, body))
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if m, ok := h.hostAnswers[id]; ok {
-			delete(h.hostAnswers, id)
-			return m, true
-		}
-		msg, err := h.readMessage(100 * time.Millisecond)
-		if err == nil && msg.line != "" {
-			h.handle(msg)
-		}
-	}
-	delete(h.hostReqs, id)
-	h.write(fmt.Sprintf("0 cancel %d\n", id))
-	return message{}, false
 }
 
 func containsString(list []string, s string) bool {
