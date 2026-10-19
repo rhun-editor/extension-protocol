@@ -192,6 +192,10 @@ type host struct {
 	queries   map[int64]*query  // rhun's requests: parts, progress, the hard limit
 	withdrawn map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
 	lastAsk   int64             // the last request asked
+
+	problems      map[string]int // file-diagnostics: the sets kept, by target
+	fileDiagsSaid bool           // a set was kept (said once)
+	askedItem     []byte         // the PATH of the hierarchy item asked about (calls-out's sites are there)
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -365,7 +369,7 @@ type message struct {
 
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
-	"query-part": true, "query-progress": true}
+	"query-part": true, "query-progress": true, "file-diagnostics": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1070,6 +1074,34 @@ func (h *host) handle(msg message) {
 		}
 	case "provides":
 		h.providesRequest(line, reply, rerr, id)
+	case "file-diagnostics":
+		if !h.features["file-diagnostics"] {
+			h.fail("features", "file-diagnostics without file-diagnostics agreed after hello")
+			rerr("unknown", "no such request")
+			return
+		}
+		if len(args) != 4 {
+			h.fail("request grammar", "file-diagnostics takes VERSION N TARGET_LEN LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[3])
+		if !ok || !need("read") {
+			return
+		}
+		h.fileDiagnostics(args, b, reply, rerr, id)
+	case "file-diagnostics-reset":
+		switch {
+		case !h.features["file-diagnostics"]:
+			h.fail("features", "file-diagnostics-reset without file-diagnostics agreed after hello")
+			rerr("unknown", "no such request")
+		case len(args) != 0:
+			h.fail("request grammar", "file-diagnostics-reset takes nothing")
+			rerr("syntax", "cannot parse the line")
+		default:
+			h.problems = nil
+			reply(fmt.Sprintf("ok %d", id))
+		}
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
