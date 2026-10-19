@@ -63,6 +63,42 @@ type ViewEvent struct {
 	X, Y, DY      float64 // the pointer; DY for wheel
 	Width, Height float64 // size
 	Metrics       Metrics // metrics
+	// With FeatureViewKeys: Mods ("-" or ctrl+shift+alt+super) on down, up, click, drag, wheel,
+	// dblclick and key; Key the key's name (key: "Return", "Left", "F5", "a"); Text the typed
+	// text (text) or the clipboard's (paste); On for focus. Kinds key, text, paste, selectall,
+	// dblclick and focus come with it.
+	Mods string
+	Key  string
+	Text string
+	On   bool
+}
+
+// FeatureViewKeys is pictures with the keyboard: ViewEvent key, text, paste, selectall, dblclick,
+// focus and Mods; ViewCopier.
+const FeatureViewKeys = "view-keys"
+
+// FeatureViewImages is decoded images by handle: Image, Unimage, Picture.Image.
+const FeatureViewImages = "view-images"
+
+// ViewCopier answers copy and cut in a picture with the keyboard (vcopy): the clipboard's text,
+// or false to leave it.
+type ViewCopier interface {
+	ViewCopy(ext *Ext, view View, cut bool) (string, bool)
+}
+
+// Image decodes a PNG, JPEG or GIF once (feature view-images): its handle for Picture.Image.
+func (e *Ext) Image(data []byte) (int64, error) {
+	r, err := e.Request("vimage", data, itoa(int64(len(data))))
+	if err != nil {
+		return 0, err
+	}
+	return argInt(r, 0), nil
+}
+
+// Unimage lets an image go.
+func (e *Ext) Unimage(img int64) error {
+	_, err := e.Request("unimage", nil, itoa(img))
+	return err
 }
 
 // Viewer receives its views' events.
@@ -105,10 +141,24 @@ func parseViewEvent(ev Event) (View, ViewEvent, bool) {
 			}
 		}
 		vev.Metrics = m
-	case "hover", "down", "drag", "up", "click":
+	case "hover", "down", "drag", "up", "click", "dblclick":
 		vev.X, vev.Y = f(2), f(3)
+		if len(ev.Args) > 4 {
+			vev.Mods = ev.Args[4]
+		}
 	case "wheel":
 		vev.X, vev.Y, vev.DY = f(2), f(3), f(4)
+		if len(ev.Args) > 5 {
+			vev.Mods = ev.Args[5]
+		}
+	case "key":
+		if len(ev.Args) > 3 {
+			vev.Mods, vev.Key = ev.Args[2], ev.Args[3]
+		}
+	case "text", "paste":
+		vev.Text = string(ev.Body)
+	case "focus":
+		vev.On = f(2) == 1
 	}
 	return View(id), vev, true
 }
@@ -208,6 +258,11 @@ func (p *Picture) Bytes() []byte { return p.b.Bytes() }
 
 // Len is the number of shapes.
 func (p *Picture) Len() int { return p.n }
+
+// Image is one of the extension's decoded images (Ext.Image) scaled into the box.
+func (p *Picture) Image(x, y, w, h float64, img int64) *Picture {
+	return p.shape("image", Num(x), Num(y), nn(w), nn(h), itoa(img))
+}
 
 // Rect is a filled rectangle.
 func (p *Picture) Rect(x, y, w, h float64, c Color) *Picture {
@@ -543,6 +598,17 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 					} else {
 						body = []byte(m)
 					}
+				}
+			}
+		}
+	case "vcopy":
+		c, is := h.(ViewCopier)
+		if is && e.Has(FeatureViewKeys) && len(f) >= 4 {
+			v, err := strconv.ParseInt(f[2], 10, 64)
+			if err == nil {
+				known = true
+				if t, ok := c.ViewCopy(e, View(v), f[3] == "cut"); ok {
+					body = []byte(t)
 				}
 			}
 		}

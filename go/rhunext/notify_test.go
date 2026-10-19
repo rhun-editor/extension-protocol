@@ -37,3 +37,24 @@ func TestLogPatch(t *testing.T) {
 		t.Fatalf("%q %v", b, err)
 	}
 }
+
+func TestPictureKeyboardEvents(t *testing.T) {
+	_, ev, ok := parseViewEvent(Event{Name: "view", Args: []string{"4", "key", "ctrl+shift", "a"}})
+	if !ok || ev.Kind != "key" || ev.Mods != "ctrl+shift" || ev.Key != "a" {
+		t.Fatalf("%+v", ev)
+	}
+	_, ev, _ = parseViewEvent(Event{Name: "view", Args: []string{"4", "text", "2"}, Body: []byte("é")})
+	if ev.Text != "é" {
+		t.Fatalf("%+v", ev)
+	}
+	_, ev, _ = parseViewEvent(Event{Name: "view", Args: []string{"4", "click", "5", "6", "shift"}})
+	if ev.X != 5 || ev.Mods != "shift" {
+		t.Fatalf("%+v", ev)
+	}
+	if _, _, ok := parseRetainedEvent(Event{Name: "view", Args: []string{"4", "key", "-", "a"}}); ok {
+		t.Fatal("key is a picture event")
+	}
+	if got := string((&Picture{}).Image(0, 0, 40, 40, 7).Bytes()); got != "image 0 0 40 40 7\n" {
+		t.Fatal(got)
+	}
+}

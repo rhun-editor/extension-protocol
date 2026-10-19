@@ -967,6 +967,13 @@ static void notes_and_logs(void) {
     same(&p.body, "log 2 23\ninfo start\n- two lines\nclear 0\n");
     assert(p.n == 2);
     rx_patch_free(&p);
+    rx_buf pic = {NULL, 0, 0};
+    rx_pic_image(&pic, 0, 0, 40, 40.5, 7);
+    same(&pic, "image 0 0 40 40.5 7\n");
+    rx_buf_free(&pic);
+    assert(rx_has_body("0 view 4 text 1"));
+    assert(rx_has_body("0 view 4 paste 12"));
+    assert(!rx_has_body("0 view 4 key ctrl a"));
 }
 
 static void retained_patches(void) {

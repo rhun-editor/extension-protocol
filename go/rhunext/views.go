@@ -498,7 +498,8 @@ type RetainedViewer interface {
 // viewEventHasBody reports whether "0 view VIEW WHAT ..." is followed by a body (its last field).
 func viewEventHasBody(what string) bool {
 	switch what {
-	case "select", "activate", "expand", "collapse", "check", "action", "discarded", "change", "link":
+	case "select", "activate", "expand", "collapse", "check", "action", "discarded", "change", "link",
+		"text", "paste":
 		return true
 	}
 	return false
@@ -551,7 +552,8 @@ func parseRetainedEvent(ev Event) (View, RetainedEvent, bool) {
 			r.Key = ev.Args[3]
 		}
 	case "closed":
-	case "size", "metrics", "hover", "down", "drag", "up", "click", "leave", "wheel", "open":
+	case "size", "metrics", "hover", "down", "drag", "up", "click", "leave", "wheel", "open",
+		"key", "text", "paste", "selectall", "dblclick":
 		return 0, RetainedEvent{}, false
 	}
 	return View(id), r, true

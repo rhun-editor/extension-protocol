@@ -86,6 +86,28 @@ mod tests {
         );
         assert_eq!(whole_range(b""), Range::new(Pos::new(1, 1), Pos::new(1, 1)));
     }
+
+    fn view_event(fields: &[&str], body: &[u8]) -> Event {
+        Event {
+            name: "view".into(),
+            fields: fields.iter().map(|f| f.to_string()).collect(),
+            rest: String::new(),
+            body: body.to_vec(),
+        }
+    }
+
+    #[test]
+    fn picture_keyboard_events() {
+        let k = parse_view_event(&view_event(&["4", "key", "ctrl+shift", "a"], b""));
+        assert_eq!(k, Some((4, ViewEvent::Key { mods: "ctrl+shift".into(), name: "a".into() })));
+        let t = parse_view_event(&view_event(&["4", "text", "2"], "é".as_bytes()));
+        assert_eq!(t, Some((4, ViewEvent::Text("é".into()))));
+        assert_eq!(parse_view_event(&view_event(&["4", "selectall"], b"")), Some((4, ViewEvent::SelectAll)));
+        let c = view_event(&["4", "click", "5", "6", "shift"], b"");
+        assert_eq!(view_event_mods(&c), Some("shift"));
+        assert_eq!(parse_view_event(&c), Some((4, ViewEvent::Click { x: 5.0, y: 6.0 })));
+        assert!(views::parse_retained(&view_event(&["4", "key", "-", "a"], b"")).is_none());
+    }
 }
 
 /// The protocol version this crate speaks.
@@ -165,6 +187,11 @@ pub enum Feature {
     QuickDiff,
     /// Log views (`kind = log`, with [`Feature::ViewTree`]): [`views::Patch::log`].
     ViewLog,
+    /// Pictures with the keyboard (with [`Feature::Views`]): [`ViewEvent::Key`] and the others,
+    /// [`Handler::view_copy`].
+    ViewKeys,
+    /// Decoded images by handle: [`Ext::image`], [`picture::Picture::image`].
+    ViewImages,
     /// Notification cards with buttons: [`Ext::notify`], [`Handler::note_event`] ([`notify`]).
     Notify,
     /// Progress in the status bar, a card or a view: [`Ext::progress`], [`Handler::progress_cancel`].
@@ -194,6 +221,8 @@ impl Feature {
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
             Feature::ViewLog => "view-log",
+            Feature::ViewKeys => "view-keys",
+            Feature::ViewImages => "view-images",
             Feature::Notify => "notify",
             Feature::Progress => "progress",
         }
@@ -392,6 +421,31 @@ pub enum ViewEvent {
     },
     /// The user closed the tab; the id is not used again.
     Closed,
+    /// With [`Feature::ViewKeys`]: the keyboard came (true) or went.
+    Focus(bool),
+    /// A key no binding takes: modifiers (`-` or `ctrl+shift+alt+super`) and its name (`Return`,
+    /// `Left`, `F5`, `a`).
+    Key { mods: String, name: String },
+    /// A typed character, after its [`ViewEvent::Key`].
+    Text(String),
+    /// The paste command's text.
+    Paste(String),
+    /// The select-all command.
+    SelectAll,
+    /// The second press of a double click.
+    DoubleClick { x: f32, y: f32 },
+}
+
+/// The modifiers (`-` or `ctrl+shift+alt+super`) a pointer event carries with
+/// [`Feature::ViewKeys`] (its last field): read it in [`Handler::event`].
+pub fn view_event_mods(ev: &Event) -> Option<&str> {
+    let what = ev.fields.get(1)?.as_str();
+    let at = match what {
+        "down" | "up" | "click" | "drag" | "dblclick" => 4,
+        "wheel" => 5,
+        _ => return None,
+    };
+    ev.fields.get(at).map(String::as_str)
 }
 
 /// The advance and line height of a text size, logical pixels.
@@ -542,6 +596,11 @@ pub trait Handler: Send {
     fn view_open(&mut self, _ext: &Ext, _open: &views::ViewOpen) {}
     /// The user did something in a retained view (feature `view-tree`).
     fn view_event(&mut self, _ext: &Ext, _view: View, _ev: &views::RetainedEvent) {}
+    /// Copy or cut in a picture with the keyboard (feature `view-keys`): the text for the
+    /// clipboard, or `None` to leave it.
+    fn view_copy(&mut self, _ext: &Ext, _view: View, _cut: bool) -> Option<String> {
+        None
+    }
     /// The user pressed a button of one of its cards, or closed it (feature `notify`).
     fn note_event(&mut self, _ext: &Ext, _note: u64, _ev: notify::NoteEvent) {}
     /// The user pressed Cancel on one of its progress entries (feature `progress`); rhun removes it
@@ -1137,6 +1196,18 @@ impl Ext {
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
+    /// A PNG, JPEG or GIF decoded once (feature `view-images`): its handle for
+    /// [`picture::Picture::image`].
+    pub fn image(&self, bytes: &[u8]) -> Result<u64, Error> {
+        let rep = self.request("vimage", Some(bytes))?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Lets an image go.
+    pub fn unimage(&self, image: u64) -> Result<(), Error> {
+        self.request(&format!("unimage {image}"), None).map(|_| ())
+    }
+
     // ---- notifications and progress (features `notify`, `progress`) ----
 
     /// A notification card; its NOTE for [`Ext::notify_set`], [`Ext::unnotify`] and
@@ -1368,6 +1439,9 @@ impl Ext {
                                 if rev == views::RetainedEvent::Closed {
                                     h.view(self, view, ViewEvent::Closed);
                                 }
+                                if let views::RetainedEvent::Focus(on) = rev {
+                                    h.view(self, view, ViewEvent::Focus(on)); // a picture's too
+                                }
                             } else if let Some((view, vev)) = parse_view_event(&ev) {
                                 h.view(self, view, vev);
                             }
@@ -1421,6 +1495,11 @@ impl Ext {
                         }
                         "format" => FormatRequest::parse(&fields)
                             .map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why))),
+                        "vcopy" if self.has(Feature::ViewKeys) => {
+                            let view: View = fields.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let cut = fields.get(1).map(String::as_str) == Some("cut");
+                            Some(Ok(h.view_copy(self, view, cut).unwrap_or_default().into_bytes()))
+                        }
                         "vkids" | "vmore" if self.has(Feature::ViewTree) => {
                             views::ChildrenRequest::parse(id, &verb, &fields, &req_body).map(|r| {
                                 let res = if r.have.is_some() {
@@ -1517,6 +1596,14 @@ fn parse_view_event(ev: &Event) -> Option<(View, ViewEvent)> {
             dy: f(4),
         },
         "closed" => ViewEvent::Closed,
+        "key" => ViewEvent::Key {
+            mods: ev.fields.get(2)?.clone(),
+            name: ev.fields.get(3)?.clone(),
+        },
+        "text" => ViewEvent::Text(String::from_utf8_lossy(&ev.body).into_owned()),
+        "paste" => ViewEvent::Paste(String::from_utf8_lossy(&ev.body).into_owned()),
+        "selectall" => ViewEvent::SelectAll,
+        "dblclick" => ViewEvent::DoubleClick { x: f(2), y: f(3) },
         _ => return None,
     };
     Some((view, vev))

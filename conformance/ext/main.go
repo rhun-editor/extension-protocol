@@ -194,6 +194,7 @@ type host struct {
 	notes       map[int64]*noteState // notifications open (notify.go)
 	progs       map[int64]*progState // progress not ended
 	noteSeq     int64
+	images      map[int64]bool // view-images handles (views.go)
 	patches     int              // vpatch requests that passed
 }
 
@@ -369,7 +370,7 @@ type message struct {
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, "vpatch": true, "vreveal": true,
-	"notify": true, "notify-set": true, "progress": true, "progress-set": true} // source control: scm.go
+	"notify": true, "notify-set": true, "progress": true, "progress-set": true, "vimage": true} // source control: scm.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1064,6 +1065,8 @@ func (h *host) handle(msg message) {
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	case "notify", "notify-set", "unnotify", "progress", "progress-set", "progress-end":
 		h.notifyRequest(id, verb, args, msg.body, reply, rerr)
+	case "vimage", "unimage":
+		h.imageRequest(id, verb, args, msg.body, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":

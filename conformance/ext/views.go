@@ -147,7 +147,11 @@ func (h *host) openRetained() {
 			h.warn("view-log", fmt.Sprintf("[views] %s is a log but view-log was not said after hello 1: rhun shows it as unsupported", key))
 			continue
 		}
-		if kind != "tree" && kind != "log" {
+		if kind == "picture" && !h.features["views"] {
+			h.warn("views", fmt.Sprintf("[views] %s is a picture but views was not said after hello 1: rhun shows it as unsupported", key))
+			continue
+		}
+		if kind != "tree" && kind != "log" && kind != "picture" {
 			continue
 		}
 		h.nextView++
@@ -254,6 +258,102 @@ func (h *host) retainedRequest(id int64, verb string, args []string, body []byte
 			rerr("badpos", "no such node")
 			return
 		}
+		reply(fmt.Sprintf("ok %d", id))
+	}
+}
+
+// checkPictureView sends a picture view what rhun sends a 12a view (size, metrics, the pointer) and,
+// with view-keys, the keyboard's events and a vcopy that must be answered
+func (h *host) checkPictureView(v *rview) {
+	id := v.id
+	h.write(fmt.Sprintf("0 view %d size 300 120\n0 view %d metrics small 6 16 normal 7 18 large 10 26 mono 7 19\n", id, id))
+	keys := h.features["view-keys"]
+	mods := ""
+	if keys {
+		mods = " -"
+		h.write(fmt.Sprintf("0 view %d focus 1\n", id))
+	}
+	h.write(fmt.Sprintf("0 view %d hover 10 10\n0 view %d down 10 10%s\n0 view %d up 10 10%s\n0 view %d click 10 10%s\n",
+		id, id, mods, id, mods, id, mods))
+	if keys {
+		h.write(fmt.Sprintf("0 view %d dblclick 10 10 -\n0 view %d key ctrl+shift Return\n0 view %d key - a\n0 view %d text 1\na"+
+			"0 view %d paste 5\nhello0 view %d selectall\n", id, id, id, id, id, id))
+	}
+	h.serve(400 * time.Millisecond)
+	if h.cmdExited() {
+		h.fail("views", "the program exited on its picture view's events")
+		return
+	}
+	h.ok(fmt.Sprintf("picture %s takes size, metrics and pointer events", v.key))
+	if keys {
+		h.hostSeq++
+		rid := h.hostSeq
+		h.hostReqs[rid] = "vcopy"
+		h.write(fmt.Sprintf("%d vcopy %d copy\n", rid, id))
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			if m, ok := h.hostAnswers[rid]; ok {
+				delete(h.hostAnswers, rid)
+				if strings.HasPrefix(m.line, fmt.Sprintf("ok %d ", rid)) {
+					h.ok("answers vcopy")
+				} else {
+					h.fail("view-keys", fmt.Sprintf("vcopy answered %q: ok ID LEN and the text (LEN 0 leaves the clipboard)", m.line))
+				}
+				break
+			}
+			msg, err := h.readMessage(100 * time.Millisecond)
+			if err == nil && msg.line != "" {
+				h.handle(msg)
+			}
+		}
+		if _, waiting := h.hostReqs[rid]; waiting {
+			delete(h.hostReqs, rid)
+			h.fail("view-keys", "no answer to vcopy within 1 s: rhun leaves the clipboard")
+		}
+		h.write(fmt.Sprintf("0 view %d focus 0\n", id))
+	}
+	h.write(fmt.Sprintf("0 view %d visible 0\n", id))
+}
+
+// imageRequest answers vimage and unimage (view-images): a PNG, JPEG or GIF by its first bytes
+func (h *host) imageRequest(id int64, verb string, args []string, body []byte, reply func(string), rerr func(string, string)) {
+	if !h.features["view-images"] {
+		h.fail("features", verb+" without view-images agreed after hello (hello 1 views view-images)")
+		rerr("unknown", "no such request")
+		return
+	}
+	if h.images == nil {
+		h.images = map[int64]bool{}
+	}
+	switch verb {
+	case "vimage":
+		png := bytes.HasPrefix(body, []byte("\x89PNG\r\n\x1a\n"))
+		jpeg := bytes.HasPrefix(body, []byte{0xff, 0xd8, 0xff})
+		gif := bytes.HasPrefix(body, []byte("GIF87a")) || bytes.HasPrefix(body, []byte("GIF89a"))
+		if len(args) != 1 || !(png || jpeg || gif) {
+			h.fail("view-images", "vimage takes LEN and a PNG, JPEG or GIF")
+			rerr("syntax", "cannot decode the image")
+			return
+		}
+		if len(h.images) >= 64 {
+			rerr("toobig", "64 images or 128 MB")
+			return
+		}
+		h.noteSeq++
+		h.images[h.noteSeq] = true
+		reply(fmt.Sprintf("ok %d %d", id, h.noteSeq))
+	case "unimage":
+		n, err := strconv.ParseInt(strings.Join(args, ""), 10, 64)
+		if err != nil || len(args) != 1 {
+			h.fail("view-images", "unimage takes IMG")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if !h.images[n] {
+			rerr("noview", "no such image")
+			return
+		}
+		delete(h.images, n)
 		reply(fmt.Sprintf("ok %d", id))
 	}
 }
@@ -397,6 +497,10 @@ func applyPatch(v *rview, body []byte) (string, string) {
 			if v.vkind != "log" {
 				return "noview", "an op for another kind of view"
 			}
+		}
+		if v.vkind == "picture" && f[0] != "title" && f[0] != "badge" && f[0] != "message" && f[0] != "busy" &&
+			f[0] != "state" && f[0] != "action" {
+			return "noview", "an op for another kind of view"
 		}
 		switch f[0] {
 		case "log":
@@ -550,6 +654,10 @@ func (h *host) checkRetained() {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		v := h.rviews[id]
+		if v.vkind == "picture" {
+			h.checkPictureView(v)
+			continue
+		}
 		if v.vkind == "log" {
 			// the user pressed Clear, then the log went off screen
 			h.write(fmt.Sprintf("0 view %d focus 1\n0 view %d clear\n0 view %d focus 0\n0 view %d visible 0\n", id, id, id, id))

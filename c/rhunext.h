@@ -54,12 +54,18 @@ typedef struct {
     size_t body_len;
 } rx_event;
 
-/* a view's event (12a): kind is size, metrics, hover, down, drag, up, click, leave, wheel, closed */
+/* a view's event (12a): kind is size, metrics, hover, down, drag, up, click, leave, wheel, closed;
+ * with "view-keys" also key, text, paste, selectall, dblclick and focus */
 typedef struct {
     const char *kind;
     double x, y, dy;            /* the pointer; dy for wheel */
     double width, height;       /* size */
     double advance[4], line_height[4];  /* metrics: small, normal, large, mono */
+    const char *mods;           /* view-keys: "-" or ctrl+shift+alt+super (pointer events, key), else "" */
+    const char *key;            /* key: its name ("Return", "Left", "F5", "a") */
+    const unsigned char *text;  /* text (typed) and paste (the clipboard's), text_len bytes */
+    size_t text_len;
+    int on;                     /* focus */
 } rx_view_event;
 
 /* what rhun asks for (12b to 12e), an rx_ask: kind is typed, trigger (ch is the character), invoked,
@@ -170,6 +176,9 @@ typedef struct {
     /* Progress (feature "progress"): the user pressed Cancel; rhun removes it 10 s later unless
      * rx_progress_end comes first. */
     void (*progress_cancel)(rx_ext *ext, int64_t progress, void *user);
+    /* Copy or cut in a picture with the keyboard (feature "view-keys"): append the clipboard's
+     * text to out and return 1 (nothing: the clipboard stays) */
+    int (*view_copy)(rx_ext *ext, int64_t view, int cut, rx_buf *out, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -255,6 +264,11 @@ void rx_patch_clear(rx_patch *p);
 /* a retained view (kind "tree", or "log" with view-log) in an editor tab of its own, shown at once;
  * its view number, or -1. rx_unview closes it. */
 int64_t rx_vtab(rx_ext *ext, const char *kind, const char *title);
+/* Images (feature "view-images"): a PNG, JPEG or GIF decoded once; its handle, or -1 */
+int64_t rx_image(rx_ext *ext, const void *data, size_t len);
+int rx_unimage(rx_ext *ext, int64_t image);
+/* the picture shape that draws an image scaled into the box */
+void rx_pic_image(rx_buf *picture, double x, double y, double w, double h, int64_t image);
 
 /* Notifications (protocol 1.1, feature "notify"): a card built with rx_note_*, shown with
  * rx_notify(ext, "info"|"warning"|"error", &note); rx_note_free after. */
@@ -696,7 +710,7 @@ static int rx_has_body(const char *line) {
     if (!w) return 0;
     w++;
     static const char *with[] = {"select ", "activate ", "expand ", "collapse ", "check ", "action ",
-                                 "discarded ", "change ", "link ", NULL};
+                                 "discarded ", "change ", "link ", "text ", "paste ", NULL};
     for (int i = 0; with[i]; i++)
         if (strncmp(w, with[i], strlen(with[i])) == 0) return 1;
     return 0;
@@ -2502,6 +2516,9 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             req.kind = f[4];
             if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
         }
+    } else if (strcmp(verb, "vcopy") == 0 && n >= 4 && h->view_copy && rx_has(ext, "view-keys")) {
+        ok = h->view_copy(ext, atoll(f[2]), strcmp(f[3], "cut") == 0, &body, user) ? 1 : 0;
+        if (!ok) ok = 1;            /* nothing: ok ID 0 leaves the clipboard */
     } else if (strcmp(verb, "quickdiff") == 0 && n == 4 && h->quickdiff && rx_has(ext, "quickdiff")) {
         rx_quickdiff_ask req;
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
@@ -2728,6 +2745,24 @@ void rx_patch_log(rx_patch *p, int n, const char *const *sevs, const char *const
 }
 void rx_patch_clear(rx_patch *p) { rx_patch_op(p, "clear", NULL, 0); }
 
+int64_t rx_image(rx_ext *ext, const void *data, size_t len) {
+    rx_buf f = {NULL, 0, 0};
+    char line[64];
+    snprintf(line, sizeof line, "vimage %zu", len);
+    int r = rx_request(ext, line, data, len, &f, NULL);
+    int64_t img = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&f);
+    return img;
+}
+int rx_unimage(rx_ext *ext, int64_t image) {
+    char line[64];
+    snprintf(line, sizeof line, "unimage %lld", (long long)image);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+void rx_pic_image(rx_buf *picture, double x, double y, double w, double h, int64_t image) {
+    rx_buf_fmt(picture, "image %g %g %g %g %lld\n", x, y, w < 0 ? 0 : w, h < 0 ? 0 : h, (long long)image);
+}
+
 int64_t rx_vtab(rx_ext *ext, const char *kind, const char *title) {
     rx_buf line = {NULL, 0, 0}, f = {NULL, 0, 0};
     rx_buf_fmt(&line, "vtab %s ", kind);
@@ -2831,7 +2866,8 @@ static int rx_retained_dispatch(rx_ext *ext, const rx_handlers *h, void *user, c
         h->view_open(ext, &o, user);
         return 1;
     }
-    static const char *picture[] = {"size", "metrics", "hover", "down", "drag", "up", "click", "leave", "wheel", NULL};
+    static const char *picture[] = {"size", "metrics", "hover", "down", "drag", "up", "click", "leave", "wheel",
+                                    "key", "text", "paste", "selectall", "dblclick", NULL};
     for (int i = 0; picture[i]; i++)
         if (strcmp(k, picture[i]) == 0) return 0;
     if (!h->view_event) return strcmp(k, "closed") != 0;
@@ -2852,11 +2888,25 @@ static int rx_retained_dispatch(rx_ext *ext, const rx_handlers *h, void *user, c
     return strcmp(k, "closed") != 0;    /* a closed tab is also a picture's event */
 }
 
-static void rx_view_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n) {
+static void rx_view_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                             const unsigned char *body, size_t body_len) {
     if (n < 4) return;
     rx_view_event ev;
     memset(&ev, 0, sizeof ev);
     ev.kind = f[3];
+    ev.mods = ev.key = "";
+    const char *k = f[3];
+    if ((strcmp(k, "down") == 0 || strcmp(k, "up") == 0 || strcmp(k, "click") == 0 || strcmp(k, "drag") == 0 ||
+         strcmp(k, "dblclick") == 0) && n > 6)
+        ev.mods = f[6];
+    else if (strcmp(k, "wheel") == 0 && n > 7)
+        ev.mods = f[7];
+    else if (strcmp(k, "key") == 0 && n > 5)
+        ev.mods = f[4], ev.key = f[5];
+    else if (strcmp(k, "text") == 0 || strcmp(k, "paste") == 0)
+        ev.text = body ? body : (const unsigned char *)"", ev.text_len = body_len;
+    else if (strcmp(k, "focus") == 0 && n > 4)
+        ev.on = atoi(f[4]);
     double v[16] = {0};
     for (int i = 4; i < n && i - 4 < 16; i++) v[i - 4] = rx_atof(f[i]);
     if (strcmp(ev.kind, "size") == 0) {
@@ -2915,7 +2965,9 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 h->command(ext, dot ? dot + 1 : f[2], atoll(f[3]), user);
             } else if (strcmp(f[1], "view") == 0) {
                 if (!rx_retained_dispatch(ext, h, user, f, n, m->body, m->body_len) && h->view)
-                    rx_view_dispatch(ext, h, user, f, n);
+                    rx_view_dispatch(ext, h, user, f, n, m->body, m->body_len);
+                else if (n >= 4 && strcmp(f[3], "focus") == 0 && h->view)   /* a picture's focus too */
+                    rx_view_dispatch(ext, h, user, f, n, m->body, m->body_len);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "notify") == 0 && n >= 4 && h->note_event) {

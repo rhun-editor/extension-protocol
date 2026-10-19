@@ -21,7 +21,8 @@ import (
 )
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
-	"git-data", "commit-message", "quickdiff", "view-tree", "view-log", "notify", "progress"} // source control: scm.go
+	"git-data", "commit-message", "quickdiff", "view-tree", "view-log", "notify", "progress",
+	"view-keys", "view-images"} // source control: scm.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -96,7 +97,7 @@ func (h *host) viewRequest(id int64, verb string, args []string, body []byte, re
 			return
 		}
 		v, _ := strconv.ParseInt(args[0], 10, 64)
-		if !h.views[v] {
+		if rv := h.rviews[v]; !h.views[v] && (rv == nil || rv.vkind != "picture") {
 			h.fail("views", fmt.Sprintf("draw names view %s, which is not open", args[0]))
 			rerr("noview", "no such view")
 			return
