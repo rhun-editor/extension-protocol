@@ -20,7 +20,12 @@ import (
 	"github.com/rhun-editor/extension-protocol/go/rhunext"
 )
 
+<<<<<<< HEAD
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms", "idle", "secrets", "uris"}
+=======
+var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
+	"git-data", "commit-message", "quickdiff"} // source control: scm.go
+>>>>>>> rhun-0.18
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -338,7 +343,11 @@ func (h *host) checkFeatures() {
 		}
 	}
 	h.checkLangFeatures()
+<<<<<<< HEAD
 	h.checkResources()
+=======
+	h.checkScm()
+>>>>>>> rhun-0.18
 	if h.cmdExited() {
 		return
 	}

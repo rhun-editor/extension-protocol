@@ -155,6 +155,7 @@
           "type": "string",
           "description": "programs the extension may start, by name, space separated"
         },
+<<<<<<< HEAD
         "secrets": {
           "enum": [
             "no",
@@ -162,6 +163,15 @@
           ],
           "default": "no",
           "description": "store passwords and tokens in the system keychain (feature secrets)"
+=======
+        "git": {
+          "enum": [
+            "none",
+            "read"
+          ],
+          "default": "none",
+          "description": "read the project's Git data through rhun (feature git-data); shown as 'read the project's Git history'"
+>>>>>>> rhun-0.18
         }
       },
       "additionalProperties": false
@@ -236,9 +246,31 @@
           "$ref": "#/$defs/patterns",
           "description": "Source code actions before saving; requires negotiated save-actions and documents=write."
         },
+<<<<<<< HEAD
         "schemes": {
           "type": "string",
           "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
+=======
+        "commit_message": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no",
+          "description": "a commit-message provider (feature commit-message), listed in Settings > Git > Commit message AI"
+        },
+        "quickdiff": {
+          "$ref": "#/$defs/patterns",
+          "description": "quick-diff bases (feature quickdiff) for files under roots the extension registers (scm-register), or outside any git repository"
+        },
+        "scm": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no",
+          "description": "a version control provider (feature scm): it registers Source Control tabs at run time"
+>>>>>>> rhun-0.18
         }
       },
       "additionalProperties": false
