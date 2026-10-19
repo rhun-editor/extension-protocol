@@ -295,3 +295,55 @@ func TestHierarchy(t *testing.T) {
 		t.Fatalf("sites %q", b[:80])
 	}
 }
+
+func (m *moreProbe) WorkspaceSymbols(ext *Ext, req WorkspaceSymbolsRequest, out *Stream) []WorkspaceSymbol {
+	first := []WorkspaceSymbol{{Target: Target{Path: "/p/a.go"}, Range: rg(3, 6, 3, 10), Kind: SymbolFunction, Name: "Main", Detail: "main"}}
+	if out.PartWorkspaceSymbols(first) != nil {
+		return first
+	}
+	return []WorkspaceSymbol{{Target: Target{Doc: 2}, Range: rg(1, 1, 1, 4), Kind: "", Name: req.Query + "\nx", Detail: ""},
+		{Target: Target{Path: "/p/b.go"}, Name: ""}}
+}
+
+func (m *moreProbe) DocumentLinks(ext *Ext, req DocRequest) []DocumentLink {
+	return []DocumentLink{
+		{Range: rg(1, 1, 1, 20), Target: LinkURL("https://example.test/a b"), Tip: "spaces"},
+		{Range: rg(1, 1, 1, 20), Target: LinkURL("https://example.test/a"), Tip: "Open\nthe page"},
+		{Range: rg(2, 3, 2, 9), Target: LinkPath("/p/a.go", Pos{4, 2})},
+		{Range: rg(3, 3, 3, 9), Target: LinkPath("/p/a.go", Pos{4, 0})},
+		{Range: rg(4, 3, 4, 9), Target: LinkDoc(req.Doc)},
+		{Range: rg(5, 3, 5, 9), Target: "relative.go"},
+		{Range: rg(6, 3, 5, 9), Target: "/p/backwards"},
+		{Range: rg(7, 1, 7, 4), Target: "ftp://example.test"},
+		{Range: rg(8, 1, 8, 4), Target: "#0"},
+	}
+}
+
+func TestWorkspaceSymbolsAndLinks(t *testing.T) {
+	s := startHost(t, []string{FeatureWorkspaceSymbols, FeatureDocumentLinks, FeatureQueryStream}, &moreProbe{})
+	s.expect("hello 1 workspace-symbols document-links query-stream")
+	s.send("0 features workspace-symbols document-links query-stream\n0 ready -\n")
+	s.send("3 workspace-symbols 500 3\nmai")
+	part := "1\n3 6 3 10 function 7 4 4\n/p/a.goMainmain"
+	s.expect(fmt.Sprintf("1 query-part 3 %d", len(part)))
+	if b := s.body(len(part)); b != part {
+		t.Fatalf("part %q", b)
+	}
+	s.send("ok 1\n")
+	s.answer(3, "1\n1 1 1 4 function 2 5 0\n#2mai x")
+	s.send("4 workspace-symbols 500 0\n")
+	s.line()
+	s.body(len(part))
+	s.send("error 2 cancelled\n")
+	s.answer(4, part)
+	s.send("5 document-links 4 7\n")
+	s.answer(5, "4\n1 1 1 20 22 13\nhttps://example.test/aOpen the page"+
+		"2 3 2 9 11 0\n/p/a.go:4:2"+"3 3 3 9 9 0\n/p/a.go:4"+"4 3 4 9 2 0\n#4")
+	for target, ok := range map[string]bool{"https://x.test": true, "http://": false, "HTTPS://x.test/é": true,
+		`C:\p\a.go:3`: true, `\\srv\share\a`: true, "#12": true, "#+1": false, "#": false, "/a\nb": false,
+		"/" + strings.Repeat("a", MaxPath+30): false, "mailto:a@b": false} {
+		if ValidLinkTarget(target) != ok {
+			t.Errorf("ValidLinkTarget(%q) = %v", target, !ok)
+		}
+	}
+}
