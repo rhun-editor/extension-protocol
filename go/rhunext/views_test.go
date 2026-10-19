@@ -2,6 +2,7 @@ package rhunext
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -60,5 +61,36 @@ func TestRetainedEventsAreFramedAndParsed(t *testing.T) {
 	}
 	if h.events[3].Kind != "focus" || h.events[3].On {
 		t.Fatalf("focus %+v", h.events[3])
+	}
+}
+
+type childrenProbe struct{ retained }
+
+func (c *childrenProbe) ViewChildren(_ *Ext, req ChildrenRequest) (*Patch, error) {
+	return NewPatch().Kids(req.Node, []*Node{NewNode("x1", "X one")}, false), nil
+}
+func (c *childrenProbe) ViewMore(_ *Ext, req ChildrenRequest) (*Patch, error) {
+	return NewPatch().Add(req.Node, []*Node{NewNode(fmt.Sprintf("m%d", req.Have), "M")}, false), nil
+}
+
+func TestChildrenRequestsAreAnswered(t *testing.T) {
+	in := "0 features view-tree\n0 ready /p\n5 vkids 3 2 1\nx6 vmore 3 3 4 0\n0 bye\n"
+	var out bytes.Buffer
+	if err := RunOnWith(strings.NewReader(in), &out, io.Discard, []string{FeatureViewTree}, &childrenProbe{}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "ok 5 35\n1\nkids 1 1 0 19\nx2 5 0 leaf\nx1X one") {
+		t.Fatalf("vkids answer: %q", got)
+	}
+	if !strings.Contains(got, "ok 6 29\n1\nadd 0 1 0 14\n2 1 0 leaf\nm4M") {
+		t.Fatalf("vmore answer: %q", got)
+	}
+	p := NewPatch().Action("pin", "pin", WhereNode, "Pin").SelectMode(true)
+	p.Kids(nil, []*Node{NewNode("a", "A").Inline("pin").Menu("pin", "hide")}, false)
+	b, _ := p.Bytes()
+	if !strings.HasPrefix(string(b), "3\naction pin pin node 3\nPinselect-mode multi 0\n") ||
+		!strings.Contains(string(b), "inline 3\npinmenu 8\npin hide") {
+		t.Fatalf("actions: %q", b)
 	}
 }

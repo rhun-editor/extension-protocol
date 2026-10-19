@@ -275,6 +275,10 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
+			if len(ev.Args) > 1 && (ev.Args[1] == "vkids" || ev.Args[1] == "vmore") {
+				ext.answerChildren(h, ev)
+				continue
+			}
 			ext.answer(h, ev.Args)
 		case "view":
 			if rv, ok := h.(RetainedViewer); ok {
@@ -446,6 +450,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 	// a request from rhun (section 12): answered on the handler's goroutine, in order with events
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
 		ev := &Event{Name: hostRequest, Args: fields}
+		if len(fields) > 2 && (fields[1] == "vkids" || fields[1] == "vmore") {
+			// retained views: the node id follows (its length is the last field)
+			n, ok := bodyLen(fields[len(fields)-1], 4096)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
 		if len(fields) > 1 && fields[1] == "save-actions" {
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err

@@ -972,6 +972,20 @@ static void retained_patches(void) {
     assert(rx_has_body("0 view 3 activate 2 2"));
     assert(!rx_has_body("0 view 3 visible 1"));
     assert(!rx_has_body("0 view 3 open tree sidebar todo"));
+    assert(rx_has_body("5 vkids 3 2 1"));
+    assert(rx_has_body("6 vmore 3 2 4 1"));
+    assert(!rx_has_body("7 complete 1 2 3 4 typed x"));
+    rx_patch q;
+    memset(&q, 0, sizeof q);
+    rx_patch_action(&q, "pin", "pin", "node", "Pin");
+    rx_patch_select_mode(&q, 1);
+    rx_buf y = {NULL, 0, 0};
+    rx_x_inline(&y, "pin");
+    rx_x_menu(&y, "pin hide");
+    same(&q.body, "action pin pin node 3\nPinselect-mode multi 0\n");
+    same(&y, "inline 3\npinmenu 8\npin hide");
+    rx_buf_free(&y);
+    rx_patch_free(&q);
 }
 
 int main(void) {

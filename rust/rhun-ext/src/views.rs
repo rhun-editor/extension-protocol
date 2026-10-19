@@ -209,6 +209,19 @@ impl Node {
         record(&mut self.extra, &format!("command {name}"), args);
         self
     }
+    /// Action keys shown as icon buttons on the row while it is hovered or has the cursor (4 at
+    /// most; actions defined with [`Patch::action`] and [`Where::Node`]).
+    pub fn inline(mut self, keys: &[&str]) -> Node {
+        let k = keys.iter().take(4).cloned().collect::<Vec<_>>().join(" ");
+        record(&mut self.extra, "inline", k.as_bytes());
+        self
+    }
+    /// Action keys in its context menu (16 at most).
+    pub fn menu(mut self, keys: &[&str]) -> Node {
+        let k = keys.iter().take(16).cloned().collect::<Vec<_>>().join(" ");
+        record(&mut self.extra, "menu", k.as_bytes());
+        self
+    }
     /// A record this crate has no method for, as the wire writes it: `NAME ARGS... LEN` + data.
     pub fn record(mut self, head: &str, data: &[u8]) -> Node {
         record(&mut self.extra, head, data);
@@ -232,6 +245,17 @@ impl Node {
         out.extend_from_slice(&self.extra);
         Ok(())
     }
+}
+
+/// Where an action shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Where {
+    /// A button in the view's header.
+    Title,
+    /// Offered to nodes' `inline` and `menu` records.
+    Node,
+    /// Removes the action.
+    None,
 }
 
 /// A view's state.
@@ -334,6 +358,21 @@ impl Patch {
     pub fn collapse(&mut self, id: &[u8]) -> &mut Patch {
         self.op("collapse", id)
     }
+    /// Defines or replaces an action: KEY (`[a-z0-9_]{1,40}`), a built-in icon name (or none:
+    /// its title as text), where it shows, its tooltip or menu label.
+    pub fn action(&mut self, key: &str, icon: Option<&str>, place: Where, title: &str) -> &mut Patch {
+        let w = match place {
+            Where::Title => "title",
+            Where::Node => "node",
+            Where::None => "none",
+        };
+        let t = cut(&one_line(title), 200).to_string();
+        self.op(&format!("action {key} {} {w}", icon.unwrap_or("-")), t.as_bytes())
+    }
+    /// Several nodes may be selected (Ctrl and Shift).
+    pub fn select_mode(&mut self, multi: bool) -> &mut Patch {
+        self.op(if multi { "select-mode multi" } else { "select-mode single" }, b"")
+    }
     /// An op this crate has no method for, as the wire writes it.
     pub fn raw(&mut self, head: &str, data: &[u8]) -> &mut Patch {
         self.op(head, data)
@@ -392,6 +431,38 @@ pub enum RetainedEvent {
     Closed,
     /// Any other `0 view VIEW WHAT ...` event: WHAT, the fields after it, the body.
     Other { what: String, fields: Vec<String>, body: Vec<u8> },
+}
+
+/// rhun asks for a node's children (`vkids`) or for more of them (`vmore`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildrenRequest {
+    /// rhun's id for it: a `cancel` event names it.
+    pub id: u64,
+    pub view: View,
+    /// The content it was asked against.
+    pub rev: u64,
+    /// The node (empty: the root).
+    pub node: Vec<u8>,
+    /// `vmore`: how many children rhun has.
+    pub have: Option<u64>,
+}
+
+impl ChildrenRequest {
+    pub(crate) fn parse(id: u64, verb: &str, fields: &[String], body: &[u8]) -> Option<ChildrenRequest> {
+        let num = |i: usize| fields.get(i).and_then(|v| v.parse::<u64>().ok());
+        Some(ChildrenRequest {
+            id,
+            view: num(0)?,
+            rev: num(1)?,
+            node: body.to_vec(),
+            have: if verb == "vmore" { Some(num(2)?) } else { None },
+        })
+    }
+}
+
+/// Host requests whose last field is a body's length.
+pub(crate) fn request_has_body(verb: &str) -> bool {
+    matches!(verb, "vkids" | "vmore")
 }
 
 /// Retained-view events carry a body: the reader reads LEN bytes after their line.

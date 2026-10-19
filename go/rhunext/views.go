@@ -158,6 +158,23 @@ func (n *Node) Open(path string, line, col int) *Node {
 // Command makes a click (on a leaf) or Enter run one of the extension's commands with args.
 func (n *Node) Command(name string, args []byte) *Node { return n.rec("command "+name, args) }
 
+// Inline shows action keys as icon buttons on the row while it is hovered or has the cursor (4 at
+// most; actions defined with Patch.Action and WhereNode).
+func (n *Node) Inline(keys ...string) *Node {
+	if len(keys) > 4 {
+		keys = keys[:4]
+	}
+	return n.rec("inline", []byte(strings.Join(keys, " ")))
+}
+
+// Menu puts action keys in its context menu (16 at most).
+func (n *Node) Menu(keys ...string) *Node {
+	if len(keys) > 16 {
+		keys = keys[:16]
+	}
+	return n.rec("menu", []byte(strings.Join(keys, " ")))
+}
+
 // Record adds a record this package has no method for: "NAME ARGS..." and its data.
 func (n *Node) Record(head string, data []byte) *Node { return n.rec(head, data) }
 
@@ -255,6 +272,30 @@ func (p *Patch) Del(id []byte) *Patch { return p.op("del", id) }
 func (p *Patch) Expand(id []byte) *Patch   { return p.op("expand", id) }
 func (p *Patch) Collapse(id []byte) *Patch { return p.op("collapse", id) }
 
+// Where an action shows: a button in the view's header, offered to nodes, or removed.
+const (
+	WhereTitle = "title"
+	WhereNode  = "node"
+	WhereNone  = "none"
+)
+
+// Action defines or replaces an action: key ([a-z0-9_]{1,40}), a built-in icon name ("" for
+// none), where it shows (WhereTitle, WhereNode, WhereNone), its tooltip or menu label.
+func (p *Patch) Action(key, icon, where, title string) *Patch {
+	if icon == "" {
+		icon = "-"
+	}
+	return p.op(fmt.Sprintf("action %s %s %s", key, icon, where), []byte(viewLine(title, 200)))
+}
+
+// SelectMode lets several nodes be selected (Ctrl and Shift).
+func (p *Patch) SelectMode(multi bool) *Patch {
+	if multi {
+		return p.op("select-mode multi", nil)
+	}
+	return p.op("select-mode single", nil)
+}
+
 // Raw adds an op this package has no method for.
 func (p *Patch) Raw(head string, data []byte) *Patch { return p.op(head, data) }
 
@@ -305,6 +346,70 @@ func (e *Ext) ShowView(name string, focus bool) (View, error) {
 		return 0, err
 	}
 	return View(argInt(r, 0)), nil
+}
+
+// RevealView expands a node's ancestors and scrolls it into view; how among "select", "focus",
+// "expand".
+func (e *Ext) RevealView(v View, id []byte, how ...string) error {
+	h := "-"
+	if len(how) > 0 {
+		h = strings.Join(how, ",")
+	}
+	_, err := e.Request("vreveal", id, itoa(int64(v)), h, itoa(int64(len(id))))
+	return err
+}
+
+// ChildrenRequest is rhun asking for a node's children (vkids) or for more of them (vmore).
+type ChildrenRequest struct {
+	ID   int64 // a cancel event names it
+	View View
+	Rev  int64
+	Node []byte // empty: the root
+	Have int64  // vmore: how many children rhun has; -1 for vkids
+}
+
+// ChildrenProvider answers vkids (ViewChildren: a patch with a kids op for the node) and vmore
+// (ViewMore: an add op).
+type ChildrenProvider interface {
+	ViewChildren(ext *Ext, req ChildrenRequest) (*Patch, error)
+	ViewMore(ext *Ext, req ChildrenRequest) (*Patch, error)
+}
+
+func (e *Ext) answerChildren(h Handler, ev Event) {
+	f := ev.Args
+	id := f[0]
+	num := func(i int) int64 {
+		if i < len(f) {
+			v, _ := strconv.ParseInt(f[i], 10, 64)
+			return v
+		}
+		return 0
+	}
+	rid, _ := strconv.ParseInt(id, 10, 64)
+	req := ChildrenRequest{ID: rid, View: View(num(2)), Rev: num(3), Node: ev.Body, Have: -1}
+	cp, ok := h.(ChildrenProvider)
+	if !ok || !e.Has(FeatureViewTree) {
+		e.write("error "+id+" unknown no such request\n", nil)
+		return
+	}
+	var p *Patch
+	var err error
+	if f[1] == "vmore" {
+		req.Have = num(4)
+		p, err = cp.ViewMore(e, req)
+	} else {
+		p, err = cp.ViewChildren(e, req)
+	}
+	if err != nil {
+		e.write("error "+id+" refused "+viewLine(err.Error(), 1000)+"\n", nil)
+		return
+	}
+	body, err := p.Bytes()
+	if err != nil {
+		e.write("error "+id+" toobig "+viewLine(err.Error(), 1000)+"\n", nil)
+		return
+	}
+	e.write("ok "+id+" "+strconv.Itoa(len(body))+"\n", body)
 }
 
 // ViewOpen is a declared view's instance: "0 view VIEW open KIND PLACE NAME".

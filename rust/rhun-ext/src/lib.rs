@@ -506,6 +506,14 @@ pub trait Handler: Send {
     fn view_open(&mut self, _ext: &Ext, _open: &views::ViewOpen) {}
     /// The user did something in a retained view (feature `view-tree`).
     fn view_event(&mut self, _ext: &Ext, _view: View, _ev: &views::RetainedEvent) {}
+    /// rhun asks for a node's children (feature `view-tree`): a patch with a `kids` op for it.
+    fn view_children(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
+        Err("no children".into())
+    }
+    /// rhun asks for more children of a node whose last `kids`/`add` had `more`: an `add` op.
+    fn view_more(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
+        Err("no more".into())
+    }
     /// rhun asks for a completion list (feature `complete`).
     fn complete(&mut self, _ext: &Ext, _req: &CompleteRequest) -> CompletionList {
         CompletionList::default()
@@ -564,6 +572,7 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
+        body: Vec<u8>,
     },
     End,
 }
@@ -1049,6 +1058,13 @@ impl Ext {
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
+    /// Expands a node's ancestors and scrolls it into view; `how` among `select`, `focus`,
+    /// `expand`.
+    pub fn vreveal(&self, view: View, id: &[u8], how: &[&str]) -> Result<(), Error> {
+        let how = if how.is_empty() { "-".to_string() } else { how.join(",") };
+        self.request(&format!("vreveal {view} {how}"), Some(id)).map(|_| ())
+    }
+
     /// Opens a declared view's place on it (its manifest key); `focus` also gives it the
     /// keyboard. Its view number.
     pub fn vshow(&self, name: &str, focus: bool) -> Result<View, Error> {
@@ -1125,7 +1141,7 @@ impl Ext {
                         body: Vec::new(),
                     };
                     let view_body = ev.name == "view"
-                        && ev.fields.get(1).map_or(false, |w| views::has_body(w));
+                        && ev.fields.get(1).is_some_and(|w| views::has_body(w));
                     if ev.name == "edits" || ev.name == "action" || view_body {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
@@ -1150,11 +1166,24 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
+                        let mut body = Vec::new();
+                        if views::request_has_body(&verb) {
+                            // vkids, vmore: the node id follows (at most 1000 bytes)
+                            let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
+                                Some(n) if n <= 4096 => n,
+                                _ => break,
+                            };
+                            body = vec![0; len];
+                            if input.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                        }
                         if tx
                             .send(Msg::HostRequest {
                                 id,
                                 verb,
                                 fields: rest,
+                                body,
                             })
                             .is_err()
                         {
@@ -1227,7 +1256,12 @@ impl Ext {
                         _ => {}
                     }
                 }
-                Msg::HostRequest { id, verb, fields } => {
+                Msg::HostRequest {
+                    id,
+                    verb,
+                    fields,
+                    body: req_body,
+                } => {
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
                             .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
@@ -1253,6 +1287,19 @@ impl Ext {
                         }
                         "format" => FormatRequest::parse(&fields)
                             .map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why))),
+                        "vkids" | "vmore" if self.has(Feature::ViewTree) => {
+                            views::ChildrenRequest::parse(id, &verb, &fields, &req_body).map(|r| {
+                                let res = if r.have.is_some() {
+                                    h.view_more(self, &r)
+                                } else {
+                                    h.view_children(self, &r)
+                                };
+                                match res {
+                                    Ok(p) => p.encode().map_err(|why| ("toobig", why)),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
                         "save-actions" if self.has(Feature::SaveActions) => {
                             SaveActionsRequest::parse(id, &fields).map(|r| {
                                 match h.save_actions(self, &r) {
