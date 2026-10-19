@@ -171,6 +171,12 @@ typedef struct rx_linked {
     char word[96];
 } rx_linked;
 
+/* Notebooks (feature "notebooks"). nb-open: the file's path and bytes (len 0 for a new file);
+ * nb-save: the path and the notebook body; nb-run: run source for (nb, cell, run). */
+typedef struct rx_nb_open { int64_t id, nb; const char *path; const unsigned char *data; size_t len; } rx_nb_open;
+typedef struct rx_nb_save { int64_t id, nb; const char *path; const unsigned char *body; size_t len; } rx_nb_save;
+typedef struct rx_nb_run { int64_t nb, cell, run; const char *lang; const unsigned char *source; size_t len; } rx_nb_run;
+
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -231,6 +237,22 @@ typedef struct {
     /* Linked editing (1.1, "linked-editing", [provides] linked): add the ranges that change
      * together to out (rx_linked_range, rx_linked_word) and return 1 (none: nothing to link). */
     int (*linked)(rx_ext *ext, const struct rx_linked_ask *req, struct rx_linked *out, void *user);
+    /* Notebooks (feature "notebooks", v1.1): nb_open appends a notebook body to out (rx_nb_begin,
+     * rx_nb_cell, rx_nb_output, rx_nb_item) and returns NULL, or returns why it cannot (shown in
+     * the tab); nb_save reads req->body (rx_nb_read_begin...) and appends the file's bytes to out,
+     * or returns why not. nb_run starts a run (answer with rx_nb_state, rx_nb_output_send,
+     * rx_nb_stream); nb_event hears "interrupt", "restart", "kernel" and "closed". */
+    const char *(*nb_open)(rx_ext *ext, const rx_nb_open *req, rx_buf *out, void *user);
+    const char *(*nb_save)(rx_ext *ext, const rx_nb_save *req, rx_buf *out, void *user);
+    void (*nb_run)(rx_ext *ext, const rx_nb_run *run, void *user);
+    void (*nb_event)(rx_ext *ext, const char *what, int64_t nb, void *user);
+    /* Notebooks: a kernel started with rx_nb_exec ended; code its exit status (128 + N after
+     * signal N), or -1 when rhun ended it. */
+    void (*nb_exec_exit)(rx_ext *ext, int64_t exec, int code, void *user);
+    /* Notebooks: a cell document it was told about belongs to notebook nb as cell `cell`, at index
+     * among all its cells; nb_cells lists the cell documents it knows in order (n of them). */
+    void (*nb_cell)(rx_ext *ext, rx_doc doc, int64_t nb, int64_t cell, int index, void *user);
+    void (*nb_cells)(rx_ext *ext, int64_t nb, const rx_doc *docs, int n, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -710,6 +732,46 @@ void rx_actions_finish(rx_actions *l, rx_buf *out);
 int rx_wedit_finish(rx_wedit *e, rx_buf *out);
 void rx_wedit_free(rx_wedit *e);
 
+/* Writing a notebook body: rx_nb_begin with the number of cells, then each cell with the number of
+ * its outputs, each output with the number of its items, each item. kind "code" or "markup"; lang a
+ * grammar name ("-" none); count -1 for none; output kind stdout stderr result display error; id
+ * NULL for none; item type text ansi png jpeg gif (w h the logical size, 0 0 natural). */
+void rx_nb_begin(rx_buf *out, int cells, const void *meta, size_t meta_len);
+void rx_nb_cell(rx_buf *out, const char *kind, const char *lang, int64_t count, const void *source,
+                size_t source_len, const void *meta, size_t meta_len, int outputs);
+void rx_nb_output(rx_buf *out, const char *kind, const char *id, const void *keep, size_t keep_len, int items);
+void rx_nb_item(rx_buf *out, const char *type, int w, int h, const void *data, size_t len);
+/* Reading one (nb-save's): each returns 1, or 0 on a body that cannot be read. */
+typedef struct { const unsigned char *p, *end; int cells; const unsigned char *meta; size_t meta_len; } rx_nb_reader;
+typedef struct { char kind[8]; char lang[130]; int64_t count; const unsigned char *source; size_t source_len;
+                 const unsigned char *meta; size_t meta_len; int outputs; } rx_nb_cell_rec;
+typedef struct { char kind[8]; char id[72]; const unsigned char *keep; size_t keep_len; int items; } rx_nb_output_rec;
+typedef struct { char type[72]; int w, h; const unsigned char *data; size_t len; } rx_nb_item_rec;
+int rx_nb_read_begin(rx_nb_reader *r, const unsigned char *body, size_t len);
+int rx_nb_read_cell(rx_nb_reader *r, rx_nb_cell_rec *c);
+int rx_nb_read_output(rx_nb_reader *r, rx_nb_output_rec *o);
+int rx_nb_read_item(rx_nb_reader *r, rx_nb_item_rec *it);
+/* A run's state (queued running done failed cancelled) and count (-1 leaves it); an output body
+ * (built with rx_nb_output and rx_nb_item; op append, replace with target an index or an id, clear
+ * and clear-wait with no body); stream text (stderr 0 or 1, cut in 64 KB messages); the kernel
+ * button's text and state (idle busy starting dead none). 0 or -1 as the other requests. */
+int rx_nb_state(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, const char *state, int64_t count);
+int rx_nb_output_send(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, const char *op, const char *target,
+                      const void *body, size_t len);
+int rx_nb_stream(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, int is_stderr, const void *data, size_t len);
+int rx_nb_kernel_label(rx_ext *ext, int64_t nb, const char *state, const char *label);
+/* A kernel for notebook nb, started as the user outside the sandbox (rhun asks the user the first
+ * time in a project, so this may wait): program a name of [needs] kernels or an absolute path
+ * whose last part is one, dir "" for the notebook's folder, args and NAME=VALUE env. Returns its
+ * EXEC (its output goes to kernel-EXEC.log in $RHUN_STATE), or -1. rx_nb_exec_signal sends
+ * "interrupt", "terminate" or "kill" to its process group. */
+int64_t rx_nb_exec(rx_ext *ext, int64_t nb, const char *program, const char *dir, const char *const *args, int argc,
+                   const char *const *env, int envc);
+int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal);
+/* The command body of rx_nb_exec (and test-exec), onto out. */
+void rx_command_body(rx_buf *out, const char *program, const char *dir, const char *const *args, int argc,
+                     const char *const *env, int envc);
+
 /* the start of the word (letters, digits, _, non-ASCII) that ends at `at` in text */
 rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at);
 /* the rest of an event's line after its first n fields: rx_event_tail(ev, 3) is the path of
@@ -877,11 +939,11 @@ static const char rx_bad_len[] = "a body's length that is not a decimal of at mo
  * selections and retained views' (1.1), and the requests below */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
-        strncmp(line, "0 selections ", 13) == 0)
+        strncmp(line, "0 selections ", 13) == 0 || strncmp(line, "0 nb-run ", 9) == 0)
         return 1;
     if (line[0] >= '1' && line[0] <= '9') {
         /* requests: ID commit-message ... LEN; vkids, vmore (the node id follows); tool and
-         * agent-prompt (their input) */
+         * agent-prompt (their input); nb-open and nb-save: rx_host_body */
         static const char *const req[] = {"commit-message ", "vkids ", "vmore ", "tool ", "agent-prompt ", NULL};
         const char *v = strchr(line, ' ');
         if (!v) return 0;
@@ -901,6 +963,14 @@ static int rx_has_body(const char *line) {
     return 0;
 }
 
+/* a request from rhun followed by a body: nb-open and nb-save (ID VERB NB LEN), up to 64 MB */
+static int rx_host_body(const char *line) {
+    const char *sp = strchr(line, ' ');
+    if (!sp || line[0] < '1' || line[0] > '9') return 0;
+    return strncmp(sp + 1, "nb-open ", 8) == 0 || strncmp(sp + 1, "nb-save ", 8) == 0;
+}
+#define RX_NB_BODY_MAX (((long long)64 << 20) + 65536)
+
 /* reads the next message: a line, and a body when it is an edits or action event; NULL when the
  * session is over (end of input, or a length rhun cannot have sent: its body is not read) */
 static rx_msg *rx_read_msg(rx_ext *ext) {
@@ -912,8 +982,8 @@ static rx_msg *rx_read_msg(rx_ext *ext) {
     rx_msg *m = (rx_msg *)calloc(1, sizeof *m);
     if (!m) abort();
     m->line = line;
-    if (rx_has_body(line)) {
-        long long n = rx_body_len(line, RX_EVENT_BODY_MAX);
+    if (rx_has_body(line) || rx_host_body(line)) {
+        long long n = rx_body_len(line, rx_host_body(line) ? RX_NB_BODY_MAX : RX_EVENT_BODY_MAX);
         if (n < 0 || !(m->body = rx_read_body((size_t)n))) {
             rx_gone(ext, n < 0 ? rx_bad_len : "rhun went away");
             free(line);
@@ -1008,8 +1078,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
         rx_msg *m = (rx_msg *)calloc(1, sizeof *m);
         if (!m) abort();
         m->line = l;
-        if (rx_has_body(l)) {
-            long long blen = rx_body_len(l, RX_EVENT_BODY_MAX);
+        if (rx_has_body(l) || rx_host_body(l)) {
+            long long blen = rx_body_len(l, rx_host_body(l) ? RX_NB_BODY_MAX : RX_EVENT_BODY_MAX);
             if (blen < 0 || !(m->body = rx_read_body((size_t)blen))) {
                 rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
                 rx_free_msg(m);
@@ -3772,6 +3842,281 @@ static int rx_retained_dispatch(rx_ext *ext, const rx_handlers *h, void *user, c
     return strcmp(k, "closed") != 0;    /* a closed tab is also a picture's event */
 }
 
+/* ---- notebooks */
+
+void rx_nb_begin(rx_buf *out, int cells, const void *meta, size_t meta_len) {
+    rx_buf_fmt(out, "%d %zu\n", cells, meta_len);
+    rx_buf_add(out, meta, meta_len);
+}
+
+void rx_nb_cell(rx_buf *out, const char *kind, const char *lang, int64_t count, const void *source,
+                size_t source_len, const void *meta, size_t meta_len, int outputs) {
+    int markup = strcmp(kind, "markup") == 0;
+    rx_buf_fmt(out, "%s ", markup ? "markup" : "code");
+    if (markup || !lang || !*lang) rx_buf_str(out, "-");
+    else for (const char *p = lang; *p; p++) rx_buf_add(out, *p == ' ' ? "_" : p, 1);
+    if (count >= 0) rx_buf_fmt(out, " %lld", (long long)count);
+    else rx_buf_str(out, " -");
+    rx_buf_fmt(out, " %zu %zu %d\n", source_len, meta_len, outputs);
+    rx_buf_add(out, source, source_len);
+    rx_buf_add(out, meta, meta_len);
+}
+
+static int rx_nb_token(const char *t, size_t n) {
+    if (!n || n > 64) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = t[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || strchr("_.+/-", c))) return 0;
+    }
+    return 1;
+}
+
+void rx_nb_output(rx_buf *out, const char *kind, const char *id, const void *keep, size_t keep_len, int items) {
+    rx_buf_fmt(out, "%s %s %zu %d\n", kind, id && rx_nb_token(id, strlen(id)) ? id : "-", keep_len, items);
+    rx_buf_add(out, keep, keep_len);
+}
+
+void rx_nb_item(rx_buf *out, const char *type, int w, int h, const void *data, size_t len) {
+    rx_buf_fmt(out, "%s %d %d %zu\n", type && rx_nb_token(type, strlen(type)) ? type : "text", w, h, len);
+    rx_buf_add(out, data, len);
+}
+
+/* rx_nb_fields: the next line of the reader as up to 8 fields copied into buf */
+static int rx_nb_fields(rx_nb_reader *r, char *buf, size_t cap, char **f) {
+    const unsigned char *nl = r->p;
+    while (nl < r->end && *nl != '\n') nl++;
+    if (nl >= r->end || (size_t)(nl - r->p) >= cap) return -1;
+    memcpy(buf, r->p, (size_t)(nl - r->p));
+    buf[nl - r->p] = 0;
+    r->p = nl + 1;
+    int n = 0;
+    char *p = buf;
+    while (*p && n < 8) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        f[n++] = p;
+        while (*p && *p != ' ') p++;
+        if (*p) *p++ = 0;
+    }
+    return n;
+}
+
+static int rx_nb_size(const char *s, long long max, size_t *out) {
+    if (!*s || strlen(s) > 18) return 0;
+    long long v = 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return 0;
+        v = v * 10 + (*s - '0');
+    }
+    if (v > max) return 0;
+    *out = (size_t)v;
+    return 1;
+}
+
+static const unsigned char *rx_nb_take(rx_nb_reader *r, size_t n) {
+    if ((size_t)(r->end - r->p) < n) return NULL;
+    const unsigned char *b = r->p;
+    r->p += n;
+    return b;
+}
+
+int rx_nb_read_begin(rx_nb_reader *r, const unsigned char *body, size_t len) {
+    char buf[128], *f[8];
+    size_t n, ml;
+    r->p = body;
+    r->end = body + len;
+    if (rx_nb_fields(r, buf, sizeof buf, f) != 2 || !rx_nb_size(f[0], 5000, &n) ||
+        !rx_nb_size(f[1], (long long)64 << 20, &ml) || !(r->meta = rx_nb_take(r, ml)))
+        return 0;
+    r->cells = (int)n;
+    r->meta_len = ml;
+    return 1;
+}
+
+int rx_nb_read_cell(rx_nb_reader *r, rx_nb_cell_rec *c) {
+    char buf[256], *f[8];
+    size_t sl, ml, no;
+    if (rx_nb_fields(r, buf, sizeof buf, f) != 6 || (strcmp(f[0], "code") && strcmp(f[0], "markup")) ||
+        strlen(f[1]) >= sizeof c->lang || !rx_nb_size(f[3], 4 << 20, &sl) ||
+        !rx_nb_size(f[4], (long long)64 << 20, &ml) || !rx_nb_size(f[5], 1000, &no))
+        return 0;
+    snprintf(c->kind, sizeof c->kind, "%s", f[0]);
+    snprintf(c->lang, sizeof c->lang, "%s", f[1]);
+    c->count = strcmp(f[2], "-") == 0 ? -1 : atoll(f[2]);
+    if (!(c->source = rx_nb_take(r, sl)) || !(c->meta = rx_nb_take(r, ml))) return 0;
+    c->source_len = sl;
+    c->meta_len = ml;
+    c->outputs = (int)no;
+    return 1;
+}
+
+int rx_nb_read_output(rx_nb_reader *r, rx_nb_output_rec *o) {
+    char buf[256], *f[8];
+    size_t kl, ni;
+    if (rx_nb_fields(r, buf, sizeof buf, f) != 4 || strlen(f[0]) >= sizeof o->kind ||
+        (strcmp(f[1], "-") && !rx_nb_token(f[1], strlen(f[1]))) ||
+        !rx_nb_size(f[2], (long long)64 << 20, &kl) || !rx_nb_size(f[3], 32, &ni))
+        return 0;
+    snprintf(o->kind, sizeof o->kind, "%s", f[0]);
+    snprintf(o->id, sizeof o->id, "%s", strcmp(f[1], "-") ? f[1] : "");
+    if (!(o->keep = rx_nb_take(r, kl))) return 0;
+    o->keep_len = kl;
+    o->items = (int)ni;
+    return 1;
+}
+
+int rx_nb_read_item(rx_nb_reader *r, rx_nb_item_rec *it) {
+    char buf[256], *f[8];
+    size_t w, h, len;
+    if (rx_nb_fields(r, buf, sizeof buf, f) != 4 || !rx_nb_token(f[0], strlen(f[0])) ||
+        !rx_nb_size(f[1], 65536, &w) || !rx_nb_size(f[2], 65536, &h) || !rx_nb_size(f[3], 16 << 20, &len))
+        return 0;
+    snprintf(it->type, sizeof it->type, "%s", f[0]);
+    it->w = (int)w;
+    it->h = (int)h;
+    if (!(it->data = rx_nb_take(r, len))) return 0;
+    it->len = len;
+    return 1;
+}
+
+static int rx_nb_agreed(rx_ext *ext) {
+    if (rx_has(ext, "notebooks")) return 1;
+    snprintf(ext->error, sizeof ext->error, "unknown notebooks was not agreed");
+    return 0;
+}
+
+int rx_nb_state(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, const char *state, int64_t count) {
+    if (!rx_nb_agreed(ext)) return -1;
+    char line[160], c[32] = "-";
+    if (count >= 0) snprintf(c, sizeof c, "%lld", (long long)count);
+    snprintf(line, sizeof line, "nb-state %lld %lld %lld %s %s", (long long)nb, (long long)cell, (long long)run, state, c);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+int rx_nb_output_send(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, const char *op, const char *target,
+                      const void *body, size_t len) {
+    if (!rx_nb_agreed(ext)) return -1;
+    char line[256];
+    snprintf(line, sizeof line, "nb-output %lld %lld %lld %s %s %zu", (long long)nb, (long long)cell, (long long)run,
+             op, target && *target ? target : "-", len);
+    return rx_request(ext, line, body, len, NULL, NULL);
+}
+
+int rx_nb_stream(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, int is_stderr, const void *data, size_t len) {
+    if (!rx_nb_agreed(ext)) return -1;
+    const unsigned char *p = (const unsigned char *)data;
+    while (len) {
+        size_t n = len < 65536 ? len : 65536;
+        while (n < len && n > 0 && (p[n] & 0xc0) == 0x80) n--;
+        if (!n) n = len < 65536 ? len : 65536;
+        char line[160];
+        snprintf(line, sizeof line, "nb-stream %lld %lld %lld %s %zu", (long long)nb, (long long)cell, (long long)run,
+                 is_stderr ? "stderr" : "stdout", n);
+        if (rx_request(ext, line, p, n, NULL, NULL) < 0) return -1;
+        p += n;
+        len -= n;
+    }
+    return 0;
+}
+
+int rx_nb_kernel_label(rx_ext *ext, int64_t nb, const char *state, const char *label) {
+    if (!rx_nb_agreed(ext)) return -1;
+    char text[201], line[96];
+    size_t n = 0;
+    for (const char *p = label; *p && n < 200; p++) text[n++] = (unsigned char)*p < 32 ? ' ' : *p;
+    while (n > 0 && n < strlen(label) && ((unsigned char)text[n] & 0xc0) == 0x80) n--;
+    text[n] = 0;
+    snprintf(line, sizeof line, "nb-kernel-label %lld %s %zu", (long long)nb, state, n);
+    return rx_request(ext, line, text, n, NULL, NULL);
+}
+
+void rx_command_body(rx_buf *out, const char *program, const char *dir, const char *const *args, int argc,
+                     const char *const *env, int envc) {
+    rx_buf_fmt(out, "%zu %zu %d %d\n", strlen(program), strlen(dir), argc, envc);
+    rx_buf_str(out, program);
+    rx_buf_str(out, dir);
+    for (int i = 0; i < argc + envc; i++) {
+        const char *a = i < argc ? args[i] : env[i - argc];
+        rx_buf_fmt(out, "%zu\n", strlen(a));
+        rx_buf_str(out, a);
+    }
+}
+
+int64_t rx_nb_exec(rx_ext *ext, int64_t nb, const char *program, const char *dir, const char *const *args, int argc,
+                   const char *const *env, int envc) {
+    if (!rx_nb_agreed(ext)) return -1;
+    rx_buf b = {NULL, 0, 0};
+    rx_command_body(&b, program, dir ? dir : "", args, argc, env, envc);
+    char line[96];
+    snprintf(line, sizeof line, "nb-exec %lld %zu", (long long)nb, b.len);
+    int64_t v = rx_req_num(ext, line, b.data, b.len);
+    rx_buf_free(&b);
+    return v;
+}
+
+int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal) {
+    if (!rx_nb_agreed(ext)) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "nb-exec-signal %lld %s", (long long)exec, signal);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+/* nb-open and nb-save (f: ID VERB NB LEN) with their bodies */
+static void rx_nb_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, const unsigned char *body, size_t len) {
+    rx_buf out = {NULL, 0, 0}, line = {NULL, 0, 0};
+    const char *why = NULL, *code = "refused";
+    int known = rx_has(ext, "notebooks") && (strcmp(f[1], "nb-open") == 0 ? h->nb_open != NULL : h->nb_save != NULL);
+    if (known) {
+        /* PATH_LEN [DATA_LEN] LF PATH [DATA] */
+        const unsigned char *nl = body ? (const unsigned char *)memchr(body, '\n', len) : NULL;
+        char head[64] = "";
+        size_t pl = 0, dl = 0;
+        int is_open = f[1][3] == 'o', ok = 0;
+        if (nl && (size_t)(nl - body) < sizeof head) {
+            memcpy(head, body, (size_t)(nl - body));
+            head[nl - body] = 0;
+            char *sp = strchr(head, ' ');
+            if (is_open && sp) {
+                *sp = 0;
+                ok = rx_nb_size(head, (long long)len, &pl) && rx_nb_size(sp + 1, (long long)len, &dl);
+            } else if (!is_open && !sp) {
+                ok = rx_nb_size(head, (long long)len, &pl);
+            }
+        }
+        size_t at = nl ? (size_t)(nl - body) + 1 : 0;
+        if (ok && pl <= len - at && (!is_open || dl == len - at - pl)) {
+            char *path = (char *)malloc(pl + 1);
+            if (!path) abort();
+            memcpy(path, body + at, pl);
+            path[pl] = 0;
+            if (is_open) {
+                rx_nb_open req = {atoll(f[0]), atoll(f[2]), path, body + at + pl, dl};
+                why = h->nb_open(ext, &req, &out, user);
+            } else {
+                rx_nb_save req = {atoll(f[0]), atoll(f[2]), path, body + at + pl, len - at - pl};
+                why = h->nb_save(ext, &req, &out, user);
+            }
+            free(path);
+        } else {
+            code = "syntax";
+            why = "the body cannot be read";
+        }
+    }
+    if (!known) {
+        rx_buf_fmt(&line, "error %s unknown no such request", f[0]);
+        rx_write(line.data, NULL, 0);
+    } else if (why) {
+        rx_buf_fmt(&line, "error %s %s ", f[0], code);
+        for (const char *p = why; *p && line.len < 1000; p++) rx_buf_add(&line, *p == '\n' ? " " : p, 1);
+        rx_write(line.data, NULL, 0);
+    } else {
+        rx_buf_fmt(&line, "ok %s %zu", f[0], out.len);
+        rx_write(line.data, out.data, out.len);
+    }
+    rx_buf_free(&out);
+    rx_buf_free(&line);
+}
+
 static void rx_view_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n) {
     if (n < 4) return;
     rx_view_event ev;
@@ -3845,6 +4190,37 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 h->agent_stop(ext, f[2], user);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
+            } else if (strcmp(f[1], "nb-run") == 0 && n == 7 && h->nb_run && rx_has(ext, "notebooks")) {
+                rx_nb_run run;
+                run.nb = atoll(f[2]);
+                run.cell = atoll(f[3]);
+                run.run = atoll(f[4]);
+                run.lang = f[5];
+                run.source = m->body ? m->body : (const unsigned char *)"";
+                run.len = m->body_len;
+                h->nb_run(ext, &run, user);
+            } else if (strcmp(f[1], "cell") == 0 && n == 6 && h->nb_cell && rx_has(ext, "notebooks")) {
+                h->nb_cell(ext, atoll(f[2]), atoll(f[3]), atoll(f[4]), atoi(f[5]), user);
+            } else if (strcmp(f[1], "cells") == 0 && n >= 3 && h->nb_cells && rx_has(ext, "notebooks")) {
+                /* the whole line: a notebook of many cells has more fields than f holds */
+                char *p = (char *)ev.rest, *end;
+                int64_t nb = strtoll(p, &end, 10);
+                size_t cap = strlen(p) / 2 + 1;
+                rx_doc *docs = (rx_doc *)malloc(cap * sizeof *docs);
+                int k = 0;
+                for (p = end; docs && *p; p = end) {
+                    rx_doc d = strtoll(p, &end, 10);
+                    if (end == p) break;
+                    docs[k++] = d;
+                }
+                if (docs) h->nb_cells(ext, nb, docs, k, user);
+                free(docs);
+            } else if (strcmp(f[1], "nb-exec-exit") == 0 && n == 4 && h->nb_exec_exit && rx_has(ext, "notebooks")) {
+                h->nb_exec_exit(ext, atoll(f[2]), strcmp(f[3], "killed") == 0 ? -1 : atoi(f[3]), user);
+            } else if (strncmp(f[1], "nb-", 3) == 0 && n == 3 && h->nb_event && rx_has(ext, "notebooks") &&
+                       (strcmp(f[1], "nb-interrupt") == 0 || strcmp(f[1], "nb-restart") == 0 ||
+                        strcmp(f[1], "nb-kernel") == 0 || strcmp(f[1], "nb-closed") == 0)) {
+                h->nb_event(ext, f[1] + 3, atoll(f[2]), user);
             } else if (strcmp(f[1], "bye") == 0) {
                 if (h->bye) h->bye(ext, user);
                 done = 1;
@@ -3852,6 +4228,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9' &&
                    (strcmp(f[1], "vkids") == 0 || strcmp(f[1], "vmore") == 0)) {
             rx_children_answer(ext, h, user, f, n, m->body, m->body_len);
+        } else if (n == 4 && f[0][0] >= '1' && f[0][0] <= '9' && rx_host_body(m->line)) {
+            rx_nb_answer(ext, h, user, f, m->body, m->body_len);
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9') {
             rx_answer(ext, h, user, f, n, m->body, m->body_len);
         }

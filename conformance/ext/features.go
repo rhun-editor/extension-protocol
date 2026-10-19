@@ -25,7 +25,8 @@ var knownFeatures = []string{"views", "complete", "signature", "definition", "re
 	"view-tree",               // retained views: views.go
 	"idle", "secrets", "uris", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
-	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing"} // wsedit.go, editor.go
+	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
+	"notebooks"} // notebooks: notebook.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -352,6 +353,10 @@ func (h *host) checkFeatures() {
 	h.checkLinked()
 	if h.cmdExited() {
 		h.fail("linked-editing", "the program exited on a linked request")
+		return
+	}
+	h.checkNotebooks()
+	if h.cmdExited() {
 		return
 	}
 	if !h.features["complete"] || h.patterns("complete") == "" {

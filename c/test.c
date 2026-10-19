@@ -1316,6 +1316,82 @@ static void editor_model(void) {
     rx_buf_free(&want);
 }
 
+
+/* notebooks: nb-open and nb-save with their bodies, nb-run, the events, the senders */
+static int64_t nb_ran = -1;
+static char nb_what[16];
+static const char *on_nb_open(rx_ext *ext, const rx_nb_open *req, rx_buf *out, void *user) {
+    (void)ext, (void)user;
+    if (req->len == 3 && memcmp(req->data, "bad", 3) == 0) return "not a toy notebook";
+    assert(strcmp(req->path, "/a.nb") == 0 && req->nb == 4);
+    rx_nb_begin(out, 1, "{}", 2);
+    rx_nb_cell(out, "code", "python", -1, req->data, req->len, "", 0, 1);
+    rx_nb_output(out, "stdout", NULL, "", 0, 1);
+    rx_nb_item(out, "ansi", 0, 0, "hi\n", 3);
+    return NULL;
+}
+static const char *on_nb_save(rx_ext *ext, const rx_nb_save *req, rx_buf *out, void *user) {
+    (void)ext, (void)user;
+    rx_nb_reader r;
+    rx_nb_cell_rec c;
+    rx_nb_output_rec o;
+    rx_nb_item_rec it;
+    assert(rx_nb_read_begin(&r, req->body, req->len) && r.cells == 1 && r.meta_len == 2);
+    assert(rx_nb_read_cell(&r, &c) && strcmp(c.kind, "code") == 0 && strcmp(c.lang, "python") == 0 && c.outputs == 1);
+    assert(rx_nb_read_output(&r, &o) && strcmp(o.kind, "stdout") == 0 && o.items == 1);
+    assert(rx_nb_read_item(&r, &it) && strcmp(it.type, "ansi") == 0 && it.len == 3);
+    rx_buf_add(out, c.source, c.source_len);
+    return NULL;
+}
+static void on_nb_run(rx_ext *ext, const rx_nb_run *run, void *user) {
+    (void)user;
+    nb_ran = run->run;
+    assert(run->len == 3 && memcmp(run->source, "x=2", 3) == 0 && strcmp(run->lang, "python") == 0);
+    assert(rx_nb_state(ext, run->nb, run->cell, run->run, "done", 1) == 0);
+}
+static void on_nb_event(rx_ext *ext, const char *what, int64_t nb, void *user) {
+    (void)ext, (void)user, (void)nb;
+    snprintf(nb_what, sizeof nb_what, "%s", what);
+}
+static void notebooks(void) {
+    {   /* nb-exec's command body */
+        rx_buf b = {NULL, 0, 0};
+        const char *args[] = {"-m", "ipykernel_launcher"}, *env[] = {"A=b"};
+        rx_command_body(&b, "python3", "", args, 2, env, 1);
+        const char want[] = "7 0 2 1\npython32\n-m18\nipykernel_launcher3\nA=b";
+        assert(b.len == sizeof want - 1 && memcmp(b.data, want, b.len) == 0);
+        rx_buf_free(&b);
+    }
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.nb_open = on_nb_open;
+    h.nb_save = on_nb_save;
+    h.nb_run = on_nb_run;
+    h.nb_event = on_nb_event;
+    rx_buf got = {NULL, 0, 0}, want = {NULL, 0, 0}, body = {NULL, 0, 0}, in = {NULL, 0, 0};
+    rx_nb_begin(&body, 1, "{}", 2);
+    rx_nb_cell(&body, "code", "python", -1, "x=1", 3, "", 0, 1);
+    rx_nb_output(&body, "stdout", NULL, "", 0, 1);
+    rx_nb_item(&body, "ansi", 0, 0, "hi\n", 3);
+    rx_buf_str(&in, "0 features notebooks\n0 ready -\n");
+    rx_buf_str(&in, "1 nb-open 4 12\n5 3\n/a.nbx=1");
+    rx_buf_str(&in, "2 nb-open 4 12\n5 3\n/a.nbbad");
+    rx_buf_fmt(&in, "3 nb-save 4 %zu\n5\n/a.nb", body.len + 7);
+    rx_buf_add(&in, body.data, body.len);
+    rx_buf_str(&in, "0 nb-run 4 9 2 python 3\nx=2ok 1\n0 nb-interrupt 4\n0 bye\n");
+    assert(run_bytes("notebooks", &h, in.data, in.len, &got) == 0);
+    rx_buf_str(&want, "hello 1 notebooks\n");
+    rx_buf_fmt(&want, "ok 1 %zu\n", body.len);
+    rx_buf_add(&want, body.data, body.len);
+    rx_buf_str(&want, "error 2 refused not a toy notebook\nok 3 3\nx=11 nb-state 4 9 2 done 1\n");
+    same(&got, want.data);
+    assert(nb_ran == 2 && strcmp(nb_what, "interrupt") == 0);
+    rx_buf_free(&got);
+    rx_buf_free(&want);
+    rx_buf_free(&body);
+    rx_buf_free(&in);
+}
+
 int main(void) {
     retained_patches();
     ai_bodies();
@@ -1344,6 +1420,7 @@ int main(void) {
     snippet_snapshot_requests();
     event_lengths();
     resources_requests();
+    notebooks();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

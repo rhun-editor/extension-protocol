@@ -425,7 +425,8 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"vpatch": true, "vreveal": true, // retained views: views.go
 	"secret-set":     true,                                                        // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
-	"select-many": true, "show-locations": true, "diff": true} // workspace edits and the editor: editor.go
+	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
+	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true} // notebooks: notebook.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -443,7 +444,18 @@ func (h *host) reader() {
 		// stops an extension whose answer is over 4 MB (a workspace edit's cap): the checker reads
 		// such a body (up to 64 MB) only to stay in step
 		if len(f) == 3 && f[0] == "ok" {
-			if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
+			id, _ := strconv.ParseInt(f[1], 10, 64)
+			if _, big := bigReplies.Load(id); big {
+				// nb-open's and nb-save's answers carry up to 64 MB
+				if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n > 64<<20 {
+					m.err = fmt.Errorf("LEN %q is not 0 to 64 MB", f[2])
+				} else {
+					m.body = make([]byte, n)
+					if _, e := io.ReadFull(h.stdout, m.body); e != nil {
+						m.err = fmt.Errorf("the body of %q ended early: %w", s, e)
+					}
+				}
+			} else if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
 				m.err = fmt.Errorf("LEN %q is not 0 to 4 MB (rhun stops an extension whose answer is over 4 MB)", f[2])
 			} else if n > 4<<20 {
 				m.err = fmt.Errorf("a body of %d bytes: rhun stops an extension whose answer is over 4 MB", n)
@@ -1131,6 +1143,8 @@ func (h *host) handle(msg message) {
 		h.aiRequest(id, verb, args, b, ok, reply, rerr)
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "nb-state", "nb-output", "nb-stream", "nb-kernel-label", "nb-exec", "nb-exec-signal":
+		h.nbRequest(id, verb, args, msg.body, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
@@ -1401,8 +1415,8 @@ func main() {
 			h.ok(fmt.Sprintf("pack lists %d extensions", len(strings.Fields(m.pack))))
 		}
 	}
-	if len(m.commands) == 0 && !(m.pack != "" && programless) {
-		h.fail("manifest", "no [commands]: the extension can never be started on a command")
+	if len(m.commands) == 0 && len(m.provides) == 0 && !(m.pack != "" && programless) {
+		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
 	schemaFails := 0
@@ -1448,6 +1462,10 @@ func main() {
 		}
 	}
 	for k := range m.provides {
+		notebook := k == "notebook" || k == "notebook.title" || k == "notebook.kernel" // v1.1 notebooks
+		if notebook && k == "notebook.kernel" && m.provides[k] != "yes" && m.provides[k] != "no" {
+			bad("[provides] notebook.kernel is yes or no")
+		}
 		if k == "commit_message" || k == "scm" { // source control: yes or no
 			if v := m.provides[k]; v != "yes" && v != "no" {
 				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))
@@ -1457,7 +1475,7 @@ func main() {
 		if k == "quickdiff" {
 			continue
 		}
-		known := k == "complete.triggers" || k == "signature.triggers" || k == "schemes"
+		known := k == "complete.triggers" || k == "signature.triggers" || k == "schemes" || notebook
 		for _, f := range providerFeatures {
 			known = known || k == provideKey(f)
 		}
@@ -1478,6 +1496,8 @@ func main() {
 			ok = true
 		case "git": // source control: the project's Git data through rhun
 			ok = v == "none" || v == "read"
+		case "kernels": // notebooks: programs rhun starts as the user (nb-exec)
+			ok = v != ""
 		}
 		if !ok {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
@@ -1640,7 +1660,12 @@ func main() {
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
-	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0]))
+	// an extension without commands (one that [provides] only) gets a command it does not have
+	first := "nothing"
+	if len(m.commands) > 0 {
+		first = m.commands[0]
+	}
+	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, first))
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1650,7 +1675,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0])
+	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, first)
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)

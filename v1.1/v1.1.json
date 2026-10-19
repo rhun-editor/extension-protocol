@@ -171,6 +171,10 @@
           ],
           "default": "no",
           "description": "store passwords and tokens in the system keychain (feature secrets)"
+        },
+        "kernels": {
+          "type": "string",
+          "description": "notebooks: programs rhun may start as the user for this extension's notebooks (nb-exec), names space separated"
         }
       },
       "additionalProperties": false
@@ -249,6 +253,22 @@
         "save_actions": {
           "$ref": "#/$defs/patterns",
           "description": "Source code actions before saving; requires negotiated save-actions and documents=write."
+        },
+        "notebook": {
+          "$ref": "#/$defs/patterns",
+          "description": "Notebooks this extension reads and writes (feature notebooks): a matching file opens in a notebook tab."
+        },
+        "notebook.title": {
+          "type": "string",
+          "description": "The notebook format's name, as the user sees it."
+        },
+        "notebook.kernel": {
+          "type": "string",
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "description": "yes: it runs cells (the default); no: a viewer or converter only."
         },
         "commit_message": {
           "enum": [

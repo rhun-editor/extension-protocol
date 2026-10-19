@@ -291,6 +291,9 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				ext.answerTests(h, ev.Args, ev.Body)
 				continue
 			}
+			if ext.answerNotebook(h, ev.Args, ev.Body) {
+				continue
+			}
 			ext.answer(h, ev.Args, ev.Body)
 		case "test-cancel":
 			if c, ok := h.(TestController); ok {
@@ -335,6 +338,9 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			}
 			h.Event(ext, ev)
 		default:
+			if ext.notebookEvent(h, ev) {
+				continue
+			}
 			h.Event(ext, ev)
 		}
 	}
@@ -462,6 +468,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 0
 		} else if ev.Name == "view" && len(ev.Args) >= 3 && viewEventHasBody(ev.Args[1]) {
 			lenAt = len(ev.Args) - 1 // retained views: the last field is the body's length
+		} else if ev.Name == "nb-run" && len(ev.Args) == 5 {
+			lenAt = 4 // a cell's source, at most 4 MB
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
@@ -524,6 +532,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			n, ok := bodyLen(fields[len(fields)-1], MaxAIBody)
 			if !ok {
 				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		if len(fields) == 4 && (fields[1] == "nb-open" || fields[1] == "nb-save") {
+			// a notebook body (and its path): 64 MB at most
+			n, ok := bodyLen(fields[3], NbBodyMax+65536)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[3])
 			}
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {

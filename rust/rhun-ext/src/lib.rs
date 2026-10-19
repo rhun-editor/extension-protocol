@@ -51,6 +51,7 @@ pub mod complete;
 pub mod editor;
 pub mod edits;
 pub mod lang;
+pub mod notebook;
 pub mod picture;
 pub mod scm;
 pub mod snippet;
@@ -192,6 +193,9 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Notebooks: [`Handler::nb_open`], [`Handler::nb_save`], [`Handler::nb_run`] and the
+    /// [`Ext::nb_state`] family ([`notebook`]).
+    Notebooks,
     /// Git data through rhun: [`Ext::git_repo`], [`Ext::git_status`], [`Ext::git_blame`],
     /// [`Ext::git_log`], [`Ext::git_show`], [`Ext::git_diff_open`]; needs `[needs] git = read`.
     GitData,
@@ -253,6 +257,7 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::Notebooks => "notebooks",
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
@@ -736,6 +741,35 @@ pub trait Handler: Send {
     ) -> Result<WorkspaceEdit, String> {
         Ok(WorkspaceEdit::default())
     }
+    /// rhun asks for a notebook's cells (feature `notebooks`): the file's bytes are in `req.data`.
+    /// An error's text is shown in the notebook's tab, with a way to open the file as text.
+    fn nb_open(&mut self, _ext: &Ext, _req: &notebook::NbOpen) -> Result<notebook::Notebook, String> {
+        Err("this extension does not read notebooks".to_string())
+    }
+    /// rhun asks for the file's bytes for a notebook (feature `notebooks`); rhun writes them.
+    fn nb_save(&mut self, _ext: &Ext, _req: &notebook::NbSave) -> Result<Vec<u8>, String> {
+        Err("this extension does not write notebooks".to_string())
+    }
+    /// Run a cell (feature `notebooks`). Answer with [`Ext::nb_state`], [`Ext::nb_output`] and
+    /// [`Ext::nb_stream`], from another thread for a long run: handlers run one at a time.
+    fn nb_run(&mut self, _ext: &Ext, _run: &notebook::NbRun) {}
+    /// The user asked to interrupt the running cell.
+    fn nb_interrupt(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// Restart the kernel (the user confirmed).
+    fn nb_restart(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// The kernel button was clicked: offer kernels ([`Ext::choose`], from another thread).
+    fn nb_kernel(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// The notebook's tab closed.
+    fn nb_closed(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// A kernel started with [`Ext::nb_exec`] ended: its exit status (128 + N after signal N), or
+    /// `None` when rhun ended it.
+    fn nb_exec_exit(&mut self, _ext: &Ext, _exec: notebook::ExecId, _code: Option<i32>) {}
+    /// A cell document it was told about (`opened` with no path) belongs to notebook `nb` as cell
+    /// `cell`, at `index` among all its cells (feature `notebooks`).
+    fn nb_cell(&mut self, _ext: &Ext, _doc: Doc, _nb: notebook::NbId, _cell: notebook::CellId, _index: usize) {}
+    /// The cell documents it knows of notebook `nb`, in their order (after any insert, delete or
+    /// move).
+    fn nb_cells(&mut self, _ext: &Ext, _nb: notebook::NbId, _docs: &[Doc]) {}
     /// rhun asks for a commit message (feature `commit-message`): the message, or why not (shown
     /// to the user). rhun trims it and refuses one over 8192 bytes or with control characters
     /// ([`scm::check_commit_message`]). A `cancel` event names `req.id`.
@@ -818,7 +852,7 @@ enum Msg {
         verb: String,
         fields: Vec<String>,
         /// The body of a request that has one (`commit-message`, `vkids`, `vmore`,
-        /// `tests-resolve`, `test-run`, `tool`, `agent-prompt`).
+        /// `tests-resolve`, `test-run`, `tool`, `agent-prompt`, `nb-open`, `nb-save`).
         body: Vec<u8>,
     },
     /// a reply went to the request waiting for it
@@ -1601,6 +1635,17 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
+                    if ev.name == "nb-run" {
+                        // a cell's source: 4 MB at most
+                        let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
+                            Some(n) if n <= notebook::SOURCE_MAX => n,
+                            _ => return Msg::End,
+                        };
+                        ev.body = vec![0; len];
+                        if input.read_exact(&mut ev.body).is_err() {
+                            return Msg::End;
+                        }
+                    }
                     // tests: a process's output and end go to its streams here, never
                     // through the handler (which may be waiting for them)
                     if ev.name == "test-out" && ev.fields.len() == 3 {
@@ -1658,6 +1703,8 @@ impl Ext {
                             "tests-resolve" | "test-run" => Some(4 << 20),
                             // a tool call and a prompt (at most 4 MB)
                             "tool" | "agent-prompt" => Some(4 << 20),
+                            // a notebook body: 64 MB at most, and its path
+                            "nb-open" | "nb-save" => Some(notebook::BODY_MAX + 65536),
                             _ => None,
                         };
                         let mut body = Vec::new();
@@ -1789,6 +1836,33 @@ impl Ext {
                                 h.selections(self, &s);
                             }
                         }
+                        "nb-run" if self.has(Feature::Notebooks) => {
+                            if let Some(r) = notebook::NbRun::parse(&ev.fields, &ev.body) {
+                                h.nb_run(self, &r);
+                            }
+                        }
+                        "cell" if self.has(Feature::Notebooks) && ev.fields.len() == 4 => {
+                            h.nb_cell(self, ev.num(0), ev.num(1) as u64, ev.num(2) as u64, ev.num(3) as usize);
+                        }
+                        "cells" if self.has(Feature::Notebooks) && !ev.fields.is_empty() => {
+                            let docs: Vec<Doc> = ev.fields[1..].iter().filter_map(|f| f.parse().ok()).collect();
+                            h.nb_cells(self, ev.num(0) as u64, &docs);
+                        }
+                        "nb-exec-exit" if self.has(Feature::Notebooks) && ev.fields.len() == 2 => {
+                            let code = ev.fields[1].parse::<i32>().ok();
+                            h.nb_exec_exit(self, ev.num(0) as u64, code);
+                        }
+                        "nb-interrupt" | "nb-restart" | "nb-kernel" | "nb-closed"
+                            if self.has(Feature::Notebooks) =>
+                        {
+                            let nb = ev.num(0) as u64;
+                            match ev.name.as_str() {
+                                "nb-interrupt" => h.nb_interrupt(self, nb),
+                                "nb-restart" => h.nb_restart(self, nb),
+                                "nb-kernel" => h.nb_kernel(self, nb),
+                                _ => h.nb_closed(self, nb),
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             return false;
@@ -1856,6 +1930,17 @@ impl Ext {
                                     Ok(e) => e.encode_with(lang::EditCaps::V1),
                                     Err(why) => Err(("refused", why)),
                                 }
+                            })
+                        }
+                        "nb-open" if self.has(Feature::Notebooks) => notebook::NbOpen::parse(id, &fields, &req_body)
+                            .map(|r| match h.nb_open(self, &r) {
+                                Ok(n) => Ok(n.encode()),
+                                Err(why) => Err(("refused", why)),
+                            }),
+                        "nb-save" if self.has(Feature::Notebooks) => {
+                            notebook::NbSave::parse(id, &fields, &req_body).map(|r| match r {
+                                Ok(r) => h.nb_save(self, &r).map_err(|why| ("refused", why)),
+                                Err(why) => Err(("syntax", why)),
                             })
                         }
                         "quickdiff" if self.has(Feature::QuickDiff) => {
