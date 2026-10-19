@@ -232,7 +232,7 @@
         },
         "hover": {
           "$ref": "#/$defs/patterns",
-          "description": "the hover card; requires negotiated hover-query"
+          "description": "the hover card; requires negotiated hover-query (rhun then asks hover-query in place of sending the v1 hover event)"
         },
         "declaration": {
           "$ref": "#/$defs/patterns",
@@ -252,11 +252,11 @@
         },
         "call_hierarchy": {
           "$ref": "#/$defs/patterns",
-          "description": "the call hierarchy; requires negotiated hierarchy"
+          "description": "the call hierarchy (call-hierarchy, then calls-in and calls-out about an item); requires negotiated hierarchy"
         },
         "type_hierarchy": {
           "$ref": "#/$defs/patterns",
-          "description": "the type hierarchy; requires negotiated hierarchy"
+          "description": "the type hierarchy (type-hierarchy, then supertypes and subtypes about an item); requires negotiated hierarchy"
         },
         "workspace_symbols": {
           "$ref": "#/$defs/patterns",

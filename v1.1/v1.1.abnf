@@ -132,3 +132,67 @@ host-request =/ id SP "code-action-resolve" SP doc SP version SP len
               ; followed by the chosen action's LEN bytes of resolve data
 car-head     = len SP len LF
               ; EDIT_LEN EXTRA_LEN: the edit (a workspace edit, or empty), then cmd-ref records only
+
+; hover-query: KIND is pointer (the pointer rested on text) or invoked (Show Hover). The answer's
+; body is empty (nothing to say) or ho-head and the text (plain, or Markdown with markdown
+; agreed); at most 64 KiB in all.
+host-request =/ id SP "hover-query" SP doc SP version SP pos SP ( "pointer" / "invoked" ) SP "-"
+ho-head      = range LF                              ; the range described; 0 0 0 0 for the position
+
+; selection-ranges: N (1 .. 64) and LEN bytes of N sr-cursor lines, each selection's cursor. The
+; answer is at most N sr-group records, in the cursors' order; at most 64 KiB in all.
+host-request =/ id SP "selection-ranges" SP doc SP version SP num SP len
+sr-cursor    = pos LF
+sr-group     = num LF 1*( range LF )
+              ; M (1 .. 64) ranges, innermost first, each containing the one before (an equal one
+              ; is skipped; one that does not ends the group)
+
+; hierarchy: the roots at the cursor, then the calls or items about one of them, whose DATA rhun
+; hands back. Each answer is a count line and that many records; calls-in, calls-out, supertypes
+; and subtypes may come in parts (query-stream).
+host-request =/ id SP ( "call-hierarchy" / "type-hierarchy" ) SP doc SP version SP pos SP "invoked"
+                SP "-"                               ; answered with at most 64 hi-item records
+host-request =/ id SP ( "calls-in" / "calls-out" ) SP len
+              ; followed by the item's LEN bytes of DATA; answered with hi-call records
+host-request =/ id SP ( "supertypes" / "subtypes" ) SP len
+              ; followed by the item's LEN bytes of DATA; answered with hi-item records
+hi-head      = num LF                                ; N: at most 64 roots, else 1000 an answer or part
+hi-item      = y-kind SP range SP range SP len SP len SP len SP len LF
+              ; KIND, the whole symbol, its name (inside it), PATH_LEN NAME_LEN DETAIL_LEN
+              ; DATA_LEN; PATH (as l-item's), NAME (one line), DETAIL (one line or empty) and DATA
+              ; (at most 16384) follow
+hi-call      = y-kind SP range SP range SP len SP len SP len SP len SP num LF
+              ; as hi-item, then R (1 .. 1000): after the item's bytes, R hi-site lines, in the
+              ; caller's file for calls-in, in the asked item's file for calls-out
+hi-site      = range LF
+
+; workspace-symbols: MAX (a hint) and LEN bytes of query (one line, at most 256, maybe empty). The
+; answer is a count line and ws-item records; parts are allowed.
+host-request =/ id SP "workspace-symbols" SP num SP len
+ws-item      = range SP y-kind SP len SP len SP len LF
+              ; PATH_LEN NAME_LEN DETAIL_LEN: PATH (as l-item's), NAME (one line) and DETAIL (the
+              ; container, one line or empty) follow
+
+; document-links: the answer is a count line and dl-item records (at most 10000 and 1 MiB).
+host-request =/ id SP "document-links" SP doc SP version
+dl-item      = range SP len SP len LF
+              ; TARGET_LEN TIP_LEN: TARGET (an http or https URL, an absolute path optionally
+              ; followed by ":" LINE or ":" LINE ":" COL, or "#" DOC) and TIP (one line or empty)
+              ; follow
+
+; file-diagnostics (documents = read): a set for TARGET, "#" DOC at its VERSION or an absolute path
+; with VERSION "-", replacing the extension's there; rhun answers ok ID, or error ID stale V, needs,
+; syntax, toobig, nodoc, nofile.
+request      =/ id SP r-file-diagnostics / id SP r-file-diagnostics-reset
+r-file-diagnostics = "file-diagnostics" SP ( version / "-" ) SP num SP len SP len
+              ; N (at most 2000), TARGET_LEN, LEN: LEN bytes of TARGET then N fd-record
+r-file-diagnostics-reset = "file-diagnostics-reset"
+fd-record    = range SP severity SP len SP len LF
+              ; positions at least 1 1, the end not before the start; MSG_LEN (1 .. 4000)
+              ; EXTRA_LEN: MESSAGE (it may hold line feeds), then EXTRA_LEN bytes of fd-extra
+fd-extra     = ( "id" SP len / "code" SP len / "source" SP len / "href" SP len
+              / "tag" SP ( "unnecessary" / "deprecated" ) SP "0"
+              / "related" SP range SP len SP len ) LF
+              ; each followed by its bytes: an id of 1 to 64 of [A-Za-z0-9_.:-], unique in the set
+              ; (code-actions' DIAGS); a code and a source of at most 100; an http(s) URL of at
+              ; most 1000; related's PATH_LEN bytes of PATH (as TARGET) and MSG_LEN of message

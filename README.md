@@ -80,7 +80,8 @@ C can include the checkout's header. Release the SDK before extensions depending
 ## Language features (1.1)
 
 The [language features](v1.1/v1.1.md#language-features) of protocol 1.1 add negotiated
-features to completion, signature help, navigation, rename, formatting and code actions:
+features to completion, signature help, navigation, rename, formatting, code actions, hover,
+selection, hierarchies, project symbols, links and diagnostics:
 
 - `query-stream`: parts of a long answer and progress on one of rhun's pending requests. Go's
   `StreamingCompleter` and `StreamingLocator` get a `Stream` (`Part`, `PartLocations`, `PartItems`,
@@ -120,6 +121,39 @@ features to completion, signature help, navigation, rename, formatting and code 
   `code_action_resolve` (`ResolvedAction`), and C's `code_actions` handler (`rx_code_action` with
   `rx_action_extra`, `rx_kind_wanted`) and `code_action_resolve` handler (`rx_resolved`,
   `rx_command_ref`).
+- `hover-query`: the hover card's text and the range it describes: Go's `HoverProvider`
+  (`HoverRequest` with the kind and a context, `Hover`), Rust's `Handler::hover` (`HoverRequest`,
+  `Option<Hover>`) and C's `hover` handler (`rx_hover_answer`); the text is cut to fit 64 KiB.
+- `selection-ranges`: Expand and Shrink Selection: Go's `SelectionRanger`
+  (`SelectionRangesRequest`, `EncodeSelectionRanges`, `SelectionChain`), Rust's
+  `Handler::selection_ranges` (`selection_chain`) and C's `selection_ranges` handler
+  (`rx_selection_group`). Each group becomes a chain (equal ranges skipped, the first that does not
+  contain the one before ends it), an empty group the empty range at its cursor, and the outermost
+  ranges go until the answer fits 64 KiB.
+- `hierarchy`: call and type hierarchies: Go's `CallHierarchyProvider` (`CallHierarchy`,
+  `CallsIn`, `CallsOut`) and `TypeHierarchyProvider` (`TypeHierarchy`, `Supertypes`, `Subtypes`)
+  with `HierarchyItem`, `Call` and `HierarchyRequest`, the item requests getting the item's data
+  and a `Stream` (`PartCalls`, `PartHierarchyItems`); Rust's `Handler::call_hierarchy`, `calls_in`,
+  `calls_out`, `type_hierarchy`, `supertypes` and `subtypes` (`HierarchyItem`, `Call`,
+  `Stream::part_calls`, `part_hierarchy_items`); C's handlers of the same names
+  (`rx_hierarchy_item` with `rx_hierarchy_add`, `rx_call_add`, `rx_stream_hierarchy`,
+  `rx_stream_calls`).
+- `workspace-symbols`: Go to Symbol in Project: Go's `WorkspaceSymbolProvider`
+  (`WorkspaceSymbolsRequest`, `WorkspaceSymbol`, `PartWorkspaceSymbols`), Rust's
+  `Handler::workspace_symbols` and C's `workspace_symbols` handler (`rx_workspace_symbol`,
+  `rx_stream_workspace_symbols`); a new query withdraws the request and cancels its stream.
+- `document-links`: links under ctrl+hover: Go's `DocumentLinker` (`DocRequest`, `DocumentLink`
+  with `LinkURL`, `LinkPath`, `LinkDoc`, `ValidLinkTarget`), Rust's `Handler::document_links`
+  (`DocumentLink`, `LinkTarget`) and C's `document_links` handler (`rx_link`,
+  `rx_link_target_valid`); links to anything but an http(s) URL, an absolute path (with a line and
+  column) or a document are left out.
+- `file-diagnostics`: diagnostics for any file, open or not, in rhun's Problems store, with ids
+  that code actions get back, codes, sources, links, tags and related places: Go's
+  `Ext.FileDiagnostics` and `ResetDiagnostics` (`Diagnostic`'s `ID`, `Code`, `Source`, `Href`,
+  `Tags`, `Related`), Rust's `Ext::file_diagnostics` and `reset_diagnostics` and C's
+  `rx_file_diagnostics` (`rx_diagnostic`, `rx_related`) and `rx_reset_diagnostics`. The SDKs
+  leave out or cut what rhun would refuse (an empty message, a bad or repeated id, a link that is
+  not http(s), more than 2000 records or 4 MiB).
 
 The SDKs read the bodies of rhun's 1.1 requests that carry data (up to 64 KiB). The checker
 validates the new completion records, sends `complete-resolve` with the data a list gave and
@@ -129,7 +163,12 @@ asks `declaration`, `type-definition` and `implementation` and reads their locat
 `prepare-rename` before a rename, `range-format` and (after typing the first trigger)
 `type-format` and checks that their edits name only the document asked about, and asks
 `code-actions` for any kind and for `quickfix`, checking kinds, the extra records and command
-names against the extension's commands, then resolves an action with `code-action-resolve`.
+names against the extension's commands, then resolves an action with `code-action-resolve`. It
+asks `hover-query`, `selection-ranges` (each range containing the one before), `call-hierarchy`
+and `type-hierarchy` and then the calls or items about the first root with its data,
+`workspace-symbols` and `document-links`, reading parts only where the kind takes them, and
+serves `file-diagnostics` (targets, versions, records and their ids) and
+`file-diagnostics-reset`.
 
 ## Prepared snippet fields
 
