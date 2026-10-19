@@ -39,6 +39,7 @@ pub mod picture;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
+pub mod testing;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -61,6 +62,10 @@ pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
+};
+pub use testing::{
+    expected_actual, unquote, CoverageRange, FileCoverage, TestCommand, TestItem, TestKind,
+    TestMessage, TestProcess, TestReporter, TestResult, TestRun, TestState, TestStream,
 };
 
 #[cfg(test)]
@@ -145,6 +150,9 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Test controllers (protocol 1.1): [`Handler::resolve_tests`], [`Handler::run_tests`],
+    /// [`Ext::set_test_items`], [`Ext::test_exec`].
+    Tests,
 }
 
 impl Feature {
@@ -165,6 +173,7 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::Tests => "tests",
         }
     }
 }
@@ -545,6 +554,26 @@ pub trait Handler: Send {
     ) -> Result<WorkspaceEdit, String> {
         Ok(WorkspaceEdit::default())
     }
+    /// rhun asks for the children of a test item (`""`: the controller's roots; feature
+    /// `tests`): they replace the item's children. An error's text shows on the item's row.
+    fn resolve_tests(&mut self, _ext: &Ext, _parent: &str) -> Result<Vec<TestItem>, Error> {
+        Err(Error {
+            code: "unknown".into(),
+            text: "no such request".into(),
+        })
+    }
+    /// rhun starts a run (feature `tests`). Return at once: report from a thread of your own
+    /// ([`TestReporter`]) and end the run with [`Ext::end_test_run`]. An error ends the run
+    /// errored and its text is shown (`busy`, `refused`).
+    fn run_tests(&mut self, _ext: &Ext, _run: &TestRun) -> Result<(), Error> {
+        Err(Error {
+            code: "refused".into(),
+            text: "this extension runs no tests".into(),
+        })
+    }
+    /// The user cancelled a run: stop it and end it with [`Ext::end_test_run`] (rhun stops its
+    /// processes after 2 s and ends it itself after 5 s).
+    fn cancel_tests(&mut self, _ext: &Ext, _run: u64) {}
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
 }
@@ -555,6 +584,7 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
+        body: Vec<u8>,
     },
     End,
 }
@@ -586,6 +616,7 @@ pub struct Ext {
     shared: Arc<Mutex<Shared>>,
     pending: Arc<Mutex<Pending>>,
     features: Arc<Mutex<Vec<String>>>,
+    procs: testing::Procs,
 }
 
 /// Speaks the protocol over standard input and output until rhun stops the extension, with
@@ -608,6 +639,7 @@ where
         })),
         pending: Arc::new(Mutex::new(Pending::default())),
         features: Arc::new(Mutex::new(Vec::new())),
+        procs: Arc::default(),
     };
     let mut hello = String::from("hello 1");
     for f in features {
@@ -1090,6 +1122,28 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
+                    // tests: a process's output and end go to its streams here, never
+                    // through the handler (which may be waiting for them)
+                    if ev.name == "test-out" && ev.fields.len() == 3 {
+                        let len: usize = match ev.fields[2].parse() {
+                            Ok(n) if n <= 4 << 20 => n,
+                            _ => break,
+                        };
+                        let mut body = vec![0; len];
+                        if input.read_exact(&mut body).is_err() {
+                            break;
+                        }
+                        if let Ok(ex) = ev.fields[0].parse() {
+                            testing::test_out(&self.procs, ex, &ev.fields[1], &body);
+                        }
+                        continue;
+                    }
+                    if ev.name == "test-exit" && ev.fields.len() >= 2 {
+                        if let Ok(ex) = ev.fields[0].parse() {
+                            testing::test_exit(&self.procs, ex, &ev.fields[1..].join(" "));
+                        }
+                        continue;
+                    }
                     if ev.name == "edits" || ev.name == "action" {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
@@ -1114,11 +1168,23 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
+                        let mut body = Vec::new();
+                        if verb == "tests-resolve" || verb == "test-run" {
+                            let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
+                                Some(n) if n <= 4 << 20 => n,
+                                _ => break,
+                            };
+                            body = vec![0; len];
+                            if input.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                        }
                         if tx
                             .send(Msg::HostRequest {
                                 id,
                                 verb,
                                 fields: rest,
+                                body,
                             })
                             .is_err()
                         {
@@ -1135,6 +1201,7 @@ impl Ext {
             let _ = w.send(Err(closed_error()));
         }
         drop(p);
+        testing::tests_gone(&self.procs);
         let _ = tx.send(Msg::End);
     }
 
@@ -1177,6 +1244,11 @@ impl Ext {
                             }
                         }
                         "action" => h.action(self, &ev.body),
+                        "test-cancel" if self.has(Feature::Tests) => {
+                            if let Some(run) = testing::parse_test_cancel(&ev) {
+                                h.cancel_tests(self, run);
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             break;
@@ -1184,7 +1256,12 @@ impl Ext {
                         _ => {}
                     }
                 }
-                Msg::HostRequest { id, verb, fields } => {
+                Msg::HostRequest {
+                    id,
+                    verb,
+                    fields,
+                    body: req_body,
+                } => {
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
                             .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
@@ -1218,6 +1295,24 @@ impl Ext {
                                 }
                             })
                         }
+                        "tests-resolve" if self.has(Feature::Tests) && fields.len() == 1 => {
+                            let parent = String::from_utf8_lossy(&req_body).into_owned();
+                            Some(match h.resolve_tests(self, &parent) {
+                                Ok(items) => testing::encode_test_items(&parent, &items)
+                                    .map_err(|e| (code_str(&e.code), e.text)),
+                                Err(e) => Err((code_str(&e.code), e.text)),
+                            })
+                        }
+                        "test-run" if self.has(Feature::Tests) => {
+                            match testing::parse_test_run(&fields, &req_body) {
+                                None => Some(Err(("syntax", "bad test-run".to_string()))),
+                                Some(run) => match h.run_tests(self, &run) {
+                                    // `ok ID 0`: the empty body
+                                    Ok(()) => Some(Ok(Vec::new())),
+                                    Err(e) => Some(Err((code_str(&e.code), e.text))),
+                                },
+                            }
+                        }
                         _ => None,
                     };
                     let _ = match body {
@@ -1248,6 +1343,23 @@ impl Ext {
                 }
             }
         }
+    }
+}
+
+/// An error code from a handler as one of the codes of the spec (others become `refused`).
+fn code_str(code: &str) -> &'static str {
+    match code {
+        "unknown" => "unknown",
+        "syntax" => "syntax",
+        "busy" => "busy",
+        "toobig" => "toobig",
+        "badpos" => "badpos",
+        "stale" => "stale",
+        "cancelled" => "cancelled",
+        "nofile" => "nofile",
+        "nodoc" => "nodoc",
+        "timeout" => "timeout",
+        _ => "refused",
     }
 }
 
