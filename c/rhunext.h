@@ -1691,7 +1691,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
                      strncmp(verb_args, "git-show ", 9) == 0 || strncmp(verb_args, "scm-input ", 10) == 0 ||
-                     strcmp(verb_args, "tools") == 0 || strncmp(verb_args, "tool-call ", 10) == 0;
+                     strcmp(verb_args, "tools") == 0 || strncmp(verb_args, "tool-call ", 10) == 0 ||
+                     strncmp(verb_args, "editor-read ", 12) == 0;
     int run_body = strncmp(verb_args, "run-command ", 12) == 0;
     wants_body = wants_body || run_body;
     char want[64];

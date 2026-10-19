@@ -203,7 +203,7 @@ func (e *Ext) startRequest(ctx context.Context, verb string, body []byte, stream
 	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output" ||
 		verb == "secret-get" || verb == "secret-keys" || verb == "external-uri" || verb == "link" ||
 		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show" || verb == "scm-input" ||
-		verb == "tools" || verb == "tool-call" || verb == "run-command"
+		verb == "tools" || verb == "tool-call" || verb == "run-command" || verb == "editor-read"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()
 		return 0, nil, &Error{Code: "busy", Text: "too many pending requests"}

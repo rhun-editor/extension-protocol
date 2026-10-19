@@ -2105,6 +2105,7 @@ impl Ext {
                                 | "scm-input"
                                 | "external-uri"
                                 | "link"
+                                | "editor-read"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
