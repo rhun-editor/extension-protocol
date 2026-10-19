@@ -169,6 +169,17 @@ int rx_unregister(rx_ext *ext, const char *name);
 int64_t rx_watch_workspace(rx_ext *ext);
 int rx_unwatch_workspace(rx_ext *ext, int64_t watch);
 int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan);
+/* Resources group (protocol 1.1). Feature "idle": not stopped for idleness while busy. */
+int rx_busy(rx_ext *ext, int busy);
+/* Feature "secrets" ([needs] secrets = yes): KEY is 1 to 64 bytes of a-z 0-9 _ . -, a value at
+ * most 8192 bytes. rx_secret_get: 1 with the value in *value (malloc'd, free() it) and its bytes
+ * in *len, 0 when nothing is stored, -1 on an error. rx_secret_keys: the keys, each followed by LF
+ * (malloc'd, NUL-terminated, free() it), or NULL on an error. */
+int rx_secret_get(rx_ext *ext, const char *key, unsigned char **value, size_t *len);
+int rx_secret_set(rx_ext *ext, const char *key, const void *value, size_t len);
+int rx_secret_delete(rx_ext *ext, const char *key);
+char *rx_secret_keys(rx_ext *ext, size_t *len);
+int rx_secret_key_valid(const char *key);
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -559,7 +570,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     rx_buf_free(&line);
     int context_body = strncmp(verb_args, "snippet-context ", 16) == 0;
     int wants_body = strncmp(verb_args, "text ", 5) == 0 || strncmp(verb_args, "range ", 6) == 0 ||
-                     strncmp(verb_args, "ask ", 4) == 0 || context_body;
+                     strncmp(verb_args, "ask ", 4) == 0 || context_body ||
+                     strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {
@@ -728,6 +740,84 @@ int64_t rx_watch_workspace(rx_ext *ext) {
         return -1;
     }
     return watch;
+}
+
+int rx_busy(rx_ext *ext, int busy) {
+    if (!rx_has(ext, "idle")) {
+        snprintf(ext->error, sizeof ext->error, "unknown idle feature was not agreed");
+        return -1;
+    }
+    return rx_request(ext, busy ? "busy yes" : "busy no", NULL, 0, NULL, NULL);
+}
+
+int rx_secret_key_valid(const char *key) {
+    size_t n = key ? strlen(key) : 0;
+    return n >= 1 && n <= 64 && strspn(key, "abcdefghijklmnopqrstuvwxyz0123456789_.-") == n;
+}
+
+static int rx_secret_check(rx_ext *ext, const char *key) {
+    if (!rx_has(ext, "secrets")) {
+        snprintf(ext->error, sizeof ext->error, "unknown secrets feature was not agreed");
+        return -1;
+    }
+    if (key && !rx_secret_key_valid(key)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid secret key");
+        return -1;
+    }
+    return 0;
+}
+
+int rx_secret_get(rx_ext *ext, const char *key, unsigned char **value, size_t *len) {
+    if (rx_secret_check(ext, key ? key : "")) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "secret-get %s", key);
+    rx_buf f = {NULL, 0, 0}, b = {NULL, 0, 0};
+    if (rx_request(ext, line, NULL, 0, &f, &b) < 0) {
+        rx_buf_free(&f);
+        rx_buf_free(&b);
+        return -1;
+    }
+    int found = f.data && f.data[0] == '1';
+    rx_buf_free(&f);
+    if (!found) {
+        rx_buf_free(&b);
+        return 0;
+    }
+    if (!b.data) rx_buf_add(&b, "", 0);
+    if (len) *len = b.len;
+    if (value) *value = (unsigned char *)b.data;
+    else rx_buf_free(&b);
+    return 1;
+}
+
+int rx_secret_set(rx_ext *ext, const char *key, const void *value, size_t len) {
+    if (rx_secret_check(ext, key ? key : "")) return -1;
+    if (len > 8192) {
+        snprintf(ext->error, sizeof ext->error, "toobig a value is at most 8192 bytes");
+        return -1;
+    }
+    char line[112];
+    snprintf(line, sizeof line, "secret-set %s %zu", key, len);
+    return rx_request(ext, line, value, len, NULL, NULL);
+}
+
+int rx_secret_delete(rx_ext *ext, const char *key) {
+    if (rx_secret_check(ext, key ? key : "")) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "secret-delete %s", key);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+char *rx_secret_keys(rx_ext *ext, size_t *len) {
+    if (rx_secret_check(ext, NULL)) return NULL;
+    rx_buf b = {NULL, 0, 0};
+    if (rx_request(ext, "secret-keys", NULL, 0, NULL, &b) < 0) {
+        rx_buf_free(&b);
+        return NULL;
+    }
+    if (!b.data) rx_buf_add(&b, "", 0);
+    if (len) *len = b.len;
+    return b.data;
 }
 
 int rx_unwatch_workspace(rx_ext *ext, int64_t watch) {

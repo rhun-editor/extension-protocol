@@ -40,6 +40,7 @@ pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
 pub mod watch;
+pub mod resources;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -145,6 +146,10 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Not stopped for idleness while busy: [`Ext::busy`] (resources group).
+    Idle,
+    /// Passwords and tokens in the system keychain: [`Ext::secret_get`] and the others.
+    Secrets,
 }
 
 impl Feature {
@@ -165,6 +170,8 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::Idle => "idle",
+            Feature::Secrets => "secrets",
         }
     }
 }
@@ -1047,7 +1054,8 @@ impl Ext {
                     let verb = waiter.as_ref().map(|w| w.0.as_str()).unwrap_or("");
                     let mut body = Vec::new();
                     if fields[0] == "ok"
-                        && matches!(verb, "text" | "range" | "ask" | "snippet-context")
+                        && matches!(verb, "text" | "range" | "ask" | "snippet-context"
+                            | "secret-get" | "secret-keys")
                     {
                         let len: usize = if verb == "snippet-context" {
                             match fields

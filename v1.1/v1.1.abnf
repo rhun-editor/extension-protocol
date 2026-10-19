@@ -52,3 +52,19 @@ feature      =/ "snippet-transforms"
 c-extra      =/ "transforms" SP "0" SP len LF
               ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
               ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.
+
+; Resources group. idle: an idle = stop extension stays while busy.
+feature      =/ "idle"
+request      =/ id SP r-busy
+r-busy       = "busy" SP ( "yes" / "no" )
+
+; secrets: needs [needs] secrets = yes. KEY is 1..64 of a-z 0-9 _ . -; values 0..8192 bytes.
+feature      =/ "secrets"
+request      =/ id SP ( r-secret-get / r-secret-set / r-secret-delete / r-secret-keys )
+secret-key   = 1*64( %x61-7A / DIGIT / "_" / "." / "-" )
+r-secret-get = "secret-get" SP secret-key
+              ; ok ID 1 LEN + the value, or ok ID 0 0
+r-secret-set = "secret-set" SP secret-key SP len
+r-secret-delete = "secret-delete" SP secret-key
+r-secret-keys = "secret-keys"
+              ; ok ID LEN + the keys, each followed by LF

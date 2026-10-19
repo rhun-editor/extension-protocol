@@ -49,6 +49,7 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
+	top                         map[string]string // top-level keys of later features (idle, runs)
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -56,7 +57,7 @@ func readManifest(dir string) (*manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}}
+	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}, top: map[string]string{}}
 	section := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -101,6 +102,8 @@ func readManifest(dir string) (*manifest, error) {
 				m.icon = v
 			case k == "color":
 				m.color = v
+			case k == "idle" || k == "idle.after" || k == "runs":
+				m.top[k] = v
 			}
 		case "settings":
 			key, field, ok := strings.Cut(k, ".")
@@ -184,6 +187,7 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
+	secrets     map[string][]byte // secret-set values (resources.go)
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -356,7 +360,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
+var bodyVerbs = map[string]bool{"secret-set": true, "replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -522,6 +526,9 @@ func (h *host) handle(msg message) {
 			return nil, false
 		}
 		return msg.body, true
+	}
+	if h.resourcesRequest(verb, id, args, body, reply, rerr) {
+		return
 	}
 	switch verb {
 	case "text":
@@ -1302,6 +1309,7 @@ func main() {
 	// the rules of v1/v1.json
 	schemaFails := 0
 	bad := func(why string) { schemaFails++; h.fail("manifest schema", why) }
+	resourcesManifest(m, bad)
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(m.name) {
 		bad(fmt.Sprintf("name %q is not [a-z0-9][a-z0-9-]*", m.name))
 	}
@@ -1353,7 +1361,7 @@ func main() {
 			ok = v == "none" || v == "read" || v == "write"
 		case "home":
 			ok = v == "none" || v == "read"
-		case "network", "terminal":
+		case "network", "terminal", "secrets":
 			ok = v == "no" || v == "yes"
 		case "run":
 			ok = true

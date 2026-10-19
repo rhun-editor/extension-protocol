@@ -55,7 +55,7 @@
     "runtime": {
       "type": "string",
       "minLength": 1,
-      "description": "a program found on PATH that runs the script named by 'run' (python3, node, \u2026)"
+      "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)"
     },
     "requires": {
       "type": "string",
@@ -154,6 +154,14 @@
         "run": {
           "type": "string",
           "description": "programs the extension may start, by name, space separated"
+        },
+        "secrets": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "store passwords and tokens in the system keychain (feature secrets)"
         }
       },
       "additionalProperties": false
@@ -230,6 +238,29 @@
         }
       },
       "additionalProperties": false
+    },
+    "idle": {
+      "enum": [
+        "keep",
+        "stop"
+      ],
+      "default": "keep",
+      "description": "stop: rhun stops the extension after idle.after seconds without work"
+    },
+    "idle.after": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 86400,
+      "default": 300,
+      "description": "seconds without work before an idle = stop extension is stopped"
+    },
+    "runs": {
+      "enum": [
+        "workspace",
+        "local"
+      ],
+      "default": "workspace",
+      "description": "where it runs; both mean this computer in 0.18.0"
     }
   },
   "$defs": {

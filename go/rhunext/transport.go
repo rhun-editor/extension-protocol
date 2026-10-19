@@ -190,7 +190,8 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		e.pmu.Unlock()
 		return Reply{}, err
 	}
-	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output"
+	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output" ||
+		verb == "secret-get" || verb == "secret-keys"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()
 		return Reply{}, &Error{Code: "busy", Text: "too many pending requests"}
