@@ -292,18 +292,21 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
-			if len(ev.Args) > 1 && (ev.Args[1] == "vkids" || ev.Args[1] == "vmore") {
+			// the reader began a cancellable context for every request (query.go): answer ends
+			// it, and so does this for the requests answered elsewhere
+			switch {
+			case len(ev.Args) > 1 && (ev.Args[1] == "vkids" || ev.Args[1] == "vmore"):
 				ext.answerChildren(h, ev)
-				continue
-			}
-			if len(ev.Args) > 1 && (ev.Args[1] == "tests-resolve" || ev.Args[1] == "test-run") {
+			case len(ev.Args) > 1 && (ev.Args[1] == "tests-resolve" || ev.Args[1] == "test-run"):
 				ext.answerTests(h, ev.Args, ev.Body)
+			case ext.answerNotebook(h, ev.Args, ev.Body):
+			default:
+				ext.answer(h, ev.Args, ev.Body)
 				continue
 			}
-			if ext.answerNotebook(h, ev.Args, ev.Body) {
-				continue
+			if id, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil {
+				ext.finishLang(id)
 			}
-			ext.answer(h, ev.Args, ev.Body)
 		case "test-cancel":
 			if c, ok := h.(TestController); ok {
 				if run, ok := ParseTestCancel(ev); ok {
