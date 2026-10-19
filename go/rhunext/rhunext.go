@@ -275,7 +275,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
-			ext.answer(h, ev.Args)
+			ext.answer(h, ev.Args, ev.Body)
 		case "view":
 			if v, ok := h.(Viewer); ok {
 				if view, vev, ok := parseViewEvent(ev); ok {
@@ -385,10 +385,12 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "cancel" && len(ev.Args) == 1 {
 			if id, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil && id > 0 {
 				e.cancelSource(id)
+				e.cancelLang(id)
 			}
 		}
 		if ev.Name == "bye" {
 			e.cancelSources(false)
+			e.cancelAllLang()
 		}
 		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
 		lenAt := -1
@@ -437,6 +439,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 				return nil, err
 			}
 		}
+		if len(fields) > 2 && bodiedRequests[fields[1]] {
+			n, ok := bodyLen(fields[len(fields)-1], MaxRequestBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s request's length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		e.beginLang(id)
 		return ev, nil
 	}
 	return nil, nil
