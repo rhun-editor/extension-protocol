@@ -36,8 +36,8 @@ func rangeWords(w []string) string {
 	return ""
 }
 
-// inside says whether the range a (four words) contains b
-func inside(a, b []string) bool { return !before(b[0:2], a[0:2]) && !before(a[2:4], b[2:4]) }
+// rangeInside says whether the range a (four words) contains b
+func rangeInside(a, b []string) bool { return !before(b[0:2], a[0:2]) && !before(a[2:4], b[2:4]) }
 
 // checkHover validates a hover-query answer about d: empty (nothing to say), or "L1 C1 L2 C2" LF and
 // the text, at most 64 KiB; what is odd but allowed, or why rhun drops it
@@ -117,7 +117,7 @@ func checkSelectionRanges(m message, d *doc, n int) (int, []string, string) {
 			switch {
 			case prev != nil && strings.Join(prev, " ") == strings.Join(w, " "):
 				c.warn("group %d, range %d equals the one before: rhun skips it", groups, r)
-			case prev != nil && !inside(w, prev):
+			case prev != nil && !rangeInside(w, prev):
 				return 0, nil, fmt.Sprintf("group %d, range %d (%s) does not contain the one before (%s): rhun keeps only the ranges before it",
 					groups, r, l, strings.Join(prev, " "))
 			}
@@ -198,7 +198,7 @@ func (h *host) readItem(c *cursor, i int, calls bool, sites []byte, odd map[stri
 	whole, sel := w[1:5], w[5:9]
 	if why := rangeWords(whole); why != "" {
 		c.warn("%s %d: the symbol's range: %s", what, i, why)
-	} else if rangeWords(sel) != "" || !inside(whole, sel) {
+	} else if rangeWords(sel) != "" || !rangeInside(whole, sel) {
 		c.warn("%s %d: its name's range %s is not inside the symbol's %s", what, i, strings.Join(sel, " "), strings.Join(whole, " "))
 	}
 	t, missing := h.lookup(path)

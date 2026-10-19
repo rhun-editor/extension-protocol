@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// itemRec is a hierarchy item (with sites, a call) whose symbol is 1 1 1 3 and name 1 1 1 2
-func itemRec(kind, path, name, data string, sites ...string) string {
+// hierItemRec is a hierarchy item (with sites, a call) whose symbol is 1 1 1 3 and name 1 1 1 2
+func hierItemRec(kind, path, name, data string, sites ...string) string {
 	head := fmt.Sprintf("%s 1 1 1 3 1 1 1 2 %d %d 3 %d", kind, len(path), len(name), len(data))
 	if len(sites) > 0 {
 		head += fmt.Sprintf(" %d", len(sites))
@@ -70,12 +70,12 @@ func TestHoverAndSelectionAnswers(t *testing.T) {
 func TestHierarchyAndSymbolAnswers(t *testing.T) {
 	h, dir := testHost(t)
 	a := filepath.Join(dir, "a.go")
-	roots := "2\n" + itemRec("function", a, "main", "m1") + itemRec("class", "#1", "T", "")
+	roots := "2\n" + hierItemRec("function", a, "main", "m1") + hierItemRec("class", "#1", "T", "")
 	items, warns, why := h.checkHierarchy(okMsg(roots), "call-hierarchy", nil)
 	if len(items) != 2 || len(warns) != 0 || why != "" || string(items[0].data) != "m1" || string(items[0].path) != a {
 		t.Fatal(items, warns, why)
 	}
-	calls := "1\n" + itemRec("method", a, "caller", "c1", "1 1 1 2", "3 1 3 5")
+	calls := "1\n" + hierItemRec("method", a, "caller", "c1", "1 1 1 2", "3 1 3 5")
 	if items, warns, why := h.checkHierarchy(okMsg(calls), "calls-in", nil); len(items) != 1 || items[0].sites != 2 || len(warns) != 0 || why != "" {
 		t.Fatal(items, warns, why)
 	}
@@ -83,20 +83,20 @@ func TestHierarchyAndSymbolAnswers(t *testing.T) {
 	if _, warns, _ := h.checkHierarchy(okMsg(calls), "calls-out", []byte(filepath.Join(dir, "b.go"))); len(warns) != 1 {
 		t.Errorf("a call site past the asked item's text: %v", warns)
 	}
-	odd := "1\n" + strings.Replace(itemRec("gizmo", a, "x", ""), " 1 1 1 2 ", " 2 1 2 2 ", 1)
+	odd := "1\n" + strings.Replace(hierItemRec("gizmo", a, "x", ""), " 1 1 1 2 ", " 2 1 2 2 ", 1)
 	if _, warns, why := h.checkHierarchy(okMsg(odd), "supertypes", nil); why != "" || len(warns) != 2 {
 		t.Errorf("an unknown kind, a name outside the symbol: %v %s", warns, why)
 	}
-	many := "65\n" + strings.Repeat(itemRec("function", a, "r", ""), 65)
+	many := "65\n" + strings.Repeat(hierItemRec("function", a, "r", ""), 65)
 	for _, c := range []struct{ name, verb, body, part string }{
 		{"65 roots", "type-hierarchy", many, "not N, 0 to 64"},
 		{"a header of 12", "subtypes", "1\nfunction 1 1 1 3 1 1 1 2 1 1 0\n", "is not KIND"},
-		{"a relative path", "subtypes", "1\n" + itemRec("function", "a.go", "x", ""), "neither absolute nor #DOC"},
+		{"a relative path", "subtypes", "1\n" + hierItemRec("function", "a.go", "x", ""), "neither absolute nor #DOC"},
 		{"no name", "subtypes", "1\nfunction 1 1 1 3 1 1 1 2 2 0 0 0\n#1", "NAME_LEN"},
-		{"data over 16 KiB", "subtypes", "1\n" + itemRec("function", a, "x", strings.Repeat("d", 16<<10+1)), "over 16 KiB"},
-		{"no sites", "calls-in", "1\n" + strings.Replace(itemRec("function", a, "x", "", "1 1 1 2"), " 1\n", " 0\n", 1), "not 1 to 1000"},
-		{"R says more", "calls-in", "1\n" + strings.Replace(itemRec("function", a, "x", "", "1 1 1 2"), " 1\n", " 2\n", 1), "no call site 2"},
-		{"a call without R", "calls-out", "1\n" + itemRec("function", a, "x", ""), "is not KIND"},
+		{"data over 16 KiB", "subtypes", "1\n" + hierItemRec("function", a, "x", strings.Repeat("d", 16<<10+1)), "over 16 KiB"},
+		{"no sites", "calls-in", "1\n" + strings.Replace(hierItemRec("function", a, "x", "", "1 1 1 2"), " 1\n", " 0\n", 1), "not 1 to 1000"},
+		{"R says more", "calls-in", "1\n" + strings.Replace(hierItemRec("function", a, "x", "", "1 1 1 2"), " 1\n", " 2\n", 1), "no call site 2"},
+		{"a call without R", "calls-out", "1\n" + hierItemRec("function", a, "x", ""), "is not KIND"},
 		{"bytes after", "subtypes", "0\nx", "1 bytes after"},
 	} {
 		_, _, why := h.checkHierarchy(okMsg(c.body), c.verb, nil)
@@ -240,14 +240,14 @@ func moreExt(h *host, path string) func(int64, string, []string, []byte) *messag
 		case "selection-ranges":
 			return okAnswer(id, "2\n1 1 1 2\n1 1 1 3\n1\n1 2 1 2\n")
 		case "call-hierarchy", "type-hierarchy":
-			return okAnswer(id, "1\n"+itemRec("function", path, "main", "m1"))
+			return okAnswer(id, "1\n"+hierItemRec("function", path, "main", "m1"))
 		case "calls-in":
-			part("1\n" + itemRec("function", path, "caller", "c1", "1 1 1 2"))
-			return okAnswer(id, "1\n"+itemRec("function", path, "late"+string(body), "", "1 2 1 3"))
+			part("1\n" + hierItemRec("function", path, "caller", "c1", "1 1 1 2"))
+			return okAnswer(id, "1\n"+hierItemRec("function", path, "late"+string(body), "", "1 2 1 3"))
 		case "calls-out", "subtypes":
 			return okAnswer(id, "0\n")
 		case "supertypes":
-			return okAnswer(id, "1\n"+itemRec("interface", path, "Base", "b"))
+			return okAnswer(id, "1\n"+hierItemRec("interface", path, "Base", "b"))
 		case "workspace-symbols":
 			sym := fmt.Sprintf("1 1 1 3 function %d 4 4\n%sMainmain", len(path), path)
 			part("1\n" + sym)

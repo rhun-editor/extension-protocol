@@ -2273,15 +2273,15 @@ static void langfeat_records(void) {
     same(&out, "2\n3 6 3 10 function 7 4 4\n/p/a.goMainmain1 1 1 4 function 2 5 0\n#2mai x");
     rx_links links;
     memset(&links, 0, sizeof links);
-    rx_link(&links, R(1, 1, 1, 20), "https://example.test/a b", "spaces");
-    rx_link(&links, R(1, 1, 1, 20), "https://example.test/a", "Open\nthe page");
-    rx_link(&links, R(2, 3, 2, 9), "/p/a.go:4:2", NULL);
-    rx_link(&links, R(3, 3, 3, 9), "/p/a.go:4", NULL);
-    rx_link(&links, R(4, 3, 4, 9), "#4", NULL);
-    rx_link(&links, R(5, 3, 5, 9), "relative.go", NULL);
-    rx_link(&links, R(6, 3, 5, 9), "/p/backwards", NULL);
-    rx_link(&links, R(7, 1, 7, 4), "ftp://example.test", NULL);
-    rx_link(&links, R(8, 1, 8, 4), "#0", NULL);
+    rx_document_link(&links, R(1, 1, 1, 20), "https://example.test/a b", "spaces");
+    rx_document_link(&links, R(1, 1, 1, 20), "https://example.test/a", "Open\nthe page");
+    rx_document_link(&links, R(2, 3, 2, 9), "/p/a.go:4:2", NULL);
+    rx_document_link(&links, R(3, 3, 3, 9), "/p/a.go:4", NULL);
+    rx_document_link(&links, R(4, 3, 4, 9), "#4", NULL);
+    rx_document_link(&links, R(5, 3, 5, 9), "relative.go", NULL);
+    rx_document_link(&links, R(6, 3, 5, 9), "/p/backwards", NULL);
+    rx_document_link(&links, R(7, 1, 7, 4), "ftp://example.test", NULL);
+    rx_document_link(&links, R(8, 1, 8, 4), "#0", NULL);
     rx_buf_clear(&out);
     rx_links_finish(&links, &out);
     same(&out, "4\n1 1 1 20 22 13\nhttps://example.test/aOpen the page2 3 2 9 11 0\n/p/a.go:4:2"
@@ -2415,10 +2415,10 @@ static int on_document_links(rx_ext *ext, const rx_doc_ask *req, rx_links *out, 
     (void)ext, (void)user;
     char doc[32];
     snprintf(doc, sizeof doc, "#%lld", (long long)req->doc);
-    rx_link(out, R(1, 1, 1, 20), "https://example.test/a", "Open\nthe page");
-    rx_link(out, R(2, 3, 2, 9), "/p/a.go:4:2", NULL);
-    rx_link(out, R(4, 3, 4, 9), doc, NULL);
-    rx_link(out, R(5, 3, 5, 9), "relative.go", NULL);
+    rx_document_link(out, R(1, 1, 1, 20), "https://example.test/a", "Open\nthe page");
+    rx_document_link(out, R(2, 3, 2, 9), "/p/a.go:4:2", NULL);
+    rx_document_link(out, R(4, 3, 4, 9), doc, NULL);
+    rx_document_link(out, R(5, 3, 5, 9), "relative.go", NULL);
     return 1;
 }
 

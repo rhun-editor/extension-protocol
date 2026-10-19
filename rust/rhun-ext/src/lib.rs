@@ -2359,7 +2359,7 @@ impl Ext {
                             })
                         }
                         "selection-ranges" if self.has(Feature::SelectionRanges) => {
-                            SelectionRangesRequest::parse(id, &fields, &data).map(|r| {
+                            SelectionRangesRequest::parse(id, &fields, &req_body).map(|r| {
                                 Ok(langfeat::encode_selection_ranges(
                                     &r.positions,
                                     &h.selection_ranges(self, &r),
@@ -2381,27 +2381,27 @@ impl Ext {
                             })
                         }
                         "calls-in" if self.has(Feature::Hierarchy) => {
-                            langfeat::item_data(&fields, &data)
+                            langfeat::item_data(&fields, &req_body)
                                 .map(|d| Ok(langfeat::encode_calls(&h.calls_in(self, d, &out))))
                         }
                         "calls-out" if self.has(Feature::Hierarchy) => {
-                            langfeat::item_data(&fields, &data)
+                            langfeat::item_data(&fields, &req_body)
                                 .map(|d| Ok(langfeat::encode_calls(&h.calls_out(self, d, &out))))
                         }
                         "supertypes" if self.has(Feature::Hierarchy) => {
-                            langfeat::item_data(&fields, &data).map(|d| {
+                            langfeat::item_data(&fields, &req_body).map(|d| {
                                 Ok(langfeat::encode_hierarchy_items(
                                     &h.supertypes(self, d, &out),
                                 ))
                             })
                         }
                         "subtypes" if self.has(Feature::Hierarchy) => {
-                            langfeat::item_data(&fields, &data).map(|d| {
+                            langfeat::item_data(&fields, &req_body).map(|d| {
                                 Ok(langfeat::encode_hierarchy_items(&h.subtypes(self, d, &out)))
                             })
                         }
                         "workspace-symbols" if self.has(Feature::WorkspaceSymbols) => {
-                            WorkspaceSymbolsRequest::parse(id, &fields, &data).map(|r| {
+                            WorkspaceSymbolsRequest::parse(id, &fields, &req_body).map(|r| {
                                 Ok(langfeat::encode_workspace_symbols(
                                     &h.workspace_symbols(self, &r, &out),
                                 ))

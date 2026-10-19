@@ -288,7 +288,7 @@ typedef struct {
     int64_t version;
 } rx_doc_ask;
 /* the answers, built with rx_selection_group, rx_hierarchy_add, rx_call_add, rx_workspace_symbol
- * and rx_link (below); the fields are the builders' own (at and npos, the request's positions, and
+ * and rx_document_link (below); the fields are the builders' own (at and npos, the request's positions, and
  * roots are set for you in the handlers) */
 typedef struct { rx_buf ranges; int counts[64], n; rx_pos at[64]; int npos; } rx_selections;
 typedef struct { rx_buf recs; int n, full, roots; } rx_hierarchy;
@@ -469,7 +469,7 @@ typedef struct {
      * supertypes and subtypes items, of the item whose data req holds, with parts through stream
      * (query-stream). workspace-symbols: workspace_symbols adds rx_workspace_symbol records, with
      * parts through stream; a new query withdraws the request. document-links: document_links
-     * adds rx_link records. */
+     * adds rx_document_link records. */
     int (*hover)(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user);
     int (*selection_ranges)(rx_ext *ext, const rx_selection_ask *req, rx_selections *out, void *user);
     int (*call_hierarchy)(rx_ext *ext, const rx_ask *req, rx_hierarchy *out, void *user);
@@ -1155,7 +1155,7 @@ void rx_workspace_symbol(rx_workspace_symbols *l, const char *path, rx_doc doc, 
  * followed by :LINE or :LINE:COL, or #DOC (rx_link_target_valid; another leaves the link out, as does
  * a range that runs backwards); tip one line or NULL, cut at 1000 bytes. Past 10000 or 1 MiB the
  * rest are left out. */
-void rx_link(rx_links *l, rx_range r, const char *target, const char *tip);
+void rx_document_link(rx_links *l, rx_range r, const char *target, const char *tip);
 int rx_link_target_valid(const char *target);
 /* the bodies, appended to out, for answers built outside a handler; each empties its builder */
 void rx_selections_finish(rx_selections *s, rx_buf *out);
@@ -5454,7 +5454,7 @@ int rx_link_target_valid(const char *t) {
     return rx_abs_path(t) && strlen(t) <= RX_PATH_MAX + 22 && !strpbrk(t, "\r\n");
 }
 
-void rx_link(rx_links *l, rx_range r, const char *target, const char *tip) {
+void rx_document_link(rx_links *l, rx_range r, const char *target, const char *tip) {
     if (l->n >= RX_RECORDS) l->full = 1;
     if (l->full || !rx_link_target_valid(target) || !rx_well_formed(r)) return;
     if (!tip) tip = "";

@@ -187,7 +187,7 @@ selection, hierarchies, project symbols, links and diagnostics:
   `rx_stream_workspace_symbols`); a new query withdraws the request and cancels its stream.
 - `document-links`: links under ctrl+hover: Go's `DocumentLinker` (`DocRequest`, `DocumentLink`
   with `LinkURL`, `LinkPath`, `LinkDoc`, `ValidLinkTarget`), Rust's `Handler::document_links`
-  (`DocumentLink`, `LinkTarget`) and C's `document_links` handler (`rx_link`,
+  (`DocumentLink`, `LinkTarget`) and C's `document_links` handler (`rx_document_link`,
   `rx_link_target_valid`); links to anything but an http(s) URL, an absolute path (with a line and
   column) or a document are left out.
 - `file-diagnostics`: diagnostics for any file, open or not, in rhun's Problems store, with ids
