@@ -275,7 +275,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
-			if ext.answerNotebook(h, ev.Args, ev.Body) {
+			if ext.answerNotebook(h, ev.Args, ev.Body) || ext.answerEditor(h, ev.Args, ev.Body) {
 				continue
 			}
 			ext.answer(h, ev.Args, ev.Body)
@@ -294,7 +294,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			}
 			h.Event(ext, ev)
 		default:
-			if ext.notebookEvent(h, ev) {
+			if ext.notebookEvent(h, ev) || ext.editorEvent(h, ev) {
 				continue
 			}
 			h.Event(ext, ev)
@@ -404,6 +404,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 0
 		} else if ev.Name == "nb-run" && len(ev.Args) == 5 {
 			lenAt = 4 // a cell's source, at most 4 MB
+		} else if ev.Name == "editor-path" && len(ev.Args) == 2 {
+			lenAt = 1 // a custom editor's new path
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
@@ -445,6 +447,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			n, ok := bodyLen(fields[3], NbBodyMax+65536)
 			if !ok {
 				return nil, fmt.Errorf("a %s length %q", fields[1], fields[3])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		if len(fields) == 7 && fields[1] == "editor-open" {
+			// the editor's file's path
+			n, ok := bodyLen(fields[6], 65536)
+			if !ok {
+				return nil, fmt.Errorf("an editor-open length %q", fields[6])
 			}
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {

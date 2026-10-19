@@ -1059,6 +1059,8 @@ func (h *host) handle(msg message) {
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
 	case "nb-state", "nb-output", "nb-stream", "nb-kernel-label", "nb-exec", "nb-exec-signal":
 		h.nbRequest(id, verb, args, msg.body, reply, rerr)
+	case "editor-read", "editor-dirty":
+		h.edRequest(id, verb, args, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
@@ -1362,6 +1364,13 @@ func main() {
 	}
 	for k := range m.provides {
 		notebook := k == "notebook" || k == "notebook.title" || k == "notebook.kernel" // v1.1 notebooks
+		if k == "editor.model" && m.provides[k] != "text" && m.provides[k] != "owned" {
+			bad("[provides] editor.model is text or owned")
+		}
+		if k == "editor.priority" && m.provides[k] != "default" && m.provides[k] != "option" {
+			bad("[provides] editor.priority is default or option")
+		}
+		notebook = notebook || k == "editor" || k == "editor.title" || k == "editor.model" || k == "editor.priority"
 		if notebook && k == "notebook.kernel" && m.provides[k] != "yes" && m.provides[k] != "no" {
 			bad("[provides] notebook.kernel is yes or no")
 		}

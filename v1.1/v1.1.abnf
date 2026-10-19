@@ -115,3 +115,15 @@ host-request =/ id SP "commit-message" SP len
 feature      =/ "quickdiff"
 host-request =/ id SP "quickdiff" SP doc SP version
 request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"
+
+; Custom editors (v1.1.md, "Feature: custom-editors"). Answers carry "ok" SP id SP len (LEN 0 for none).
+feature      =/ "custom-editors"
+host-request =/ id SP "editor-open" SP doc SP num SP ( "text" / "owned" ) SP "file" SP len
+              ; CDOC VIEW MODEL SOURCE, then the path
+host-request =/ id SP "editor-save" SP doc SP ( "save" / "saveas" ) SP num
+              ; answered with a body: ( "0" / "1" ) LF, then the part's bytes
+host-request =/ id SP ( "editor-undo" / "editor-redo" / "editor-revert" ) SP doc
+request      =/ id SP "editor-read" SP doc SP num SP num   ; CDOC OFFSET MAX
+request      =/ id SP "editor-dirty" SP doc SP ( "0" / "1" )
+event        =/ "0" SP ( "editor-changed" / "editor-closed" ) SP doc
+event        =/ "0" SP "editor-path" SP doc SP len            ; then the new path

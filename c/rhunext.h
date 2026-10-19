@@ -174,6 +174,16 @@ typedef struct {
      * among all its cells; nb_cells lists the cell documents it knows in order (n of them). */
     void (*nb_cell)(rx_ext *ext, rx_doc doc, int64_t nb, int64_t cell, int index, void *user);
     void (*nb_cells)(rx_ext *ext, int64_t nb, const rx_doc *docs, int n, void *user);
+    /* Custom editors (feature "custom-editors", v1.1): editor_open (model "text" or "owned",
+     * view the 12a view rhun opened: draw it) returns NULL when ready, else why (the file opens
+     * as text); editor_save appends part `part` of an owned model's bytes to out (at most 4 MB;
+     * snapshot at part 0), sets *more when another follows, returns NULL or why; editor_cmd hears
+     * "undo", "redo", "revert" (NULL or why); editor_event "changed", "closed", and "path" with
+     * the new path. */
+    const char *(*editor_open)(rx_ext *ext, rx_doc cdoc, int64_t view, const char *model, const char *path, void *user);
+    const char *(*editor_save)(rx_ext *ext, rx_doc cdoc, const char *kind, int64_t part, rx_buf *out, int *more, void *user);
+    const char *(*editor_cmd)(rx_ext *ext, rx_doc cdoc, const char *what, void *user);
+    void (*editor_event)(rx_ext *ext, rx_doc cdoc, const char *what, const char *path, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -458,6 +468,10 @@ int rx_nb_kernel_label(rx_ext *ext, int64_t nb, const char *state, const char *l
 int64_t rx_nb_exec(rx_ext *ext, int64_t nb, const char *program, const char *dir, const char *const *args, int argc,
                    const char *const *env, int envc);
 int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal);
+/* Custom editors: up to max (at most 4 MB) bytes of the editor's file from offset, malloc'd (free
+ * it; *len 0 at its end), or NULL; whether an owned model differs from its file. */
+unsigned char *rx_editor_read(rx_ext *ext, rx_doc cdoc, int64_t offset, size_t max, size_t *len);
+int rx_editor_dirty(rx_ext *ext, rx_doc cdoc, int dirty);
 /* The command body of rx_nb_exec (and test-exec), onto out. */
 void rx_command_body(rx_buf *out, const char *program, const char *dir, const char *const *args, int argc,
                      const char *const *env, int envc);
@@ -627,7 +641,7 @@ static const char rx_bad_len[] = "a body's length that is not a decimal of at mo
 /* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
-        strncmp(line, "0 nb-run ", 9) == 0) return 1;
+        strncmp(line, "0 nb-run ", 9) == 0 || strncmp(line, "0 editor-path ", 14) == 0) return 1;
     /* ID commit-message LEN */
     if (line[0] < '1' || line[0] > '9') return 0;
     const char *sp = strchr(line, ' ');
@@ -638,7 +652,8 @@ static int rx_has_body(const char *line) {
 static int rx_host_body(const char *line) {
     const char *sp = strchr(line, ' ');
     if (!sp || line[0] < '1' || line[0] > '9') return 0;
-    return strncmp(sp + 1, "nb-open ", 8) == 0 || strncmp(sp + 1, "nb-save ", 8) == 0;
+    return strncmp(sp + 1, "nb-open ", 8) == 0 || strncmp(sp + 1, "nb-save ", 8) == 0 ||
+           strncmp(sp + 1, "editor-open ", 12) == 0;
 }
 #define RX_NB_BODY_MAX (((long long)64 << 20) + 65536)
 
@@ -2705,6 +2720,75 @@ int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal) {
     return rx_request(ext, line, NULL, 0, NULL, NULL);
 }
 
+unsigned char *rx_editor_read(rx_ext *ext, rx_doc cdoc, int64_t offset, size_t max, size_t *len) {
+    char line[128];
+    if (max > 4194304) max = 4194304;
+    snprintf(line, sizeof line, "editor-read %lld %lld %zu", (long long)cdoc, (long long)offset, max);
+    rx_buf f = {NULL, 0, 0}, b = {NULL, 0, 0};
+    *len = 0;
+    if (rx_request(ext, line, NULL, 0, &f, &b) < 0) {
+        rx_buf_free(&f);
+        rx_buf_free(&b);
+        return NULL;
+    }
+    rx_buf_free(&f);
+    unsigned char *out = (unsigned char *)malloc(b.len + 1);
+    if (!out) abort();
+    if (b.len) memcpy(out, b.data, b.len);
+    *len = b.len;
+    rx_buf_free(&b);
+    return out;
+}
+
+int rx_editor_dirty(rx_ext *ext, rx_doc cdoc, int dirty) {
+    char line[96];
+    snprintf(line, sizeof line, "editor-dirty %lld %d", (long long)cdoc, dirty ? 1 : 0);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+/* editor-open (with its path), editor-save, editor-undo, -redo and -revert: f: ID VERB CDOC ... */
+static void rx_editor_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                             const unsigned char *body, size_t len) {
+    rx_buf out = {NULL, 0, 0}, line = {NULL, 0, 0};
+    const char *why = NULL;
+    int known = rx_has(ext, "custom-editors") && h->editor_open && h->editor_save;
+    if (known && strcmp(f[1], "editor-open") == 0 && n == 7) {
+        char *path = (char *)malloc(len + 1);
+        if (!path) abort();
+        if (len) memcpy(path, body, len);
+        path[len] = 0;
+        why = h->editor_open(ext, atoll(f[2]), atoll(f[3]), f[4], path, user);
+        free(path);
+    } else if (known && strcmp(f[1], "editor-save") == 0 && n == 5) {
+        rx_buf part = {NULL, 0, 0};
+        int more = 0;
+        why = h->editor_save(ext, atoll(f[2]), f[3], atoll(f[4]), &part, &more, user);
+        if (!why && part.len > 4194304) why = "a part over 4 MB";
+        if (!why) {
+            rx_buf_add(&out, more ? "1\n" : "0\n", 2);
+            if (part.len) rx_buf_add(&out, part.data, part.len);
+        }
+        rx_buf_free(&part);
+    } else if (known && n == 3) {
+        if (h->editor_cmd) why = h->editor_cmd(ext, atoll(f[2]), f[1] + 7, user);
+    } else {
+        known = 0;
+    }
+    if (!known) {
+        rx_buf_fmt(&line, "error %s unknown no such request", f[0]);
+        rx_write(line.data, NULL, 0);
+    } else if (why) {
+        rx_buf_fmt(&line, "error %s refused ", f[0]);
+        for (const char *p = why; *p && line.len < 1000; p++) rx_buf_add(&line, *p == '\n' ? " " : p, 1);
+        rx_write(line.data, NULL, 0);
+    } else {
+        rx_buf_fmt(&line, "ok %s %zu", f[0], out.len);
+        rx_write(line.data, out.data, out.len);
+    }
+    rx_buf_free(&out);
+    rx_buf_free(&line);
+}
+
 /* nb-open and nb-save (f: ID VERB NB LEN) with their bodies */
 static void rx_nb_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, const unsigned char *body, size_t len) {
     rx_buf out = {NULL, 0, 0}, line = {NULL, 0, 0};
@@ -2851,6 +2935,16 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 }
                 if (docs) h->nb_cells(ext, nb, docs, k, user);
                 free(docs);
+            } else if (strncmp(f[1], "editor-", 7) == 0 && n >= 3 && h->editor_event && rx_has(ext, "custom-editors")) {
+                char *path = NULL;
+                if (strcmp(f[1], "editor-path") == 0) {
+                    path = (char *)malloc(m->body_len + 1);
+                    if (!path) abort();
+                    if (m->body_len) memcpy(path, m->body, m->body_len);
+                    path[m->body_len] = 0;
+                }
+                h->editor_event(ext, atoll(f[2]), f[1] + 7, path, user);
+                free(path);
             } else if (strcmp(f[1], "nb-exec-exit") == 0 && n == 4 && h->nb_exec_exit && rx_has(ext, "notebooks")) {
                 h->nb_exec_exit(ext, atoll(f[2]), strcmp(f[3], "killed") == 0 ? -1 : atoi(f[3]), user);
             } else if (strncmp(f[1], "nb-", 3) == 0 && n == 3 && h->nb_event && rx_has(ext, "notebooks") &&
@@ -2861,6 +2955,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 if (h->bye) h->bye(ext, user);
                 done = 1;
             }
+        } else if (n >= 3 && f[0][0] >= '1' && f[0][0] <= '9' && strncmp(f[1], "editor-", 7) == 0) {
+            rx_editor_answer(ext, h, user, f, n, m->body, m->body_len);
         } else if (n == 4 && f[0][0] >= '1' && f[0][0] <= '9' && rx_host_body(m->line)) {
             rx_nb_answer(ext, h, user, f, m->body, m->body_len);
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9') {

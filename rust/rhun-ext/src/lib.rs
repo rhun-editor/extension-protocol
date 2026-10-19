@@ -35,6 +35,7 @@
 pub mod chart;
 pub mod complete;
 pub mod lang;
+pub mod editor;
 pub mod notebook;
 pub mod picture;
 pub mod scm;
@@ -154,6 +155,9 @@ pub enum Feature {
     /// Notebooks: [`Handler::nb_open`], [`Handler::nb_save`], [`Handler::nb_run`] and the
     /// [`Ext::nb_state`] family ([`notebook`]).
     Notebooks,
+    /// Custom editors: [`Handler::editor_open`], [`Handler::editor_save`] and the rest
+    /// ([`editor`]).
+    CustomEditors,
     /// Git data through rhun: [`Ext::git_repo`], [`Ext::git_status`], [`Ext::git_blame`],
     /// [`Ext::git_log`], [`Ext::git_show`], [`Ext::git_diff_open`]; needs `[needs] git = read`.
     GitData,
@@ -183,6 +187,7 @@ impl Feature {
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
             Feature::Notebooks => "notebooks",
+            Feature::CustomEditors => "custom-editors",
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
@@ -595,6 +600,33 @@ pub trait Handler: Send {
     /// The cell documents it knows of notebook `nb`, in their order (after any insert, delete or
     /// move).
     fn nb_cells(&mut self, _ext: &Ext, _nb: notebook::NbId, _docs: &[Doc]) {}
+    /// rhun opened a file in the extension's editor (feature `custom-editors`): read it (an owned
+    /// model) and draw `req.view`. An error closes the tab and opens the file as text, the text
+    /// in a toast.
+    fn editor_open(&mut self, _ext: &Ext, _req: &editor::EditorOpen) -> Result<(), String> {
+        Err("this extension has no editor".to_string())
+    }
+    /// An owned model's bytes for a save, part by part (from 0; take a snapshot at part 0): whether
+    /// another part follows, and this one (at most 4 MB; [`editor::part_of`] cuts them).
+    fn editor_save(&mut self, _ext: &Ext, _req: &editor::EditorSave) -> Result<(bool, Vec<u8>), String> {
+        Err("this extension does not save".to_string())
+    }
+    /// rhun's Undo, Redo and Revert File in an owned model's tab.
+    fn editor_undo(&mut self, _ext: &Ext, _cdoc: editor::CDoc) -> Result<(), String> {
+        Ok(())
+    }
+    fn editor_redo(&mut self, _ext: &Ext, _cdoc: editor::CDoc) -> Result<(), String> {
+        Ok(())
+    }
+    fn editor_revert(&mut self, _ext: &Ext, _cdoc: editor::CDoc) -> Result<(), String> {
+        Ok(())
+    }
+    /// An owned model's file changed on disk.
+    fn editor_changed(&mut self, _ext: &Ext, _cdoc: editor::CDoc) {}
+    /// A Save As gave the document a new path.
+    fn editor_path(&mut self, _ext: &Ext, _cdoc: editor::CDoc, _path: &str) {}
+    /// The editor's tab closed.
+    fn editor_closed(&mut self, _ext: &Ext, _cdoc: editor::CDoc) {}
     /// rhun asks for a commit message (feature `commit-message`): the message, or why not (shown
     /// to the user). rhun trims it and refuses one over 8192 bytes or with control characters
     /// ([`scm::check_commit_message`]). A `cancel` event names `req.id`.
@@ -1168,6 +1200,16 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
+                    if ev.name == "editor-path" {
+                        let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
+                            Some(n) if n <= 65536 => n,
+                            _ => break,
+                        };
+                        ev.body = vec![0; len];
+                        if input.read_exact(&mut ev.body).is_err() {
+                            break;
+                        }
+                    }
                     if ev.name == "nb-run" {
                         // a cell's source: 4 MB at most
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1209,6 +1251,8 @@ impl Ext {
                             "nb-open" | "nb-save" => Some(notebook::BODY_MAX + 65536),
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
                             "commit-message" => Some(4 << 20),
+                            // the editor's file's path
+                            "editor-open" => Some(65536),
                             _ => None,
                         };
                         if let Some(cap) = cap {
@@ -1297,6 +1341,17 @@ impl Ext {
                             let docs: Vec<Doc> = ev.fields[1..].iter().filter_map(|f| f.parse().ok()).collect();
                             h.nb_cells(self, ev.num(0) as u64, &docs);
                         }
+                        "editor-changed" | "editor-closed" if self.has(Feature::CustomEditors) => {
+                            let cdoc = ev.num(0);
+                            if ev.name == "editor-changed" {
+                                h.editor_changed(self, cdoc);
+                            } else {
+                                h.editor_closed(self, cdoc);
+                            }
+                        }
+                        "editor-path" if self.has(Feature::CustomEditors) => {
+                            h.editor_path(self, ev.num(0), &String::from_utf8_lossy(&ev.body));
+                        }
                         "nb-exec-exit" if self.has(Feature::Notebooks) && ev.fields.len() == 2 => {
                             let code = ev.fields[1].parse::<i32>().ok();
                             h.nb_exec_exit(self, ev.num(0) as u64, code);
@@ -1367,6 +1422,32 @@ impl Ext {
                             notebook::NbSave::parse(id, &fields, &req_body).map(|r| match r {
                                 Ok(r) => h.nb_save(self, &r).map_err(|why| ("refused", why)),
                                 Err(why) => Err(("syntax", why)),
+                            })
+                        }
+                        "editor-open" if self.has(Feature::CustomEditors) => {
+                            editor::EditorOpen::parse(id, &fields, &req_body)
+                                .map(|r| h.editor_open(self, &r).map(|_| Vec::new()).map_err(|why| ("refused", why)))
+                        }
+                        "editor-save" if self.has(Feature::CustomEditors) => {
+                            editor::EditorSave::parse(id, &fields).map(|r| match h.editor_save(self, &r) {
+                                Ok((more, bytes)) if bytes.len() <= editor::PART_MAX => {
+                                    Ok(editor::save_part(more, &bytes))
+                                }
+                                Ok(_) => Err(("toobig", "a part over 4 MB".to_string())),
+                                Err(why) => Err(("refused", why)),
+                            })
+                        }
+                        "editor-undo" | "editor-redo" | "editor-revert"
+                            if self.has(Feature::CustomEditors) =>
+                        {
+                            fields.first().and_then(|f| f.parse::<editor::CDoc>().ok()).map(|cdoc| {
+                                match verb.as_str() {
+                                    "editor-undo" => h.editor_undo(self, cdoc),
+                                    "editor-redo" => h.editor_redo(self, cdoc),
+                                    _ => h.editor_revert(self, cdoc),
+                                }
+                                .map(|_| Vec::new())
+                                .map_err(|why| ("refused", why))
                             })
                         }
                         "quickdiff" if self.has(Feature::QuickDiff) => {

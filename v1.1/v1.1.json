@@ -248,6 +248,30 @@
           "type": "string",
           "description": "The notebook format's name, as the user sees it."
         },
+        "editor": {
+          "$ref": "#/$defs/patterns",
+          "description": "Files this extension edits in its own view (feature custom-editors)."
+        },
+        "editor.title": {
+          "type": "string",
+          "description": "The editor's name, as Reopen With shows it."
+        },
+        "editor.model": {
+          "enum": [
+            "text",
+            "owned"
+          ],
+          "default": "text",
+          "description": "text: rhun keeps the file as a document; owned: the extension keeps it and saves it in parts."
+        },
+        "editor.priority": {
+          "enum": [
+            "default",
+            "option"
+          ],
+          "default": "default",
+          "description": "default: matching files open in it; option: only through Reopen With."
+        },
         "notebook.kernel": {
           "type": "string",
           "enum": [

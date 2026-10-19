@@ -21,7 +21,7 @@ import (
 )
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
-	"git-data", "commit-message", "quickdiff", "notebooks"} // source control: scm.go
+	"git-data", "commit-message", "quickdiff", "notebooks", "custom-editors"} // source control: scm.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -344,6 +344,7 @@ func (h *host) checkFeatures() {
 		return
 	}
 	h.checkNotebooks()
+	h.checkEditors()
 	if h.cmdExited() {
 		return
 	}
