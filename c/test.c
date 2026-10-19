@@ -947,6 +947,228 @@ static void transform_requests(void) {
         rx_buf_free(&out);rx_buf_free(&input);
     }
 }
+/* ---- protocol 1.1 language features (go/rhunext/query_test.go, the same bytes) */
+
+static void item_records(void) {
+    rx_list l = {0};
+    rx_range repl = R(2, 5, 2, 9), elsewhere = R(1, 2, 1, 3);
+    rx_item_extra x = {0};
+    x.resolve = "r1", x.resolve_len = 2, x.resolve_edits = 1, x.replace = &repl;
+    x.commit = "..(\x01", x.filter = "prt", x.suffix = "(s)";
+    x.preselect = x.deprecated = x.adjust = x.after_signature = 1;
+    rx_list_item_extra(&l, R(2, 5, 2, 7), "text", "print", NULL, NULL, NULL, NULL, NULL, 0, -1, &x);
+    /* what is not valid is left out */
+    static char big[(16 << 10) + 1];
+    rx_item_extra y = {0};
+    y.resolve = big, y.resolve_len = sizeof big, y.replace = &elsewhere, y.commit = " \t\xc3\xa9", y.after_complete = 1;
+    rx_list_item_extra(&l, R(1, 1, 1, 2), "text", "x", NULL, NULL, NULL, NULL, NULL, 0, -1, &y);
+    rx_buf out = {NULL, 0, 0};
+    rx_list_finish(&l, &out);
+    same(&out, "2 0\n2 5 2 7 text 5 5 0 119\nprintprintresolve 1 2\nr1replace 2 5 2 9 0\ncommit 2\n.(filter 3\nprt"
+               "suffix 3\n(s)preselect 0\ndeprecated 0\nadjust 0\nafter signature 0\n"
+               "1 1 1 2 text 1 1 0 17\nxxafter complete 0\n");
+    rx_buf_clear(&out);
+    rx_range edit = R(1, 1, 1, 1);
+    const char *texts[] = {"use x;\n"};
+    rx_resolve_answer(&out, "fn\nprint()", "Docs r1", &edit, texts, 1, 1, 1);
+    same(&out, "detail 10\nfn print()doc 7\nDocs r1edit 1 1 1 1 7\nuse x;\nafter signature 0\nafter complete 0\n");
+    rx_buf_clear(&out);
+    rx_signature_info sigs[3] = {{"f(a)", 2, 3, NULL}, {"f(a, b)", 5, 6, "two"}, {"f()", 9, 12, NULL}};
+    rx_signatures_answer(&out, sigs, 3, 1);
+    same(&out, "3 1\n2 3 4 0\nf(a)5 6 7 3\nf(a, b)two-1 -1 3 0\nf()");
+    rx_buf_clear(&out);
+    rx_signatures_answer(&out, sigs, 0, 0);    /* none hides the help */
+    same(&out, "");
+    rx_signature_info many[40];
+    for (int i = 0; i < 40; i++) many[i].label = "g()", many[i].from = many[i].to = -1, many[i].doc = NULL;
+    rx_signatures_answer(&out, many, 40, 35);
+    assert(out.len > 5 && memcmp(out.data, "32 0\n-1 -1 3 0\ng()", 18) == 0);
+    rx_buf_clear(&out);
+    /* past 64 KB the documentation goes, then overloads; a signature that cannot fit is none */
+    static char doc[30001], label[70001];
+    memset(doc, 'd', sizeof doc - 1);
+    memset(label, 'x', sizeof label - 1);
+    rx_signature_info docs[4] = {{"h()", -1, -1, doc}, {"h()", -1, -1, doc}, {"h()", -1, -1, doc}, {"h()", -1, -1, doc}};
+    rx_signatures_answer(&out, docs, 4, 2);
+    same(&out, "2 0\n-1 -1 3 0\nh()-1 -1 3 0\nh()");
+    rx_buf_clear(&out);
+    rx_signature_info huge = {label, -1, -1, NULL};
+    rx_signatures_answer(&out, &huge, 1, 0);
+    same(&out, "");
+    rx_buf_free(&out);
+}
+
+static rx_buf query_seen;       /* what the handlers saw, each then | */
+
+static void query_note(rx_ext *ext, rx_stream *s) {
+    rx_buf_fmt(&query_seen, "%s %d|", rx_error(ext), rx_stream_cancelled(s));
+}
+
+static int query_saw(const char *want) {
+    int same = query_seen.len == strlen(want) && memcmp(query_seen.data, want, query_seen.len) == 0;
+    rx_buf_clear(&query_seen);
+    return same;
+}
+
+static int on_locations_stream(rx_ext *ext, const rx_ask *req, rx_stream *s, rx_locations *out, void *user) {
+    (void)user;
+    if (rx_stream_progress(s, 40, "Indexing\nall") < 0) {
+        query_note(ext, s);
+        return 1;
+    }
+    rx_locations part = {{NULL, 0, 0}, 0, 0};
+    rx_location(&part, NULL, req->doc, R(1, 1, 1, 2), "a");
+    if (rx_stream_locations(s, &part) < 0) {
+        query_note(ext, s);
+        return 1;
+    }
+    rx_location(out, NULL, req->doc, R(2, 1, 2, 2), "b");
+    return 1;
+}
+
+/* a cancel event while the part waits: the next part is not sent */
+static int on_cancelled_stream(rx_ext *ext, const rx_ask *req, rx_stream *s, rx_locations *out, void *user) {
+    (void)req, (void)out, (void)user;
+    rx_locations part = {{NULL, 0, 0}, 0, 0};
+    assert(!rx_stream_cancelled(s) && rx_stream_locations(s, &part) == 0 && rx_stream_cancelled(s));
+    assert(rx_stream_part(s, "0\n", 2) == -1);
+    query_note(ext, s);
+    return 1;
+}
+
+static int on_complete_items(rx_ext *ext, const rx_ask *req, rx_stream *s, rx_buf *out, void *user) {
+    (void)ext, (void)req, (void)s, (void)user;
+    rx_list l = {0};
+    rx_range repl = R(2, 5, 2, 9);
+    rx_item_extra x = {0};
+    x.resolve = "r1", x.resolve_len = 2, x.resolve_edits = 1, x.replace = &repl;
+    x.commit = "..(\x01", x.filter = "prt", x.suffix = "(s)";
+    x.preselect = x.deprecated = x.adjust = x.after_signature = 1;
+    rx_list_item_extra(&l, R(2, 5, 2, 7), "text", "print", NULL, NULL, NULL, NULL, NULL, 0, -1, &x);
+    rx_list_finish(&l, out);
+    return 1;
+}
+
+static int on_resolve(rx_ext *ext, const rx_resolve_ask *req, rx_buf *out, void *user) {
+    (void)ext, (void)user;
+    assert(req->id == 4 && req->doc == 4 && req->version == 2 && req->len == 2 && req->data[2] == 0);
+    char doc[64];
+    snprintf(doc, sizeof doc, "Docs %s", (const char *)req->data);
+    rx_range edit = R(1, 1, 1, 1);
+    const char *texts[] = {"use x;\n"};
+    rx_resolve_answer(out, "fn print()", doc, &edit, texts, 1, 0, 0);
+    return 1;
+}
+
+static int on_signatures(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_signature_info sigs[3] = {{"f(a)", 2, 3, NULL}, {"f(a, b)", 5, 6, "two"}, {"f()", 9, 12, NULL}};
+    rx_signatures_answer(out, sigs, 3, 1);
+    return 1;
+}
+
+static void on_scope_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    int r = rx_provides(ext, "definition", "*.go");
+    rx_buf_fmt(&query_seen, "%d %s|", r, r ? rx_error(ext) : "");
+    if (!rx_has(ext, "provider-scope")) return;
+    assert(rx_provides(ext, "references", "-") == -1 && strcmp(rx_error(ext), "refused no") == 0);
+    assert(rx_provides(ext, "bad key", "*") == -1 && strncmp(rx_error(ext), "syntax ", 7) == 0);
+    assert(rx_provides(ext, "definition", "a\nb") == -1 && strncmp(rx_error(ext), "syntax ", 7) == 0);
+}
+
+static void query_requests(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.references_stream = on_locations_stream;
+    h.definition_stream = on_locations_stream;
+    rx_buf got = {NULL, 0, 0}, want = {NULL, 0, 0};
+    run("references query-stream", &h,
+        "0 features references query-stream\n0 ready -\n"
+        "7 references 4 2 1 1 invoked -\nok 1\nok 2\n"
+        "8 definition 4 2 1 1 invoked -\nok 3\nerror 4 cancelled\n"
+        "0 bye\n",
+        &got);
+    const char *part = "1\n1 1 1 2 2 1\n#4a";
+    rx_buf_str(&want, "hello 1 references query-stream\n1 query-progress 7 40 12\nIndexing all");
+    rx_buf_fmt(&want, "2 query-part 7 %zu\n%s", strlen(part), part);
+    ok(&want, 7, "1\n2 1 2 2 2 1\n#4b");
+    rx_buf_fmt(&want, "3 query-progress 8 40 12\nIndexing all4 query-part 8 %zu\n%s", strlen(part), part);
+    ok(&want, 8, "0\n");                            /* a part answered cancelled stops the handler */
+    same(&got, want.data);
+    assert(query_saw("cancelled 1|"));
+
+    /* without the feature: refused before anything is sent */
+    rx_buf_clear(&got);
+    rx_buf_clear(&want);
+    run("references", &h, "0 features references\n7 references 4 2 1 1 invoked -\n0 bye\n", &got);
+    rx_buf_str(&want, "hello 1 references\n");
+    ok(&want, 7, "0\n");
+    same(&got, want.data);
+    assert(query_saw("unknown query-stream was not agreed 0|"));
+
+    /* rhun withdraws the request while a part waits, or before the handler runs */
+    h.references_stream = on_cancelled_stream;
+    rx_buf_clear(&got);
+    rx_buf_clear(&want);
+    run("references query-stream", &h,
+        "0 features references query-stream\n9 references 4 2 1 1 invoked -\n0 cancel 9\nok 1\n0 bye\n", &got);
+    rx_buf_str(&want, "hello 1 references query-stream\n1 query-part 9 2\n0\n");
+    ok(&want, 9, "0\n");
+    same(&got, want.data);
+    assert(query_saw("cancelled rhun no longer needs the answer 1|"));
+
+    /* complete-items records, a resolve request's body, signature lists */
+    memset(&h, 0, sizeof h);
+    h.complete_stream = on_complete_items;
+    h.complete_resolve = on_resolve;
+    h.signatures = on_signatures;
+    rx_buf_clear(&got);
+    rx_buf_clear(&want);
+    run("complete complete-items signature-list", &h,
+        "0 features complete complete-items signature-list\n0 ready -\n"
+        "3 complete 4 2 2 7 invoked -\n4 complete-resolve 4 2 2\nr15 signatures 4 2 2 7 invoked -\n0 bye\n",
+        &got);
+    const char *extra = "resolve 1 2\nr1replace 2 5 2 9 0\ncommit 2\n.(filter 3\nprtsuffix 3\n(s)preselect 0\n"
+                        "deprecated 0\nadjust 0\nafter signature 0\n";
+    rx_buf item = {NULL, 0, 0};
+    rx_buf_fmt(&item, "1 0\n2 5 2 7 text 5 5 0 %zu\nprintprint%s", strlen(extra), extra);
+    rx_buf_str(&want, "hello 1 complete complete-items signature-list\n");
+    ok(&want, 3, item.data);
+    ok(&want, 4, "detail 10\nfn print()doc 7\nDocs r1edit 1 1 1 1 7\nuse x;\n");
+    ok(&want, 5, "3 1\n2 3 4 0\nf(a)5 6 7 3\nf(a, b)two-1 -1 3 0\nf()");
+    same(&got, want.data);
+    rx_buf_free(&item);
+
+    /* without the features both are unknown, and the resolve request's body is read past */
+    rx_buf_clear(&got);
+    rx_buf_clear(&want);
+    run("complete", &h, "0 features complete\n4 complete-resolve 4 2 2\nr15 signatures 4 2 2 7 invoked -\n0 bye\n", &got);
+    same(&got, "hello 1 complete\nerror 4 unknown no such request\nerror 5 unknown no such request\n");
+    /* a body length rhun never sends ends the session before anything is read */
+    const char *bad[] = {"65537", "+1", "99999999999", "x"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        rx_buf_clear(&got);
+        rx_buf_clear(&want);
+        rx_buf_fmt(&want, "0 features complete-items\n4 complete-resolve 4 2 %s\n0 bye\n", bad[i]);
+        assert(run_bytes("complete-items", &h, want.data, want.len, &got) == 1);
+        same(&got, "hello 1 complete-items\n");
+    }
+
+    /* provides needs provider-scope */
+    memset(&h, 0, sizeof h);
+    h.ready = on_scope_ready;
+    rx_buf_clear(&got);
+    run("provider-scope", &h, "0 features provider-scope\n0 ready -\nok 1\nerror 2 refused no\n0 bye\n", &got);
+    same(&got, "hello 1 provider-scope\n1 provides definition *.go\n2 provides references -\n");
+    rx_buf_clear(&got);
+    run("", &h, "0 ready -\n0 bye\n", &got);
+    same(&got, "hello 1\n");
+    assert(query_saw("0 |-1 unknown provider-scope was not agreed|"));
+    rx_buf_free(&query_seen);
+    rx_buf_free(&got);
+    rx_buf_free(&want);
+}
 int main(void) {
     snippet_transform_wire();
     snippet_transform_programs();
@@ -956,6 +1178,7 @@ int main(void) {
     snippet_variants();
     command_removal_guards();
     cursors();
+    item_records();
     old_tests();
     locations();
     symbols();
@@ -968,6 +1191,7 @@ int main(void) {
     transform_requests();
     snippet_snapshot_requests();
     event_lengths();
+    query_requests();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

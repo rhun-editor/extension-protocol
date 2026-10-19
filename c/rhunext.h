@@ -20,7 +20,9 @@
  *
  * Features (section 12 of the spec) are asked for by name in rx_run: "views" for pictures in
  * tabs of their own; "complete", "signature", "definition", "references", "symbols", "actions",
- * "rename" and "format" for language support ("views complete definition").
+ * "rename" and "format" for language support ("views complete definition"). Protocol 1.1 adds
+ * "query-stream" (rx_stream_part, rx_stream_progress), "provider-scope" (rx_provides),
+ * "complete-items" (rx_list_item_extra, complete_resolve) and "signature-list" (signatures).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * MIT license. */
 #ifndef RHUNEXT_H
@@ -105,6 +107,21 @@ typedef struct {
     const char *kind;
 } rx_save_actions_ask;
 
+/* Protocol 1.1, complete-items: rhun resolves the selected item with its resolve data (data[len]
+ * is 0). Selecting another item withdraws it (a cancel event names id). */
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;            /* the list's: the resolution's edits are in the document then */
+    const unsigned char *data;
+    size_t len;
+} rx_resolve_ask;
+
+/* Protocol 1.1, query-stream: one of rhun's pending requests, handed to the *_stream handlers for
+ * rx_stream_part and rx_stream_progress. It is cancelled when rhun withdraws the request (a cancel
+ * event), answers a part cancelled or toobig, or the handler returns. */
+typedef struct { rx_ext *ext; int64_t id; } rx_stream;
+
 /* answers to 12d to 12h, built with rx_location, rx_symbol, rx_action and rx_wedit_file (below);
  * the fields are the builders' own */
 typedef struct { rx_buf recs; int n, full; } rx_locations;
@@ -143,6 +160,16 @@ typedef struct {
     int (*rename)(rx_ext *ext, const rx_rename_ask *req, rx_wedit *out, void *user);
     int (*format)(rx_ext *ext, const rx_format_ask *req, rx_wedit *out, void *user);
     int (*save_actions)(rx_ext *ext, const rx_save_actions_ask *req, rx_wedit *out, void *user);
+    /* Protocol 1.1. When set, the *_stream members answer complete, definition and references in
+     * place of the ones above; stream sends parts and progress (query-stream). complete_resolve
+     * (complete-items) appends the resolution (rx_resolve_answer) to out; signatures
+     * (signature-list: rhun sends it in place of signature) appends rx_signatures_answer. Each
+     * returns 1 to answer, 0 for "unknown". */
+    int (*complete_stream)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_buf *out, void *user);
+    int (*definition_stream)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_locations *out, void *user);
+    int (*references_stream)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_locations *out, void *user);
+    int (*complete_resolve)(rx_ext *ext, const rx_resolve_ask *req, rx_buf *out, void *user);
+    int (*signatures)(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -293,6 +320,54 @@ void rx_list_finish(rx_list *l, rx_buf *out);
 /* signature help (12c): the active parameter's bytes in the signature, from -1 for none */
 void rx_signature_answer(rx_buf *out, const char *signature, int from, int to, const char *doc);
 
+/* Protocol 1.1, complete-items: an item's other records, read by rhun with complete-items agreed.
+ * Start from a zeroed one (rx_item_extra x = {0};); NULL and 0 leave a record out, as does one that
+ * is not valid: resolve data that is empty or past 16 KiB, a replace range that does not start where
+ * the item's range does. commit keeps printable ASCII characters, at most 16, each once. */
+typedef struct {
+    const void *resolve;            /* data rhun hands back in complete-resolve */
+    size_t resolve_len;
+    int resolve_edits;              /* the resolution may add edits: accepting waits for it */
+    const rx_range *replace;        /* the range that replaces the rest of the word */
+    const char *commit;             /* characters that accept the item when typed */
+    const char *filter;             /* one line, matched and ranked instead of the label */
+    const char *suffix;             /* one line drawn after the label in the muted color */
+    int preselect, deprecated, adjust;  /* selected first; struck through; later lines indented */
+    int after_signature, after_complete;    /* after accepting: signature help, a new list */
+} rx_item_extra;
+/* rx_list_item_cursor with those records (extra NULL for none) */
+void rx_list_item_extra(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
+                        const char *detail, const char *doc, const rx_range *edits, const char *const *texts,
+                        int nedits, long cursor, const rx_item_extra *extra);
+/* the answer to complete-resolve, records only: detail (one line, replaces the item's) and doc NULL
+ * for none; edits as an item's, in the document at the list's version, apart from its range and
+ * other edits; then what rhun asks for after accepting */
+void rx_resolve_answer(rx_buf *out, const char *detail, const char *doc, const rx_range *edits,
+                       const char *const *texts, int nedits, int after_signature, int after_complete);
+/* signature-list: every overload, label one line, from -1 for no active parameter, doc NULL for
+ * none; active is zero-based (another value shows the first). At most 32; none appends nothing,
+ * which hides the help; past 64 KB the documentation goes, then overloads, until it fits. */
+typedef struct { const char *label; int from, to; const char *doc; } rx_signature_info;
+void rx_signatures_answer(rx_buf *out, const rx_signature_info *sigs, int n, int active);
+
+/* Protocol 1.1, query-stream: part of the answer to the stream's request, in the grammar of its
+ * answer (the count line and that many records), sent at once; it waits for rhun's reply, which is
+ * the flow control. 0, or -1 when rhun did not agree query-stream ("unknown", nothing sent), the
+ * stream is cancelled (nothing sent: stop working), or rhun answered an error: cancelled or toobig
+ * cancel the stream, and rhun keeps what it has. rx_error says which. */
+int rx_stream_part(rx_stream *s, const void *body, size_t len);
+/* the same with a builder's records, which it empties */
+int rx_stream_locations(rx_stream *s, rx_locations *l);
+int rx_stream_items(rx_stream *s, rx_list *l);
+/* how far the work has come: percent 0 to 100, or -1 for none; text one line, cut at 200 bytes at a
+ * character. Each report extends the request's time limit. */
+int rx_stream_progress(rx_stream *s, int percent, const char *text);
+/* whether rhun no longer needs the answer */
+int rx_stream_cancelled(const rx_stream *s);
+/* Protocol 1.1, provider-scope: the values rhun uses for a [provides] key until the process stops:
+ * a space-separated subset of the manifest's own values, "*" the manifest's, "-" none. */
+int rx_provides(rx_ext *ext, const char *key, const char *values);
+
 /* Definition and references (12d): a location is a file by its absolute path, or with path NULL
  * the open document doc (an untitled one), and a range there (in the open document when the file
  * is open, else in the file on disk); preview is its line's text, trimmed (NULL for none). One
@@ -359,6 +434,7 @@ const char *rx_event_tail(const rx_event *ev, int n);
 #define RX_MAXF 32
 #define RX_BODY_MAX ((long long)1 << 30)     /* the longest reply body read (text, range, ask) */
 #define RX_EVENT_BODY_MAX ((long long)4 << 20)  /* an edits or action event's: rhun sends less */
+#define RX_REQUEST_BODY_MAX ((long long)64 << 10)   /* one of rhun's 1.1 requests' (resolve data, ...) */
 
 typedef struct rx_msg {
     char *line;
@@ -370,9 +446,11 @@ typedef struct rx_msg {
 struct rx_ext {
     int64_t next_id;
     rx_msg *queue, *queue_tail;     /* messages that came while a request waited */
-    char features[256];
+    char features[1024];
     char error[512];
     int gone;
+    int64_t query_id;               /* the request of rhun's being answered, and whether rhun */
+    int query_cancelled;            /* withdrew it (query-stream) */
 };
 
 void rx_buf_add(rx_buf *b, const void *data, size_t len) {
@@ -495,9 +573,27 @@ static void rx_gone(rx_ext *ext, const char *why) {
 
 static const char rx_bad_len[] = "a body's length that is not a decimal of at most 10 digits within its cap";
 
-/* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
-static int rx_has_body(const char *line) {
-    return strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0;
+/* the messages followed by a body, LEN their last field, and its cap (0 for none): the events
+ * edits (6a) and action (12f), and rhun's 1.1 requests that carry data */
+static long long rx_body_cap(const char *line) {
+    static const char *const verbs[] = {"complete-resolve", "code-action-resolve", "calls-in", "calls-out",
+                                        "supertypes", "subtypes", "workspace-symbols", "selection-ranges"};
+    if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return RX_EVENT_BODY_MAX;
+    const char *verb = strchr(line, ' ');
+    if (line[0] < '1' || line[0] > '9' || !verb) return 0;
+    verb++;
+    for (size_t i = 0; i < sizeof verbs / sizeof verbs[0]; i++) {
+        size_t n = strlen(verbs[i]);
+        if (strncmp(verb, verbs[i], n) == 0 && verb[n] == ' ') return RX_REQUEST_BODY_MAX;
+    }
+    return 0;
+}
+
+/* whether a line is rhun's cancel of request id (a decimal), or its bye */
+static int rx_cancels(const char *line, const char *id) {
+    size_t n = strlen(id);
+    if (strcmp(line, "0 bye") == 0 || strncmp(line, "0 bye ", 6) == 0) return 1;
+    return strncmp(line, "0 cancel ", 9) == 0 && strncmp(line + 9, id, n) == 0 && line[9 + n] == 0;
 }
 
 /* reads the next message: a line, and a body when it is an edits or action event; NULL when the
@@ -511,8 +607,9 @@ static rx_msg *rx_read_msg(rx_ext *ext) {
     rx_msg *m = (rx_msg *)calloc(1, sizeof *m);
     if (!m) abort();
     m->line = line;
-    if (rx_has_body(line)) {
-        long long n = rx_body_len(line, RX_EVENT_BODY_MAX);
+    long long cap = rx_body_cap(line);
+    if (cap) {
+        long long n = rx_body_len(line, cap);
         if (n < 0 || !(m->body = rx_read_body((size_t)n))) {
             rx_gone(ext, n < 0 ? rx_bad_len : "rhun went away");
             free(line);
@@ -601,8 +698,14 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
         rx_msg *m = (rx_msg *)calloc(1, sizeof *m);
         if (!m) abort();
         m->line = l;
-        if (rx_has_body(l)) {
-            long long blen = rx_body_len(l, RX_EVENT_BODY_MAX);
+        if (ext->query_id) {
+            char qid[32];
+            snprintf(qid, sizeof qid, "%lld", (long long)ext->query_id);
+            if (rx_cancels(l, qid)) ext->query_cancelled = 1;
+        }
+        long long cap = rx_body_cap(l);
+        if (cap) {
+            long long blen = rx_body_len(l, cap);
             if (blen < 0 || !(m->body = rx_read_body((size_t)blen))) {
                 rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
                 rx_free_msg(m);
@@ -1567,6 +1670,45 @@ void rx_list_item_edits(rx_list *l, rx_range r, const char *kind, const char *la
 void rx_list_item_cursor(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
                          const char *detail, const char *doc, const rx_range *edits, const char *const *texts,
                          int nedits, long cursor) {
+    rx_list_item_extra(l, r, kind, label, insert, detail, doc, edits, texts, nedits, cursor, NULL);
+}
+
+static void rx_add_line(rx_buf *b, const char *s, size_t n);
+
+/* the complete-items records of an item whose range is r: only those that are valid */
+static void rx_item_records(const rx_item_extra *x, rx_range r, rx_buf *out) {
+    if (x->resolve && x->resolve_len > 0 && x->resolve_len <= (16u << 10)) {
+        rx_buf_fmt(out, "resolve %d %zu\n", x->resolve_edits ? 1 : 0, x->resolve_len);
+        rx_buf_add(out, x->resolve, x->resolve_len);
+    }
+    if (x->replace && x->replace->start.line == r.start.line && x->replace->start.col == r.start.col)
+        rx_buf_fmt(out, "replace %d %d %d %d 0\n", x->replace->start.line, x->replace->start.col,
+                   x->replace->end.line, x->replace->end.col);
+    char commit[17];
+    size_t cn = 0;
+    for (const char *c = x->commit; c && *c && cn < 16; c++)
+        if (*c >= 0x21 && *c <= 0x7e && !memchr(commit, *c, cn)) commit[cn++] = *c;
+    if (cn) {
+        rx_buf_fmt(out, "commit %zu\n", cn);
+        rx_buf_add(out, commit, cn);
+    }
+    const char *texts[2] = {x->filter, x->suffix}, *words[2] = {"filter", "suffix"};
+    for (int i = 0; i < 2; i++) {
+        if (!texts[i] || !*texts[i]) continue;
+        size_t n = strlen(texts[i]);
+        rx_buf_fmt(out, "%s %zu\n", words[i], n);
+        rx_add_line(out, texts[i], n);
+    }
+    if (x->preselect) rx_buf_str(out, "preselect 0\n");
+    if (x->deprecated) rx_buf_str(out, "deprecated 0\n");
+    if (x->adjust) rx_buf_str(out, "adjust 0\n");
+    if (x->after_signature) rx_buf_str(out, "after signature 0\n");
+    if (x->after_complete) rx_buf_str(out, "after complete 0\n");
+}
+
+void rx_list_item_extra(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
+                        const char *detail, const char *doc, const rx_range *edits, const char *const *texts,
+                        int nedits, long cursor, const rx_item_extra *more) {
     rx_buf extra = {NULL, 0, 0};
     for (int i = 0; i < nedits; i++) {
         size_t n = strlen(texts[i]);
@@ -1584,6 +1726,7 @@ void rx_list_item_cursor(rx_list *l, rx_range r, const char *kind, const char *l
     size_t ll = rx_one_line_len(label), il = strlen(insert), dl = rx_one_line_len(detail);
     if (cursor >= 0 && (size_t)cursor <= il && ((size_t)cursor == il || ((unsigned char)insert[cursor] & 0xc0) != 0x80))
         rx_buf_fmt(&extra, "cursor %ld 0\n", cursor);
+    if (more) rx_item_records(more, r, &extra);
     size_t size = 64 + ll + il + dl + extra.len;
     if (l->n >= 4096 || l->items.len + size > (1u << 20) - 64) {
         l->more = 1;                    /* past the caps: typing asks again */
@@ -1947,6 +2090,139 @@ const char *rx_event_tail(const rx_event *ev, int n) {
     return p ? p : "";
 }
 
+/* ---- protocol 1.1 language features: query-stream, provider-scope, complete-items, signature-list */
+
+void rx_resolve_answer(rx_buf *out, const char *detail, const char *doc, const rx_range *edits,
+                       const char *const *texts, int nedits, int after_signature, int after_complete) {
+    if (detail) {
+        size_t n = strlen(detail);
+        rx_buf_fmt(out, "detail %zu\n", n);
+        rx_add_line(out, detail, n);
+    }
+    if (doc && *doc) {
+        size_t n = strlen(doc);
+        rx_buf_fmt(out, "doc %zu\n", n);
+        rx_buf_add(out, doc, n);
+    }
+    for (int i = 0; i < nedits; i++) {
+        size_t n = strlen(texts[i]);
+        rx_buf_fmt(out, "edit %d %d %d %d %zu\n", edits[i].start.line, edits[i].start.col, edits[i].end.line,
+                   edits[i].end.col, n);
+        rx_buf_add(out, texts[i], n);
+    }
+    if (after_signature) rx_buf_str(out, "after signature 0\n");
+    if (after_complete) rx_buf_str(out, "after complete 0\n");
+}
+
+void rx_signatures_answer(rx_buf *out, const rx_signature_info *sigs, int n, int active) {
+    if (n > 32) n = 32;
+    if (!sigs || n <= 0) return;
+    if (active < 0 || active >= n) active = 0;
+    rx_buf b = {NULL, 0, 0};
+    int docs = 0;
+    rx_buf_fmt(&b, "%d %d\n", n, active);
+    for (int i = 0; i < n; i++) {
+        const char *label = sigs[i].label ? sigs[i].label : "", *doc = sigs[i].doc ? sigs[i].doc : "";
+        size_t ll = strlen(label), dl = strlen(doc);
+        int from = sigs[i].from, to = sigs[i].to;
+        if (from < 0 || to < from || (size_t)to > ll) from = to = -1;
+        rx_buf_fmt(&b, "%d %d %zu %zu\n", from, to, ll, dl);
+        rx_add_line(&b, label, ll);
+        rx_buf_add(&b, doc, dl);
+        docs += dl > 0;
+    }
+    if (b.len <= 65536) {
+        rx_buf_add(out, b.data, b.len);
+    } else if (n > 1 || docs) {         /* the documentation goes, then overloads, until it fits */
+        rx_signature_info fewer[32];
+        int m = n / 2 > 1 ? n / 2 : 1;
+        for (int i = 0; i < m; i++) {
+            fewer[i] = sigs[i];
+            fewer[i].doc = NULL;
+        }
+        rx_signatures_answer(out, fewer, m, 0);
+    }                                   /* else a signature that does not fit on its own: none */
+    rx_buf_free(&b);
+}
+
+/* whether rx_error's code is code */
+static int rx_error_is(rx_ext *ext, const char *code) {
+    size_t n = strlen(code);
+    return strncmp(ext->error, code, n) == 0 && (ext->error[n] == ' ' || ext->error[n] == 0);
+}
+
+int rx_stream_cancelled(const rx_stream *s) {
+    return !s || !s->ext || s->ext->gone || s->ext->query_id != s->id || s->ext->query_cancelled;
+}
+
+static int rx_stream_check(rx_stream *s) {
+    if (!s || !s->ext) return -1;
+    if (!rx_has(s->ext, "query-stream")) {
+        snprintf(s->ext->error, sizeof s->ext->error, "unknown query-stream was not agreed");
+        return -1;
+    }
+    if (rx_stream_cancelled(s)) {
+        snprintf(s->ext->error, sizeof s->ext->error, "cancelled rhun no longer needs the answer");
+        return -1;
+    }
+    return 0;
+}
+
+int rx_stream_part(rx_stream *s, const void *body, size_t len) {
+    if (rx_stream_check(s) < 0) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "query-part %lld %zu", (long long)s->id, len);
+    int r = rx_request(s->ext, line, body, len, NULL, NULL);
+    if (r < 0 && (rx_error_is(s->ext, "cancelled") || rx_error_is(s->ext, "toobig"))) s->ext->query_cancelled = 1;
+    return r;
+}
+
+int rx_stream_locations(rx_stream *s, rx_locations *l) {
+    rx_buf b = {NULL, 0, 0};
+    rx_locations_finish(l, &b);
+    int r = rx_stream_part(s, b.data, b.len);
+    rx_buf_free(&b);
+    return r;
+}
+
+int rx_stream_items(rx_stream *s, rx_list *l) {
+    rx_buf b = {NULL, 0, 0};
+    rx_list_finish(l, &b);
+    int r = rx_stream_part(s, b.data, b.len);
+    rx_buf_free(&b);
+    return r;
+}
+
+int rx_stream_progress(rx_stream *s, int percent, const char *text) {
+    if (rx_stream_check(s) < 0) return -1;
+    char p[16] = "-", line[96];
+    if (percent >= 0) snprintf(p, sizeof p, "%d", percent > 100 ? 100 : percent);
+    if (!text) text = "";
+    rx_buf t = {NULL, 0, 0};
+    rx_add_line(&t, text, rx_cut(text, strlen(text), 200));
+    snprintf(line, sizeof line, "query-progress %lld %s %zu", (long long)s->id, p, t.len);
+    int r = rx_request(s->ext, line, t.data, t.len, NULL, NULL);
+    if (r < 0 && rx_error_is(s->ext, "cancelled")) s->ext->query_cancelled = 1;
+    rx_buf_free(&t);
+    return r;
+}
+
+int rx_provides(rx_ext *ext, const char *key, const char *values) {
+    if (!rx_has(ext, "provider-scope")) {
+        snprintf(ext->error, sizeof ext->error, "unknown provider-scope was not agreed");
+        return -1;
+    }
+    if (!key || !*key || strpbrk(key, " \r\n") || !values || !*values || strpbrk(values, "\r\n")) {
+        snprintf(ext->error, sizeof ext->error, "syntax a key is one word and values one line");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "provides %s %s", key, values);
+    int r = rx_request(ext, line.data, NULL, 0, NULL, NULL);
+    rx_buf_free(&line);
+    return r;
+}
+
 /* ---- the loop */
 
 /* fields f[from] to f[to - 1] are numbers: digits only */
@@ -1960,16 +2236,24 @@ static int rx_nums(char **f, int from, int to) {
     return 1;
 }
 
-static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n) {
+static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                      const unsigned char *data, size_t data_len) {
     /* ID VERB DOC VERSION, then LINE COL KIND CHAR (12b to 12e), L1 C1 L2 C2 (actions), LINE COL
-     * invoked NAME (rename) or TAB_WIDTH SPACES (format) */
+     * invoked NAME (rename), TAB_WIDTH SPACES (format) or LEN and a body (complete-resolve) */
     const char *verb = f[1];
     int ok = 0;
     rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
     rx_wedit e;
     memset(&e, 0, sizeof e);
+    /* the stream of this request: cancelled by a cancel event that came already, or comes while
+     * a request of the handler's waits */
+    rx_stream stream = {ext, atoll(f[0])};
+    ext->query_id = stream.id;
+    ext->query_cancelled = 0;
+    for (rx_msg *q = ext->queue; q; q = q->next)
+        if (rx_cancels(q->line, f[0])) ext->query_cancelled = 1;
     int is_pos = strcmp(verb, "definition") == 0 || strcmp(verb, "references") == 0 || strcmp(verb, "symbols") == 0;
-    if ((strcmp(verb, "complete") == 0 || strcmp(verb, "signature") == 0) && n >= 8) {
+    if ((strcmp(verb, "complete") == 0 || strcmp(verb, "signature") == 0 || strcmp(verb, "signatures") == 0) && n >= 8) {
         rx_ask req;
         req.id = atoll(f[0]);
         req.doc = atoll(f[2]);
@@ -1978,8 +2262,11 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.at.col = atoi(f[5]);
         req.kind = f[6];
         req.ch = strcmp(f[6], "trigger") == 0 ? f[7] : "";
-        if (strcmp(verb, "complete") == 0 && h->complete) ok = h->complete(ext, &req, &body, user);
+        if (strcmp(verb, "complete") == 0 && h->complete_stream) ok = h->complete_stream(ext, &req, &stream, &body, user);
+        else if (strcmp(verb, "complete") == 0 && h->complete) ok = h->complete(ext, &req, &body, user);
         else if (strcmp(verb, "signature") == 0 && h->signature) ok = h->signature(ext, &req, &body, user);
+        else if (strcmp(verb, "signatures") == 0 && h->signatures && rx_has(ext, "signature-list"))
+            ok = h->signatures(ext, &req, &body, user);
     } else if (is_pos && n >= 6 && rx_nums(f, 2, 6)) {
         rx_ask req;
         req.id = atoll(f[0]);
@@ -1998,7 +2285,11 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             rx_locations l;
             memset(&l, 0, sizeof l);
             int (*fn)(rx_ext *, const rx_ask *, rx_locations *, void *) = verb[0] == 'd' ? h->definition : h->references;
-            if (fn && (ok = fn(ext, &req, &l, user)) != 0) rx_locations_finish(&l, &body);
+            int (*sfn)(rx_ext *, const rx_ask *, rx_stream *, rx_locations *, void *) =
+                verb[0] == 'd' ? h->definition_stream : h->references_stream;
+            if (sfn) ok = sfn(ext, &req, &stream, &l, user);
+            else if (fn) ok = fn(ext, &req, &l, user);
+            if (ok) rx_locations_finish(&l, &body);
             rx_buf_free(&l.recs);
         }
     } else if (strcmp(verb, "actions") == 0 && n >= 8 && rx_nums(f, 2, 8) && h->actions) {
@@ -2040,7 +2331,18 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             req.kind = f[4];
             if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
         }
+    } else if (strcmp(verb, "complete-resolve") == 0 && n == 5 && rx_nums(f, 2, 5) && h->complete_resolve &&
+               rx_has(ext, "complete-items") && (size_t)atoll(f[4]) == data_len) {
+        rx_resolve_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.data = data ? data : (const unsigned char *)"";
+        req.len = data_len;
+        ok = h->complete_resolve(ext, &req, &body, user);
     }
+    ext->query_id = 0;
+    ext->query_cancelled = 0;
     if (ok && e.fail) {
         rx_buf_fmt(&line, "error %s %s %s", f[0], e.fail, e.why);     /* why is one line */
         rx_write(line.data, NULL, 0);
@@ -2084,7 +2386,7 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
     static rx_ext ext_s;
     rx_ext *ext = &ext_s;
     memset(ext, 0, sizeof *ext);
-    char hello[300];
+    char hello[1100];
     snprintf(hello, sizeof hello, "hello 1%s%s", features && *features ? " " : "", features ? features : "");
     rx_write(hello, NULL, 0);
     for (;;) {
@@ -2126,7 +2428,7 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 done = 1;
             }
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9') {
-            rx_answer(ext, h, user, f, n);
+            rx_answer(ext, h, user, f, n, m->body, m->body_len);
         }
         free(copy);
         rx_free_msg(m);
