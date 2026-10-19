@@ -162,6 +162,14 @@
           ],
           "default": "none",
           "description": "read the project's Git data through rhun (feature git-data); shown as 'read the project's Git history'"
+        },
+        "secrets": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "store passwords and tokens in the system keychain (feature secrets)"
         }
       },
       "additionalProperties": false
@@ -255,9 +263,36 @@
           ],
           "default": "no",
           "description": "a version control provider (feature scm): it registers Source Control tabs at run time"
+        },
+        "schemes": {
+          "type": "string",
+          "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
         }
       },
       "additionalProperties": false
+    },
+    "idle": {
+      "enum": [
+        "keep",
+        "stop"
+      ],
+      "default": "keep",
+      "description": "stop: rhun stops the extension after idle.after seconds without work"
+    },
+    "idle.after": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 86400,
+      "default": 300,
+      "description": "seconds without work before an idle = stop extension is stopped"
+    },
+    "runs": {
+      "enum": [
+        "workspace",
+        "local"
+      ],
+      "default": "workspace",
+      "description": "where it runs; both mean this computer in 0.18.0"
     }
   },
   "$defs": {

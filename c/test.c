@@ -552,6 +552,69 @@ static void event_lengths(void) {
     rx_buf_free(&in);
 }
 
+static int resources_ok;
+static void on_ready_resources(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    unsigned char *v = NULL;
+    size_t n = 0;
+    assert(rx_secret_set(ext, "token", "abc", 3) == 0);
+    assert(rx_secret_get(ext, "token", &v, &n) == 1 && n == 3 && memcmp(v, "abc", 3) == 0);
+    free(v);
+    assert(rx_secret_get(ext, "none", &v, &n) == 0);
+    char *keys = rx_secret_keys(ext, &n);
+    assert(keys && n == 6 && strcmp(keys, "token\n") == 0);
+    free(keys);
+    assert(rx_secret_delete(ext, "token") == 0);
+    assert(rx_busy(ext, 1) == 0);
+    assert(rx_secret_get(ext, "Bad", &v, &n) == -1 && strncmp(rx_error(ext), "syntax ", 7) == 0);
+    assert(rx_secret_set(ext, "big", "", 8193) == -1 && strncmp(rx_error(ext), "toobig ", 7) == 0);
+    resources_ok = 1;
+}
+
+static int content_answer(rx_ext *ext, const char *uri, rx_content *out, void *user) {
+    (void)ext, (void)user;
+    if (strcmp(uri, "res-gen:/a b.txt") != 0) return 0;
+    out->lang = "Visual Basic";
+    out->title = "t";
+    out->text = "hi\n";
+    out->text_len = 3;
+    return 1;
+}
+static char closed_uri[64];
+static void on_content_closed(rx_ext *ext, const char *uri, void *user) {
+    (void)ext, (void)user;
+    snprintf(closed_uri, sizeof closed_uri, "%s", uri);
+}
+
+/* the resources group: idle, secrets, uris */
+static void resources_requests(void) {
+    rx_ext none = {0};
+    assert(rx_busy(&none, 1) == -1 && strncmp(rx_error(&none), "unknown ", 8) == 0);
+    assert(rx_secret_keys(&none, NULL) == NULL && strncmp(rx_error(&none), "unknown ", 8) == 0);
+    assert(rx_secret_key_valid("github.token-2_x") && !rx_secret_key_valid("A") && !rx_secret_key_valid(""));
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_resources;
+    rx_buf got = {NULL, 0, 0};
+    const char *input = "0 features idle secrets\n0 ready -\nok 1\nok 2 1 3\nabcok 3 0 0\nok 4 6\ntoken\n"
+                        "ok 5\nok 6\n0 bye\n";
+    run_bytes("idle secrets", &h, input, strlen(input), &got);
+    same(&got, "hello 1 idle secrets\n1 secret-set token 3\nabc2 secret-get token\n3 secret-get none\n"
+               "4 secret-keys\n5 secret-delete token\n6 busy yes\n");
+    assert(resources_ok);
+    rx_buf_clear(&got);
+    assert(rx_uri_valid("lsp-expand:/a/main.rs") && !rx_uri_valid("C:x") && !rx_uri_valid("Ab:x") && !rx_uri_valid("ab:"));
+    memset(&h, 0, sizeof h);
+    h.content = content_answer;
+    h.content_closed = on_content_closed;
+    input = "0 features uris\n0 ready -\n7 content res-gen:/a b.txt\n8 content res-gen:/none\n"
+            "0 content-closed res-gen:/a b.txt\n0 bye\n";
+    run_bytes("uris", &h, input, strlen(input), &got);
+    same(&got, "hello 1 uris\nok 7 23\n12 1 3\nVisual_Basicthi\nerror 8 nofile no such document\n");
+    assert(strcmp(closed_uri, "res-gen:/a b.txt") == 0);
+    rx_buf_free(&got);
+}
+
 static void cursors(void) {
     rx_list l = {0};
     rx_range r = {{0, 0}, {0, 0}};
@@ -1010,6 +1073,7 @@ int main(void) {
     transform_requests();
     snippet_snapshot_requests();
     event_lengths();
+    resources_requests();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

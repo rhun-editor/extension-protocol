@@ -42,6 +42,7 @@ pub mod snippet_context;
 pub mod snippet_transform;
 pub mod views;
 pub mod watch;
+pub mod resources;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -162,6 +163,12 @@ pub enum Feature {
     /// Retained views: manifest `[views]`, [`Ext::patch`], [`Ext::vshow`],
     /// [`Handler::view_open`] and [`Handler::view_event`] (protocol 1.1, [`views`]).
     ViewTree,
+    /// Not stopped for idleness while busy: [`Ext::busy`] (resources group).
+    Idle,
+    /// Passwords and tokens in the system keychain: [`Ext::secret_get`] and the others.
+    Secrets,
+    /// URIs and virtual documents: [`Handler::content`], [`Ext::open_uri`], [`Ext::content_changed`].
+    Uris,
 }
 
 impl Feature {
@@ -186,6 +193,9 @@ impl Feature {
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
             Feature::ViewTree => "view-tree",
+            Feature::Idle => "idle",
+            Feature::Secrets => "secrets",
+            Feature::Uris => "uris",
         }
     }
 }
@@ -595,6 +605,13 @@ pub trait Handler: Send {
     }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
+    /// rhun asks for a virtual document's text (feature `uris`): a URI of one of the schemes in
+    /// `[provides] schemes`. An error shows in the document's tab.
+    fn content(&mut self, _ext: &Ext, _uri: &str) -> Result<resources::Content, String> {
+        Err("no such document".into())
+    }
+    /// The last tab showing a virtual document of this extension closed.
+    fn content_closed(&mut self, _ext: &Ext, _uri: &str) {}
 }
 
 enum Msg {
@@ -1140,6 +1157,8 @@ impl Ext {
                                 | "git-blame"
                                 | "git-log"
                                 | "git-show"
+                                | "secret-get"
+                                | "secret-keys"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1299,6 +1318,7 @@ impl Ext {
                             }
                         }
                         "action" => h.action(self, &ev.body),
+                        "content-closed" => h.content_closed(self, &ev.rest),
                         "bye" => {
                             h.bye(self);
                             break;
@@ -1350,6 +1370,11 @@ impl Ext {
                                 }
                             })
                         }
+                        "content" if self.has(Feature::Uris) => Some(
+                            h.content(self, &fields.join(" "))
+                                .map_err(|why| ("nofile", why))
+                                .and_then(|c| c.encode().map_err(|why| ("toobig", why))),
+                        ),
                         "save-actions" if self.has(Feature::SaveActions) => {
                             SaveActionsRequest::parse(id, &fields).map(|r| {
                                 match h.save_actions(self, &r) {

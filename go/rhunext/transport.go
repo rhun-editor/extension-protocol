@@ -191,6 +191,7 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		return Reply{}, err
 	}
 	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output" ||
+		verb == "secret-get" || verb == "secret-keys" ||
 		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()

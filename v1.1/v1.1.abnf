@@ -78,3 +78,30 @@ host-request =/ id SP "commit-message" SP len
 feature      =/ "quickdiff"
 host-request =/ id SP "quickdiff" SP doc SP version
 request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"
+
+; Resources group. idle: an idle = stop extension stays while busy.
+feature      =/ "idle"
+request      =/ id SP r-busy
+r-busy       = "busy" SP ( "yes" / "no" )
+
+; secrets: needs [needs] secrets = yes. KEY is 1..64 of a-z 0-9 _ . -; values 0..8192 bytes.
+feature      =/ "secrets"
+request      =/ id SP ( r-secret-get / r-secret-set / r-secret-delete / r-secret-keys )
+secret-key   = 1*64( %x61-7A / DIGIT / "_" / "." / "-" )
+r-secret-get = "secret-get" SP secret-key
+              ; ok ID 1 LEN + the value, or ok ID 0 0
+r-secret-set = "secret-set" SP secret-key SP len
+r-secret-delete = "secret-delete" SP secret-key
+r-secret-keys = "secret-keys"
+              ; ok ID LEN + the keys, each followed by LF
+
+; uris: resources SCHEME:REST; a provider declares [provides] schemes.
+feature      =/ "uris"
+uri          = uri-scheme ":" 1*4095( %x01-09 / %x0B-0C / %x0E-FF )
+uri-scheme   = %x61-7A 1*31( %x61-7A / DIGIT / "+" / "." / "-" )
+request      =/ id SP "open" SP num SP num SP uri / id SP r-content-changed
+r-content-changed = "content-changed" SP uri
+host-request =/ id SP "content" SP uri
+content-head = len SP len SP len LF
+              ; LANG TITLE TEXT lengths, then exactly those bytes; TEXT UTF-8, at most 4 MiB
+event        =/ "0" SP "content-closed" SP uri

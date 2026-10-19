@@ -124,6 +124,13 @@ struct rx_view_open;            /* retained views, below */
 struct rx_retained_event;
 struct rx_children_ask;
 struct rx_patch_s;
+/* a virtual document's text (feature uris): lang a grammar name or "", title or "", text_len bytes
+ * of UTF-8 (at most 4 MiB); the pointers stay the handler's */
+typedef struct {
+    const char *lang, *title, *text;
+    size_t text_len;
+} rx_content;
+
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -164,6 +171,11 @@ typedef struct {
      * has): build the patch in out (a kids or add op for the node) and return 1; 0 for "unknown";
      * set out->fail to a reason to refuse */
     int (*view_children)(rx_ext *ext, const struct rx_children_ask *req, struct rx_patch_s *out, void *user);
+    /* Resources group, feature uris: fill out for a URI of one of the schemes in [provides]
+     * schemes and return 1, or return 0 for "nofile"; content_closed: the last tab showing it
+     * closed. */
+    int (*content)(rx_ext *ext, const char *uri, rx_content *out, void *user);
+    void (*content_closed)(rx_ext *ext, const char *uri, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -267,6 +279,21 @@ int rx_unregister(rx_ext *ext, const char *name);
 int64_t rx_watch_workspace(rx_ext *ext);
 int rx_unwatch_workspace(rx_ext *ext, int64_t watch);
 int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan);
+/* Resources group (protocol 1.1). Feature "idle": not stopped for idleness while busy. */
+int rx_busy(rx_ext *ext, int busy);
+/* Feature "secrets" ([needs] secrets = yes): KEY is 1 to 64 bytes of a-z 0-9 _ . -, a value at
+ * most 8192 bytes. rx_secret_get: 1 with the value in *value (malloc'd, free() it) and its bytes
+ * in *len, 0 when nothing is stored, -1 on an error. rx_secret_keys: the keys, each followed by LF
+ * (malloc'd, NUL-terminated, free() it), or NULL on an error. */
+int rx_secret_get(rx_ext *ext, const char *key, unsigned char **value, size_t *len);
+int rx_secret_set(rx_ext *ext, const char *key, const void *value, size_t len);
+int rx_secret_delete(rx_ext *ext, const char *key);
+char *rx_secret_keys(rx_ext *ext, size_t *len);
+int rx_secret_key_valid(const char *key);
+/* Feature uris: SCHEME:REST, SCHEME [a-z][a-z0-9+.-] of 2 to 32 bytes, REST 1 to 4095 bytes
+ * without LF, CR or NUL. rx_open takes a URI too; rx_content_changed asks rhun to read again. */
+int rx_uri_valid(const char *uri);
+int rx_content_changed(rx_ext *ext, const char *uri);
 /* Source control (protocol 1.1). Feature "git-data" with [needs] git = read: rhun's Git data.
  * Requests return 0 on ok (-1 and rx_error otherwise); results own their body: free them with
  * their _free function. Strings point into the body and are not NUL-terminated (use the lengths).
@@ -736,6 +763,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     int context_body = strncmp(verb_args, "snippet-context ", 16) == 0;
     int wants_body = strncmp(verb_args, "text ", 5) == 0 || strncmp(verb_args, "range ", 6) == 0 ||
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
+                     strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0 ||
+
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
                      strncmp(verb_args, "git-show ", 9) == 0;
@@ -907,6 +936,109 @@ int64_t rx_watch_workspace(rx_ext *ext) {
         return -1;
     }
     return watch;
+}
+
+int rx_busy(rx_ext *ext, int busy) {
+    if (!rx_has(ext, "idle")) {
+        snprintf(ext->error, sizeof ext->error, "unknown idle feature was not agreed");
+        return -1;
+    }
+    return rx_request(ext, busy ? "busy yes" : "busy no", NULL, 0, NULL, NULL);
+}
+
+int rx_uri_valid(const char *uri) {
+    const char *colon = uri ? strchr(uri, ':') : NULL;
+    if (!colon || colon - uri < 2 || colon - uri > 32 || uri[0] < 'a' || uri[0] > 'z') return 0;
+    for (const char *p = uri; p < colon; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '+' || *p == '.' || *p == '-')) return 0;
+    size_t rest = strlen(colon + 1);
+    return rest >= 1 && rest <= 4095 && !strpbrk(colon + 1, "\r\n");
+}
+
+int rx_content_changed(rx_ext *ext, const char *uri) {
+    if (!rx_has(ext, "uris")) {
+        snprintf(ext->error, sizeof ext->error, "unknown uris feature was not agreed");
+        return -1;
+    }
+    if (!rx_uri_valid(uri)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid URI");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "content-changed %s", uri);
+    int r = rx_request(ext, line.data, NULL, 0, NULL, NULL);
+    rx_buf_free(&line);
+    return r;
+}
+
+int rx_secret_key_valid(const char *key) {
+    size_t n = key ? strlen(key) : 0;
+    return n >= 1 && n <= 64 && strspn(key, "abcdefghijklmnopqrstuvwxyz0123456789_.-") == n;
+}
+
+static int rx_secret_check(rx_ext *ext, const char *key) {
+    if (!rx_has(ext, "secrets")) {
+        snprintf(ext->error, sizeof ext->error, "unknown secrets feature was not agreed");
+        return -1;
+    }
+    if (key && !rx_secret_key_valid(key)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid secret key");
+        return -1;
+    }
+    return 0;
+}
+
+int rx_secret_get(rx_ext *ext, const char *key, unsigned char **value, size_t *len) {
+    if (rx_secret_check(ext, key ? key : "")) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "secret-get %s", key);
+    rx_buf f = {NULL, 0, 0}, b = {NULL, 0, 0};
+    if (rx_request(ext, line, NULL, 0, &f, &b) < 0) {
+        rx_buf_free(&f);
+        rx_buf_free(&b);
+        return -1;
+    }
+    int found = f.data && f.data[0] == '1';
+    rx_buf_free(&f);
+    if (!found) {
+        rx_buf_free(&b);
+        return 0;
+    }
+    if (!b.data) rx_buf_add(&b, "", 0);
+    if (len) *len = b.len;
+    if (value) *value = (unsigned char *)b.data;
+    else rx_buf_free(&b);
+    return 1;
+}
+
+int rx_secret_set(rx_ext *ext, const char *key, const void *value, size_t len) {
+    if (rx_secret_check(ext, key ? key : "")) return -1;
+    if (len > 8192) {
+        snprintf(ext->error, sizeof ext->error, "toobig a value is at most 8192 bytes");
+        return -1;
+    }
+    char line[112];
+    snprintf(line, sizeof line, "secret-set %s %zu", key, len);
+    return rx_request(ext, line, value, len, NULL, NULL);
+}
+
+int rx_secret_delete(rx_ext *ext, const char *key) {
+    if (rx_secret_check(ext, key ? key : "")) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "secret-delete %s", key);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+char *rx_secret_keys(rx_ext *ext, size_t *len) {
+    if (rx_secret_check(ext, NULL)) return NULL;
+    rx_buf b = {NULL, 0, 0};
+    if (rx_request(ext, "secret-keys", NULL, 0, NULL, &b) < 0) {
+        rx_buf_free(&b);
+        return NULL;
+    }
+    if (!b.data) rx_buf_add(&b, "", 0);
+    if (len) *len = b.len;
+    return b.data;
 }
 
 int rx_unwatch_workspace(rx_ext *ext, int64_t watch) {
@@ -2468,6 +2600,32 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.tab_width = atoi(f[4]);
         req.spaces = strcmp(f[5], "yes") == 0;
         if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+    } else if (strcmp(verb, "content") == 0 && n >= 3 && h->content && rx_has(ext, "uris")) {
+        rx_buf uri = {NULL, 0, 0};
+        for (int i = 2; i < n; i++) {
+            if (i > 2) rx_buf_add(&uri, " ", 1);
+            rx_buf_str(&uri, f[i]);
+        }
+        rx_content c;
+        memset(&c, 0, sizeof c);
+        if (h->content(ext, uri.data, &c, user)) {
+            const char *lang = c.lang ? c.lang : "", *title = c.title ? c.title : "";
+            if (strlen(lang) > 255 || strlen(title) > 255 || c.text_len > (4u << 20)) {
+                e.fail = "toobig";
+                snprintf(e.why, sizeof e.why, "a language or title over 255 bytes or a text over 4 MiB");
+            } else {
+                rx_buf_fmt(&body, "%zu %zu %zu\n", strlen(lang), strlen(title), c.text_len);
+                for (const char *p = lang; *p; p++) rx_buf_add(&body, *p == ' ' ? "_" : p, 1);
+                rx_buf_str(&body, title);
+                rx_buf_add(&body, c.text ? c.text : "", c.text_len);
+            }
+            ok = 1;
+        } else {
+            e.fail = "nofile";
+            snprintf(e.why, sizeof e.why, "no such document");
+            ok = 1;
+        }
+        rx_buf_free(&uri);
     } else if (strcmp(verb, "save-actions") == 0 && n == 5 && h->save_actions && rx_has(ext, "save-actions")) {
         rx_save_actions_ask req;
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
@@ -2782,6 +2940,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
             } else if (strcmp(f[1], "view") == 0) {
                 if (!rx_retained_dispatch(ext, h, user, f, n, m->body, m->body_len) && h->view)
                     rx_view_dispatch(ext, h, user, f, n);
+            } else if (strcmp(f[1], "content-closed") == 0 && h->content_closed) {
+                h->content_closed(ext, ev.rest, user);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "bye") == 0) {
