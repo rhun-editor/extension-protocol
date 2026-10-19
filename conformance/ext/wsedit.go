@@ -344,7 +344,8 @@ func (h *host) checkTx(b []byte) (tx, string, int, string) {
 			}
 		}
 		for _, g := range t.groups {
-			if g.path != "" && !h.inProject(g.path) {
+			// a file that is not open, or an open document without unsaved changes (written too)
+			if d := h.openDoc(g.raw); g.path != "" && (d == nil || !d.dirty) && !h.inProject(g.path) {
 				return bad("needs", g.entry, "entry %d: %s is outside the project (needs project=write)", g.entry, g.path)
 			}
 		}
