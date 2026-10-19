@@ -2,7 +2,7 @@ package main
 
 // Notifications and progress (protocol 1.1, features notify and progress): the checker reads
 // every card and progress request against the grammar and the limits, answers them as rhun does
-// (a NOTE or P that is gone is answered ok), and later presses a button without a command,
+// (a NOTE or P that is gone is noview), and later presses a button without a command,
 // closes the other cards and presses Cancel on cancellable progress.
 
 import (
@@ -145,14 +145,21 @@ func (h *host) notifyRequest(id int64, verb string, args []string, body []byte, 
 			syntax(why)
 			return
 		}
-		if st := h.notes[n]; st != nil {
-			st.pressable = pressable
+		st := h.notes[n]
+		if st == nil {
+			rerr("noview", "no such notification")
+			return
 		}
+		st.pressable = pressable
 		reply(fmt.Sprintf("ok %d", id))
 	case "unnotify":
 		n, ok := num(firstArg(args))
 		if len(args) != 1 || !ok {
 			syntax("unnotify NOTE")
+			return
+		}
+		if h.notes[n] == nil {
+			rerr("noview", "no such notification")
 			return
 		}
 		delete(h.notes, n)
@@ -188,9 +195,13 @@ func (h *host) notifyRequest(id int64, verb string, args []string, body []byte, 
 		h.progs[h.noteSeq] = &progState{cancel: args[1] == "cancel"}
 		reply(fmt.Sprintf("ok %d %d", id, h.noteSeq))
 	case "progress-set":
-		_, ok := num(firstArg(args))
+		pn, ok := num(firstArg(args))
 		if len(args) != 3 || !ok {
 			syntax("progress-set P PERCENT LEN")
+			return
+		}
+		if h.progs[pn] == nil {
+			rerr("noview", "no such progress")
 			return
 		}
 		if args[1] != "-" {
@@ -205,6 +216,10 @@ func (h *host) notifyRequest(id int64, verb string, args []string, body []byte, 
 		n, ok := num(firstArg(args))
 		if len(args) != 1 || !ok {
 			syntax("progress-end P")
+			return
+		}
+		if h.progs[n] == nil {
+			rerr("noview", "no such progress")
 			return
 		}
 		delete(h.progs, n)

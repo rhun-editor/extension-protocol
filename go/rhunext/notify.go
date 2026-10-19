@@ -110,7 +110,7 @@ func (e *Ext) Notify(severity string, n *Note) (int64, error) {
 	return argInt(r, 0), nil
 }
 
-// NotifySet replaces a card's content (a card that is gone: nothing happens).
+// NotifySet replaces a card's content (noview when it is gone: closed by the user, timed out).
 func (e *Ext) NotifySet(note int64, n *Note) error {
 	body := n.Bytes()
 	_, err := e.Request("notify-set", body, itoa(note), itoa(int64(len(body))))

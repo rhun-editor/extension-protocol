@@ -1146,7 +1146,7 @@ impl Ext {
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
-    /// Replaces a card's content (a card that is gone: nothing happens).
+    /// Replaces a card's content (`noview` when it is gone: closed by the user, timed out).
     pub fn notify_set(&self, note: u64, content: &notify::Note) -> Result<(), Error> {
         self.request(&format!("notify-set {note}"), Some(&content.encode())).map(|_| ())
     }
