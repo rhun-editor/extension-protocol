@@ -23,7 +23,7 @@ import (
 )
 
 // providerFeatures are the features that name files in [provides] (all but views)
-var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions"}
+var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions", "tests"}
 
 // symbolKinds are the kinds 12e lists; another is shown as given
 var symbolKinds = func() map[string]bool {

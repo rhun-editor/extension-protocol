@@ -184,6 +184,7 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
+	tests       *testState // feature tests (tests.go)
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -356,7 +357,8 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
+	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1044,6 +1046,8 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "test-items", "test-remove", "test-update", "test-coverage", "test-end", "test-exec":
+		h.testRequest(id, verb, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1296,7 +1300,13 @@ func main() {
 	if m.protocol != 1 {
 		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
 	}
-	if len(m.commands) == 0 {
+	provider := false // started by a file its [provides] patterns match (or by Testing)
+	for k, v := range m.provides {
+		if !strings.Contains(k, ".") && strings.TrimSpace(v) != "" && strings.TrimSpace(v) != "no" {
+			provider = true
+		}
+	}
+	if len(m.commands) == 0 && !provider {
 		h.fail("manifest", "no [commands]: the extension can never be started on a command")
 	}
 	// the rules of v1/v1.json
@@ -1342,7 +1352,7 @@ func main() {
 		}
 	}
 	for k := range m.provides {
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
+		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" && k != "tests.profiles" {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
 	}
@@ -1357,6 +1367,13 @@ func main() {
 			ok = v == "no" || v == "yes"
 		case "run":
 			ok = true
+		case "tests":
+			// programs test-exec may start: bare names, at most 16 of 64 bytes
+			w := strings.Fields(v)
+			ok = len(w) > 0 && len(w) <= 16
+			for _, x := range w {
+				ok = ok && bareName.MatchString(x)
+			}
 		}
 		if !ok {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
@@ -1499,7 +1516,12 @@ func main() {
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
-	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0]))
+	// a command, or (an extension without commands) an event it hears anyway
+	runFirst := "0 active 1\n"
+	if len(m.commands) > 0 {
+		runFirst = fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0])
+	}
+	h.write(runFirst)
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1509,7 +1531,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0])
+	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + runFirst
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)

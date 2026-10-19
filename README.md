@@ -77,6 +77,29 @@ repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
 
+## Test controllers
+
+Protocol 1.1's `tests` feature (`v1.1/v1.1.md`, "Feature: tests") lets an extension publish a tree
+of tests, run what rhun asks, and report results, failure messages with expected and actual values,
+output and line coverage. `test-exec` starts a program `[needs] tests` names (`go`, `cargo`) as the
+user and streams its output back.
+
+- Rust: `Feature::Tests`; `Handler::resolve_tests`, `run_tests` (return at once, report from a
+  thread through `TestReporter`, end with `Ext::end_test_run`) and `cancel_tests`;
+  `Ext::set_test_items`, `report_coverage`, and `test_exec`, whose `TestProcess` streams implement
+  `Read`.
+- Go: `FeatureTests`; a handler that is a `TestController`; `SetTestItems`, `NewTestReporter`,
+  `TestExec`, `ReportCoverage`, `EndTestRun`.
+- C: the `resolve_tests`, `run_tests`, `cancel_tests`, `test_out` and `test_exit` handlers;
+  `rx_test_item`, `rx_test_update`, `rx_test_exec`, `rx_test_coverage_send`, `rx_test_end`.
+- `expected_actual` (Rust) and `ExpectedActual` (Go) find compared values in Go, testify and Rust
+  failure text.
+
+`rhun-ext-check` resolves the roots and one lazy level, runs each profile the manifest offers and
+cancels a run, checking every body as rhun reads it. It refuses `test-exec` unless given
+`-test-exec-script FILE` (lines `out TEXT`, `err TEXT`, `sleep MS`, `exit CODE`); `-test-timeout`
+bounds a run (default 60 s).
+
 ## Prepared snippet fields
 
 Protocol 1.1 adds `snippets` for editable native fields. Go provides `PreparedSnippet`, `Field`,

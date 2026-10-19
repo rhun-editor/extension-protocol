@@ -16,9 +16,9 @@ type fakeController struct {
 	exec      chan string
 }
 
-func (c *fakeController) Ready(*Ext, string)        {}
-func (c *fakeController) Run(*Ext, string, Doc)     {}
-func (c *fakeController) Event(*Ext, Event)         {}
+func (c *fakeController) Ready(*Ext, string)    {}
+func (c *fakeController) Run(*Ext, string, Doc) {}
+func (c *fakeController) Event(*Ext, Event)     {}
 func (c *fakeController) CancelTests(e *Ext, run int64) {
 	c.mu.Lock()
 	c.cancelled = append(c.cancelled, run)
@@ -48,7 +48,7 @@ func (c *fakeController) RunTests(e *Ext, r TestRun) error {
 		exp, act := "a\nb", "a"
 		rep.Add(TestResult{Item: "go:p.TestA", State: TestFailed, Duration: 30 * time.Millisecond,
 			Messages: []TestMessage{{Text: "mismatch", Path: "/p/a_test.go", Range: &Range{Pos{4, 2}, Pos{4, 2}}, Expected: &exp, Actual: &act}},
-			Output: out})
+			Output:   out})
 		if err := rep.Close(); err != nil {
 			c.exec <- "report " + err.Error()
 			return
