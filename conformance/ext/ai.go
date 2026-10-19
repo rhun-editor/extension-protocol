@@ -152,6 +152,13 @@ func (h *host) aiRequest(id int64, verb string, args []string, b []byte, bodyOK 
 		if sid := string(b[nl+1+ll : nl+1+ll+sl]); sid != "" && !rhunext.SIDOK(sid) {
 			h.fail("edit-review", "propose: session id "+sid+" is not 1 to 128 visible bytes")
 		}
+		// the Review tab reads 12g's grammar whatever was agreed: no hashes, label, confirm or
+		// file operations
+		if _, code, why := parseWorkspaceEdit(b[nl+1+ll+sl:]); why != "" {
+			h.fail("edit-review", "propose: the edit is not in 12g's grammar: "+why)
+			rerr(code, why)
+			return true
+		}
 		if aiState.proposals >= 8 {
 			h.warn("edit-review", "more than 8 proposals waiting: rhun answers toobig")
 		}

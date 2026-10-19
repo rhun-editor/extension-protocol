@@ -60,3 +60,27 @@ func TestAgentsProvidesKeys(t *testing.T) {
 		}
 	}
 }
+
+// propose's edit is read as 12g whatever was agreed
+func TestProposeTakes12g(t *testing.T) {
+	cases := []struct{ name, edit, code string }{
+		{"12g", "1\n8 - 1\n/p/a.txt1 1 1 1 1\ny", ""},
+		{"hash", "1\n8 fnv1a64:0123456789abcdef 1\n/p/a.txt1 1 1 1 1\ny", "syntax"},
+		{"label", "1\n8 - 1\n/p/a.txt1 1 1 1 1\nylabel 3\nFix", "syntax"},
+		{"operation", "1\ncreate 8 -\n/p/b.txt", "syntax"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _ := testHost(t)
+			h.stdin = &sink{}
+			h.features = map[string]bool{"edit-review": true, "workspace-edits": true, "file-operations": true}
+			h.m.needs = map[string]string{"documents": "read"}
+			code := ""
+			h.aiRequest(9, "propose", []string{"0"}, []byte("1 0\nL"+tc.edit), true,
+				func(string) {}, func(c, s string) { code = c })
+			if code != tc.code {
+				t.Fatalf("code %q, want %q", code, tc.code)
+			}
+		})
+	}
+}

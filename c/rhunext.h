@@ -618,8 +618,12 @@ int rx_agent_changed(rx_ext *ext, const char *sid, int64_t total, int64_t first)
 void rx_transcript_add(rx_transcript *t, const char *role, const char *name, const char *text, size_t len,
                        const char *model);
 void rx_transcript_finish(rx_transcript *t, rx_buf *out);
-/* Feature edit-review: the proposal's id, or -1; unpropose withdraws one. */
+/* Feature edit-review: the proposal's id, or -1; unpropose withdraws one. The edit goes in 12g's
+ * grammar whatever was agreed (the Review tab reads 12g): a hash as "-", without its label and
+ * confirm; file operations fail it as unknown. rx_proposal_body is the body it sends: 0, or -1 with
+ * edit->fail and edit->why saying why. */
 int64_t rx_propose(rx_ext *ext, const char *label, const char *sid, rx_wedit *edit);
+int rx_proposal_body(const char *label, const char *sid, rx_wedit *edit, rx_buf *out);
 int rx_unpropose(rx_ext *ext, int64_t proposal);
 int rx_parse_proposal(const rx_event *ev, rx_proposal_event *out);  /* 1 for a proposal event */
 /* Feature tools: the list (rx_tools_free it), a call's output (the user may deny: refused). */
@@ -7299,20 +7303,30 @@ void rx_transcript_finish(rx_transcript *t, rx_buf *out) {
     t->n = 0, t->size = 0;
 }
 
-int64_t rx_propose(rx_ext *ext, const char *label, const char *sid, rx_wedit *edit) {
-    rx_buf e = {NULL, 0, 0}, b = {NULL, 0, 0};
+int rx_proposal_body(const char *label, const char *sid, rx_wedit *edit, rx_buf *out) {
+    rx_buf e = {NULL, 0, 0};
     sid = sid ? sid : "", label = label ? label : "";
-    if (rx_wedit_finish(edit, &e) && edit->fail) {
-        snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
+    if (rx_wedit_finish_caps(edit, &e, 0, 0) < 0) {
         rx_buf_free(&e);
         return -1;
     }
-    rx_buf_fmt(&b, "%zu %zu\n%s%s", strlen(label), strlen(sid), label, sid);
-    rx_buf_add(&b, e.data, e.len);
+    rx_buf_fmt(out, "%zu %zu\n%s%s", strlen(label), strlen(sid), label, sid);
+    rx_buf_add(out, e.data, e.len);
+    rx_buf_free(&e);
+    return 0;
+}
+
+int64_t rx_propose(rx_ext *ext, const char *label, const char *sid, rx_wedit *edit) {
+    rx_buf b = {NULL, 0, 0};
+    if (rx_proposal_body(label, sid, edit, &b) < 0) {
+        snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
+        rx_buf_free(&b);
+        return -1;
+    }
     char line[64];
     snprintf(line, sizeof line, "propose %zu", b.len);
     int64_t id = rx_req_num(ext, line, b.data, b.len);
-    rx_buf_free(&e), rx_buf_free(&b);
+    rx_buf_free(&b);
     return id;
 }
 

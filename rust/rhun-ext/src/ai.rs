@@ -506,11 +506,11 @@ impl Ext {
     }
 
     /// Proposes an edit for the user to review (feature edit-review): the proposal's id, at once.
-    /// What becomes of it arrives as [`crate::Handler::proposal`] events.
+    /// What becomes of it arrives as [`crate::Handler::proposal`] events. The edit goes in 12g's
+    /// grammar whatever was agreed: a hash as `-`, without its label and `confirm`; file
+    /// operations are refused (`unknown`).
     pub fn propose(&self, label: &str, sid: &str, edit: &WorkspaceEdit) -> Result<u64, Error> {
-        let e = edit.encode().map_err(|e| Error { code: "toobig".into(), text: e })?;
-        let mut body = format!("{} {}\n{label}{sid}", label.len(), sid.len()).into_bytes();
-        body.extend_from_slice(&e);
+        let body = proposal_body(label, sid, edit)?;
         let r = self.request("propose", Some(&body))?;
         Ok(r.fields.first().and_then(|f| f.parse().ok()).unwrap_or(0))
     }
@@ -547,9 +547,36 @@ impl Ext {
     }
 }
 
+/// A proposal's body: the head and the edit in 12g's grammar whatever was agreed (the Review tab
+/// reads 12g: a hash goes as `-`, the edit's label and `confirm` are left out, and file operations
+/// are refused `unknown`).
+pub(crate) fn proposal_body(label: &str, sid: &str, edit: &WorkspaceEdit) -> Result<Vec<u8>, Error> {
+    let e = edit
+        .encode_with(crate::lang::EditCaps::V1)
+        .map_err(|(code, text)| Error { code: code.into(), text })?;
+    let mut body = format!("{} {}\n{label}{sid}", label.len(), sid.len()).into_bytes();
+    body.extend_from_slice(&e);
+    Ok(body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proposals_are_12g_whatever_was_agreed() {
+        use crate::lang::{Create, TextEdit};
+        let at = crate::Pos::new(1, 1);
+        let insert = TextEdit::new(crate::Range { start: at, end: at }, "y");
+        let edit = WorkspaceEdit::new()
+            .file_hashed("/p/a.txt", b"x\r\n", vec![insert])
+            .label("Fix")
+            .confirm();
+        let b = proposal_body("L", "s1", &edit).unwrap();
+        assert_eq!(b, b"1 2\nLs1".iter().chain(b"1\n8 - 1\n/p/a.txt1 1 1 1 1\ny").copied().collect::<Vec<u8>>());
+        let ops = WorkspaceEdit::new().create("/p/b.txt", Create::default());
+        assert_eq!(proposal_body("L", "", &ops).unwrap_err().code, "unknown");
+    }
 
     #[test]
     fn sessions_encode() {
