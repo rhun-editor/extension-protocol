@@ -52,3 +52,41 @@ feature      =/ "snippet-transforms"
 c-extra      =/ "transforms" SP "0" SP len LF
               ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
               ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.
+
+; Agents, proposals and tools (v1.1.md). Strings are length-framed and follow without separators.
+; agents: [provides] agents = yes; agent-sessions replaces the extension's rows.
+feature      =/ "agents"
+request      =/ id SP "agent-sessions" SP len               ; body: sessions
+request      =/ id SP "agent-changed" SP sid SP num SP num  ; TOTAL FIRST
+host-request =/ id SP "agent-transcript" SP sid SP num      ; FROM; answered ok ID LEN + transcript
+sessions     = num LF *session                              ; N 0..1000, body <= 1 MiB
+session      = num SP agent-state SP len SP len SP len SP len LF   ; UPDATED, then SID TITLE MODEL CWD bytes
+agent-state  = "idle" / "working" / "waiting" / "error"
+sid          = 1*128( %x21-7E )
+transcript   = num SP num LF *message                       ; TOTAL N, N <= 2000, body <= 4 MiB
+message      = agent-role SP len SP len SP len LF           ; then NAME TEXT MODEL bytes
+agent-role   = "user" / "assistant" / "tool" / "result" / "error" / "info"
+
+; edit-review: needs documents=read; the body is LABEL_LEN SID_LEN LF <LABEL><SID> and a workspace edit.
+feature      =/ "edit-review"
+request      =/ id SP "propose" SP len                      ; answered ok ID PROPOSAL
+request      =/ id SP "unpropose" SP num
+event        =/ "0" SP "proposal" SP num SP num SP ( "accepted" / "rejected" / "stale" / "partial" SP num SP num )
+event        =/ "0" SP "proposal" SP num SP "done" SP num SP num
+
+; tools: [tools] in the manifest; rhun routes calls to the owner and confirms tools that change things.
+feature      =/ "tools"
+request      =/ id SP "tools"                               ; ok ID LEN + tool-list
+request      =/ id SP "tool-call" SP tool-id SP len         ; answered when done: ok ID LEN + output
+host-request =/ id SP "tool" SP tool-name SP name "/" name SP len   ; NAME CALLER, then the input
+tool-list    = num LF *tool-record
+tool-record  = tool-id SP ( "ro" / "rw" ) SP len SP len SP len LF   ; then TITLE DESC INPUT bytes
+tool-id      = "rhun." tool-name / name "/" name "." tool-name
+tool-name    = 1*40( %x61-7A / DIGIT / "_" )
+
+; agent-prompts (with agents): prompts, Stop and cards for the extension's sessions.
+feature      =/ "agent-prompts"
+host-request =/ id SP "agent-prompt" SP ( sid / "-" ) SP len  ; the text; answered ok ID LEN + SID
+event        =/ "0" SP "agent-stop" SP sid                     ; rhun to the extension
+request      =/ id SP "agent-ask" SP sid SP len                ; answered ok ID N (from 1) or error ID cancelled
+card         = 1*( %x01-09 / %x0B-FF ) 1*16( LF 1*( %x01-09 / %x0B-FF ) ) [ LF ]   ; <= 8192 bytes

@@ -214,9 +214,27 @@ func (h *host) aiRequest(id int64, verb string, args []string, b []byte, bodyOK 
 			}
 			return true
 		}
-		if !bytes.Contains(b, []byte("\n")) {
-			h.fail("agent-prompts", "agent-ask: a prompt line and at least one option line")
-			rerr("syntax", "a prompt and options")
+		// as rhun reads it: a prompt line, then 1 to 16 options, none empty; the last LF optional
+		lines := strings.Split(string(b), "\n")
+		if len(lines) > 1 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		empty := false
+		for _, o := range lines[1:] {
+			empty = empty || o == ""
+		}
+		switch {
+		case len(lines) < 2 || empty:
+			h.fail("agent-prompts", "agent-ask: a prompt line and 1 to 16 options, none empty")
+			rerr("syntax", "a prompt line and 1 to 16 options, none empty")
+			return true
+		case len(lines) > 17:
+			h.fail("agent-prompts", "agent-ask: more than 16 options")
+			rerr("toobig", "more than 16 options")
+			return true
+		case !containsString(aiState.sessions, args[0]):
+			h.fail("agent-prompts", "agent-ask for "+args[0]+", a session agent-sessions did not list")
+			rerr("refused", "no such session")
 			return true
 		}
 		reply(fmt.Sprintf("ok %d 1", id))
@@ -309,4 +327,13 @@ func (h *host) askBody(line string, body []byte) (message, bool) {
 	delete(h.hostReqs, id)
 	h.write(fmt.Sprintf("0 cancel %d\n", id))
 	return message{}, false
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
