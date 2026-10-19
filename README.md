@@ -9,7 +9,7 @@ versions, a Go package that speaks it, and the conformance tools.
 | `v1/v1.md` | the specification, written to be read by people and by coding agents |
 | `v1/v1.abnf` | the grammar of every line |
 | `v1/v1.json` | the manifest (`extension.ini`) as a JSON Schema, with every key, pattern and default |
-| `v1.1/` | additive protocol 1.1 features, including runtime command removal; v1 stays unchanged |
+| `v1.1/` | additive protocol 1.1 features, including runtime command removal and the language features; v1 stays unchanged |
 | `rust/rhun-ext` | the Rust crate (the first choice): framing, requests, events, views with pictures and charts, and every language feature of section 12 |
 | `go/rhunext` | a Go package: framing, ids, bodies, requests that block until their reply, section 12 features |
 | `c/rhunext.h` | one header for C and C++: the same, with nothing but the C library |
@@ -76,6 +76,35 @@ instead of the released SDK or `@latest`. For Go, use a `go.work` containing the
 repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this repository.
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
+
+## Language features (1.1)
+
+The [language features](v1.1/v1.1.md#language-features) of protocol 1.1 add four negotiated
+features to completion, signature help, definition and references:
+
+- `query-stream`: parts of a long answer and progress on one of rhun's pending requests. Go's
+  `StreamingCompleter` and `StreamingLocator` get a `Stream` (`Part`, `PartLocations`, `PartItems`,
+  `Progress`) whose context rhun's `cancel` ends. Rust's `Handler::complete_stream`, `definition_stream` and `references_stream` get
+  a `Stream` (`part`, `part_locations`, `part_items`, `progress`, `is_cancelled`); it is `Clone`
+  and `Send`, so worker threads can send parts while the serial handler waits for them. C's
+  `rx_handlers` gain `complete_stream`, `definition_stream` and `references_stream` with an
+  `rx_stream` for `rx_stream_part`, `rx_stream_locations`, `rx_stream_items`,
+  `rx_stream_progress` and `rx_stream_cancelled`. Without the feature agreed, parts fail locally
+  and the answer carries everything.
+- `provider-scope`: narrowing `[provides]` at run time with Go `Provides`, `ProvidesManifest` and
+  `Withdraw`, Rust `Ext::provides`, `provides_manifest` and `withdraw`, and C `rx_provides`.
+- `complete-items`: completion items with resolve data, a replace range, commit characters, a
+  filter text, a suffix, preselect, deprecated, adjust and after-accept records (Go and Rust
+  `CompletionItem` fields, C `rx_item_extra` with `rx_list_item_extra`), resolved by Go's
+  `CompletionResolver`, Rust's `Handler::complete_resolve` (`Resolution`) and C's
+  `complete_resolve` handler (`rx_resolve_answer`).
+- `signature-list`: every overload in signature help: Go's `SignatureLister`, Rust's
+  `Handler::signatures` (`SignatureList`) and C's `signatures` handler (`rx_signatures_answer`).
+
+The SDKs read the bodies of rhun's 1.1 requests that carry data (up to 64 KiB). The checker
+validates the new completion records, sends `complete-resolve` with the data a list gave and
+checks the resolution, asks `signatures` instead of `signature` when agreed, serves `query-part`,
+`query-progress` and `provides` against the manifest, and knows the new `[provides]` keys.
 
 ## Prepared snippet fields
 

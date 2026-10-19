@@ -188,7 +188,7 @@
     },
     "provides": {
       "type": "object",
-      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1. Protocol 1.1 adds save_actions patterns.",
+      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1. Protocol 1.1 adds save_actions patterns and the language features' keys (v1.1.md, Manifest keys), each read only when the feature named in its description was agreed.",
       "properties": {
         "complete": {
           "$ref": "#/$defs/patterns"
@@ -227,6 +227,55 @@
         "save_actions": {
           "$ref": "#/$defs/patterns",
           "description": "Source code actions before saving; requires negotiated save-actions and documents=write."
+        },
+        "hover": {
+          "$ref": "#/$defs/patterns",
+          "description": "the hover card; requires negotiated hover-query"
+        },
+        "declaration": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Declaration; requires negotiated navigation"
+        },
+        "type_definition": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Type Definition; requires negotiated navigation"
+        },
+        "implementation": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Implementation; requires negotiated navigation"
+        },
+        "selection_ranges": {
+          "$ref": "#/$defs/patterns",
+          "description": "Expand and Shrink Selection; requires negotiated selection-ranges"
+        },
+        "call_hierarchy": {
+          "$ref": "#/$defs/patterns",
+          "description": "the call hierarchy; requires negotiated hierarchy"
+        },
+        "type_hierarchy": {
+          "$ref": "#/$defs/patterns",
+          "description": "the type hierarchy; requires negotiated hierarchy"
+        },
+        "workspace_symbols": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Symbol in Project, while a matching document is open; requires negotiated workspace-symbols"
+        },
+        "range_format": {
+          "$ref": "#/$defs/patterns",
+          "description": "Format Selection; requires negotiated partial-format"
+        },
+        "type_format": {
+          "$ref": "#/$defs/patterns",
+          "description": "formatting as you type; requires negotiated partial-format"
+        },
+        "type_format.triggers": {
+          "type": "string",
+          "description": "characters that ask for on-type formatting, space separated; the word newline stands for Enter: '; } newline'; requires negotiated partial-format",
+          "pattern": "^(\\S|newline)( (\\S|newline))*$"
+        },
+        "document_links": {
+          "$ref": "#/$defs/patterns",
+          "description": "links under ctrl+hover; requires negotiated document-links"
         }
       },
       "additionalProperties": false
