@@ -227,6 +227,10 @@ int rx_parse_link(const rx_event *event, int64_t *id, const char **link, size_t 
  * matches, skipped files, status complete, limit or partial. Folder 1 is the primary folder, 0
  * every folder; max is 1 to 100000 paths or 1 to 20000 matches; globs are relative to the folder
  * (* ** ? [..] {a,b}; without / they match the base name). */
+/* Feature scoped-settings: the value of one of its own settings in force for a folder (its id, 0
+ * for the window) and a language (a grammar name, NULL or "" for none): malloc'd, NUL-terminated
+ * (free() it), or NULL on an error. The event "0 setting-changed KEY" says a stored value changed. */
+char *rx_setting_get(rx_ext *ext, const char *key, int64_t folder, const char *lang);
 #define RX_FILES_IGNORED 1       /* ignored files too: no .gitignore, no exclude setting */
 #define RX_FILES_SKIP_HIDDEN 2
 #define RX_FILES_FOLLOW_LINKS 4
@@ -744,6 +748,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
                      strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0 ||
                      strncmp(verb_args, "external-uri ", 13) == 0 || strcmp(verb_args, "link") == 0 ||
+                     strncmp(verb_args, "setting-get ", 12) == 0 ||
 
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
@@ -1223,6 +1228,29 @@ int rx_loopback_wait(rx_loopback *lb, const char *state, int timeout_ms, char **
     }
 }
 #endif /* RHUNEXT_AUTH */
+
+char *rx_setting_get(rx_ext *ext, const char *key, int64_t folder, const char *lang) {
+    if (!rx_has(ext, "scoped-settings")) {
+        snprintf(ext->error, sizeof ext->error, "unknown scoped-settings feature was not agreed");
+        return NULL;
+    }
+    if (!key || !*key || strpbrk(key, " \r\n") || strlen(key) > 200 || (lang && strlen(lang) > 200)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid setting key");
+        return NULL;
+    }
+    char line[512], l[208];
+    snprintf(l, sizeof l, "%s", lang && *lang ? lang : "-");
+    for (char *p = l; *p; p++)
+        if (*p == ' ') *p = '_';
+    snprintf(line, sizeof line, "setting-get %s %lld %s", key, (long long)folder, l);
+    rx_buf b = {NULL, 0, 0};
+    if (rx_request(ext, line, NULL, 0, NULL, &b) < 0) {
+        rx_buf_free(&b);
+        return NULL;
+    }
+    rx_buf_add(&b, "", 1);
+    return b.data;
+}
 
 /* ---- feature files ---- */
 

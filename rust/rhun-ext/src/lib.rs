@@ -173,6 +173,9 @@ pub enum Feature {
     Urls,
     /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
     Files,
+    /// Settings per workspace, folder and language: [`Ext::setting_get`], the event
+    /// `setting-changed`.
+    ScopedSettings,
 }
 
 impl Feature {
@@ -201,6 +204,7 @@ impl Feature {
             Feature::Uris => "uris",
             Feature::Urls => "urls",
             Feature::Files => "files",
+            Feature::ScopedSettings => "scoped-settings",
         }
     }
 }
@@ -1166,6 +1170,7 @@ impl Ext {
                                 | "git-show"
                                 | "secret-get"
                                 | "secret-keys"
+                                | "setting-get"
                                 | "external-uri"
                                 | "link"
                         )

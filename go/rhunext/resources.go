@@ -17,6 +17,8 @@ const (
 	FeatureSecrets = "secrets"
 	FeatureURIs    = "uris"
 	FeatureURLs    = "urls"
+	// FeatureScopedSettings: setting-get and the setting-changed event.
+	FeatureScopedSettings = "scoped-settings"
 	// SecretValueMax is the most bytes one value holds.
 	SecretValueMax = 8192
 )
@@ -249,4 +251,33 @@ func ParseLink(ev Event) (id int64, link string, ok bool) {
 		return 0, "", false
 	}
 	return id, string(ev.Body), true
+}
+
+// SettingGetContext returns the value of one of the extension's own settings in force for a folder
+// (its id; 0 for the window) and a language (a grammar name, "" for none) (feature
+// scoped-settings): folder@LANG, folder, workspace@LANG, workspace, user@LANG, user, default.
+func (e *Ext) SettingGetContext(ctx context.Context, key string, folder int64, lang string) (string, error) {
+	if !e.Has(FeatureScopedSettings) {
+		return "", notAgreed(FeatureScopedSettings)
+	}
+	if key == "" || strings.ContainsAny(key, " \r\n") {
+		return "", &Error{Code: "syntax", Text: "invalid setting key"}
+	}
+	l := strings.ReplaceAll(lang, " ", "_")
+	if l == "" {
+		l = "-"
+	}
+	r, err := e.RequestContext(ctx, "setting-get", nil, key, itoa(folder), l)
+	if err != nil {
+		return "", err
+	}
+	return string(r.Body), nil
+}
+
+// ParseSettingChanged reads "0 setting-changed KEY": a stored value of KEY changed at some scope.
+func ParseSettingChanged(ev Event) (string, bool) {
+	if ev.Name != "setting-changed" || len(ev.Args) != 1 {
+		return "", false
+	}
+	return ev.Args[0], true
 }

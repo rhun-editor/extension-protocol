@@ -216,6 +216,33 @@ func (h *host) resourcesRequest(verb string, id int64, args []string, body func(
 			return true
 		}
 		h.filesRequest(verb, id, args, b, reply, rerr)
+	case "setting-get":
+		if !h.features["scoped-settings"] {
+			h.fail("features", "setting-get without scoped-settings agreed after hello")
+			rerr("unknown", "no such request")
+			return true
+		}
+		if len(args) != 3 {
+			h.fail("request grammar", "setting-get takes KEY FOLDER LANG (- for none)")
+			rerr("syntax", "cannot parse the line")
+			return true
+		}
+		f, ok := h.m.settingFields[args[0]]
+		if !ok {
+			h.fail("settings", "setting-get "+args[0]+": not one of its own settings")
+			rerr("refused", "not a setting of this extension")
+			return true
+		}
+		if n, err := strconv.Atoi(args[1]); err != nil || n < 0 {
+			h.fail("request grammar", "setting-get: FOLDER is a folder id or 0")
+			rerr("syntax", "cannot parse the line")
+			return true
+		} else if n > 1 {
+			rerr("nofile", "no such folder")
+			return true
+		}
+		v := f["default"]
+		h.write(fmt.Sprintf("ok %d %d\n%s", id, len(v), v))
 	case "busy":
 		if !h.features["idle"] {
 			h.fail("features", "busy without idle agreed after hello")
@@ -290,4 +317,30 @@ func (h *host) resourcesRequest(verb string, id int64, args []string, body func(
 		return false
 	}
 	return true
+}
+
+// scopedSettingsManifest checks [settings] KEY.scope and KEY.languages; a project must never choose
+// what an extension runs, so a key a workspace or folder may set that names a program is warned of
+func scopedSettingsManifest(m *manifest, bad, warn func(string)) {
+	for _, key := range m.settings {
+		f := m.settingFields[key]
+		switch f["scope"] {
+		case "", "user":
+		case "workspace", "folder":
+			for _, w := range []string{"path", "command", "program", "bin", "args", "server"} {
+				if strings.Contains(key, w) {
+					warn(fmt.Sprintf("[settings] %s.scope = %s: a repository could choose what the extension runs (%q)",
+						key, f["scope"], w))
+					break
+				}
+			}
+		default:
+			bad(fmt.Sprintf("[settings] %s.scope = %s is not user, workspace or folder", key, f["scope"]))
+		}
+		switch f["languages"] {
+		case "", "yes", "no":
+		default:
+			bad(fmt.Sprintf("[settings] %s.languages = %s is not yes or no", key, f["languages"]))
+		}
+	}
 }

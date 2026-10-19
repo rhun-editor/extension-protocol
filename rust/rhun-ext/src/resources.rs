@@ -133,6 +133,24 @@ impl Ext {
         String::from_utf8(reply.body).map_err(|_| syntax("not UTF-8"))
     }
 
+    /// The value of one of the extension's own settings in force for a folder (its id; 0 for the
+    /// window) and a language (a grammar name, "" for none) (feature `scoped-settings`).
+    pub fn setting_get(&self, key: &str, folder: u64, lang: &str) -> Result<String, Error> {
+        if !self.has(Feature::ScopedSettings) {
+            return Err(not_agreed("scoped-settings"));
+        }
+        if key.is_empty() || key.contains([' ', '\r', '\n']) {
+            return Err(syntax("invalid setting key"));
+        }
+        let lang = if lang.is_empty() {
+            "-".to_string()
+        } else {
+            lang.replace(' ', "_")
+        };
+        let reply = self.request(&format!("setting-get {key} {folder} {lang}"), None)?;
+        String::from_utf8(reply.body).map_err(|_| syntax("not UTF-8"))
+    }
+
     /// Opens a virtual document (feature `uris`): rhun asks the scheme's provider for its text.
     /// A `file:` URI opens that file. [`Ext::open`] takes a URI as well.
     pub fn open_uri(&self, uri: &str, at: Pos) -> Result<Doc, Error> {

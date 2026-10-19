@@ -871,3 +871,44 @@ fn find_files_and_search_text_take_batches() {
         "search [\"main.rs SearchMatch { line: 2, col: 4, end: 8, pre: 1, text: \\\"//TODO!\\\" }\"] cancelled"
     );
 }
+
+struct SettingProbe(Arc<Mutex<Seen>>);
+
+impl Handler for SettingProbe {
+    fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+        let v = ext.setting_get("style", 1, "Visual Basic");
+        self.0.lock().unwrap().events.push(format!("{v:?}"));
+    }
+}
+
+#[test]
+fn setting_get_reads_a_body() {
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let probe = SettingProbe(seen.clone());
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::ScopedSettings],
+            probe,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 scoped-settings");
+    host.send("0 features scoped-settings\n0 ready /p\n");
+    assert_eq!(host.line(), "1 setting-get style 1 Visual_Basic");
+    host.send("ok 1 9\ngoimports0 bye\n");
+    done.join().unwrap().unwrap();
+    assert_eq!(seen.lock().unwrap().events[0], "Ok(\"goimports\")");
+}

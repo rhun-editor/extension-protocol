@@ -626,6 +626,16 @@ static int found_files_cb(const rx_found_file *f, int n, void *user) {
                  f[i].matches[0].end, f[i].matches[0].pre, (int)f[i].matches[0].text_len, f[i].matches[0].text);
     return 0;   /* stop: the run is cancelled */
 }
+static int setting_ok;
+static void on_ready_setting(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    char *v = rx_setting_get(ext, "style", 1, "Visual Basic");
+    assert(v && strcmp(v, "goimports") == 0);
+    free(v);
+    v = rx_setting_get(ext, "none", 0, NULL);
+    assert(!v && strncmp(rx_error(ext), "refused", 7) == 0);
+    setting_ok = 1;
+}
 static int files_ok;
 static void on_ready_files(rx_ext *ext, const char *project, void *user) {
     (void)project, (void)user;
@@ -689,6 +699,14 @@ static void resources_requests(void) {
     run_bytes("files", &h, input, strlen(input), &got);
     same(&got, "hello 1 files\n1 find-files 0 10 0 13\n+*.c\n-vendor\n2 search-text 0 5 16 8\n4 0\nTODO3 cancel 2\n");
     assert(files_ok);
+    /* scoped-settings: setting-get */
+    rx_buf_clear(&got);
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_setting;
+    input = "0 features scoped-settings\n0 ready -\nok 1 9\ngoimportserror 2 refused not a setting of this extension\n0 bye\n";
+    run_bytes("scoped-settings", &h, input, strlen(input), &got);
+    same(&got, "hello 1 scoped-settings\n1 setting-get style 1 Visual_Basic\n2 setting-get none 0 -\n");
+    assert(setting_ok);
     rx_buf_free(&got);
 }
 
