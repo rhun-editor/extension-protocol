@@ -676,6 +676,75 @@ impl Ext {
     }
 }
 
+/// A kernel started as the user (`nb-exec`).
+pub type ExecId = u64;
+
+/// A program to start as the user (`nb-exec`; the same body as `test-exec`'s).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Command {
+    /// A name of `[needs] kernels`, or an absolute path whose last component is one.
+    pub program: String,
+    /// Empty: the notebook's folder.
+    pub dir: String,
+    pub args: Vec<String>,
+    /// `NAME=VALUE`, added to the user's environment.
+    pub env: Vec<String>,
+}
+
+impl Command {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut b = format!(
+            "{} {} {} {}\n{}{}",
+            self.program.len(),
+            self.dir.len(),
+            self.args.len(),
+            self.env.len(),
+            self.program,
+            self.dir
+        )
+        .into_bytes();
+        for a in self.args.iter().chain(self.env.iter()) {
+            b.extend_from_slice(format!("{}\n", a.len()).as_bytes());
+            b.extend_from_slice(a.as_bytes());
+        }
+        b
+    }
+}
+
+/// What `nb-exec-signal` sends to a kernel's process group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecSignal {
+    /// SIGINT (refused on Windows: send Jupyter's interrupt_request instead).
+    Interrupt,
+    Terminate,
+    Kill,
+}
+
+impl Ext {
+    /// Starts a kernel for notebook `nb` as the user, outside the sandbox; rhun asks the user the
+    /// first time in a project, so this may wait. Its output goes to `kernel-EXEC.log` in
+    /// `$RHUN_STATE`; [`Handler::nb_exec_exit`](crate::Handler::nb_exec_exit) tells its end.
+    pub fn nb_exec(&self, nb: NbId, cmd: &Command) -> Result<ExecId, Error> {
+        agreed(self)?;
+        let r = self.request(&format!("nb-exec {nb}"), Some(&cmd.encode()))?;
+        r.fields.first().and_then(|f| f.parse().ok()).ok_or(Error {
+            code: "syntax".into(),
+            text: "nb-exec's answer has no EXEC".into(),
+        })
+    }
+
+    /// Interrupts, terminates or kills a kernel started with [`Ext::nb_exec`].
+    pub fn nb_exec_signal(&self, exec: ExecId, sig: ExecSignal) -> Result<(), Error> {
+        agreed(self)?;
+        let word = match sig {
+            ExecSignal::Interrupt => "interrupt",
+            ExecSignal::Terminate => "terminate",
+            ExecSignal::Kill => "kill",
+        };
+        self.request(&format!("nb-exec-signal {exec} {word}"), None).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +806,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!((r.cell, r.run, r.source.as_slice()), (2, 9, &b"x=1"[..]));
+    }
+
+    #[test]
+    fn command_body() {
+        let c = Command {
+            program: "python3".into(),
+            dir: String::new(),
+            args: vec!["-m".into(), "ipykernel_launcher".into()],
+            env: vec!["A=b".into()],
+        };
+        assert_eq!(
+            c.encode(),
+            b"7 0 2 1\npython32\n-m18\nipykernel_launcher3\nA=b".to_vec()
+        );
     }
 }

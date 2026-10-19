@@ -55,7 +55,7 @@
     "runtime": {
       "type": "string",
       "minLength": 1,
-      "description": "a program found on PATH that runs the script named by 'run' (python3, node, \u2026)"
+      "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)"
     },
     "requires": {
       "type": "string",
@@ -154,6 +154,18 @@
         "run": {
           "type": "string",
           "description": "programs the extension may start, by name, space separated"
+        },
+        "git": {
+          "enum": [
+            "none",
+            "read"
+          ],
+          "default": "none",
+          "description": "read the project's Git data through rhun (feature git-data); shown as 'read the project's Git history'"
+        },
+        "kernels": {
+          "type": "string",
+          "description": "notebooks: programs rhun may start as the user for this extension's notebooks (nb-exec), names space separated"
         }
       },
       "additionalProperties": false
@@ -243,6 +255,26 @@
             "no"
           ],
           "description": "yes: it runs cells (the default); no: a viewer or converter only."
+        },
+        "commit_message": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no",
+          "description": "a commit-message provider (feature commit-message), listed in Settings > Git > Commit message AI"
+        },
+        "quickdiff": {
+          "$ref": "#/$defs/patterns",
+          "description": "quick-diff bases (feature quickdiff) for files under roots the extension registers (scm-register), or outside any git repository"
+        },
+        "scm": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no",
+          "description": "a version control provider (feature scm): it registers Source Control tabs at run time"
         }
       },
       "additionalProperties": false

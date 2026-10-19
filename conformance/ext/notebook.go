@@ -46,6 +46,34 @@ func (h *host) nbRequest(id int64, verb string, args []string, body []byte, repl
 		v, err := strconv.ParseInt(s, 10, 64)
 		return v, err == nil && v >= 0
 	}
+	switch verb {
+	case "nb-exec":
+		// kernels as the user: the checker checks the command and starts nothing
+		if len(args) != 2 {
+			h.fail("notebooks", fmt.Sprintf("nb-exec takes NB LEN, got %q", strings.Join(args, " ")))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if _, err := rhunext.ParseCommand(body); err != nil {
+			h.fail("notebooks", "nb-exec's command body: "+err.Error())
+			rerr("syntax", "cannot parse the body")
+			return
+		}
+		if h.m.needs["kernels"] == "" {
+			h.fail("notebooks", "nb-exec without [needs] kernels: rhun answers needs kernels=NAME")
+		}
+		h.warn("notebooks", "the checker starts no kernels: it answered nb-exec refused (an extension must cope, as when the user says no)")
+		rerr("refused", "the checker runs no programs")
+		return
+	case "nb-exec-signal":
+		if len(args) != 2 || (args[1] != "interrupt" && args[1] != "terminate" && args[1] != "kill") {
+			h.fail("notebooks", fmt.Sprintf("nb-exec-signal takes EXEC interrupt|terminate|kill, got %q", strings.Join(args, " ")))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		rerr("stale", "no such kernel")
+		return
+	}
 	if verb == "nb-kernel-label" {
 		if len(args) != 3 {
 			h.fail("notebooks", fmt.Sprintf("nb-kernel-label takes NB STATE LEN, got %q", strings.Join(args, " ")))

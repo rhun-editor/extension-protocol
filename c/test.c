@@ -985,6 +985,14 @@ static void on_nb_event(rx_ext *ext, const char *what, int64_t nb, void *user) {
     snprintf(nb_what, sizeof nb_what, "%s", what);
 }
 static void notebooks(void) {
+    {   /* nb-exec's command body */
+        rx_buf b = {NULL, 0, 0};
+        const char *args[] = {"-m", "ipykernel_launcher"}, *env[] = {"A=b"};
+        rx_command_body(&b, "python3", "", args, 2, env, 1);
+        const char want[] = "7 0 2 1\npython32\n-m18\nipykernel_launcher3\nA=b";
+        assert(b.len == sizeof want - 1 && memcmp(b.data, want, b.len) == 0);
+        rx_buf_free(&b);
+    }
     rx_handlers h;
     memset(&h, 0, sizeof h);
     h.nb_open = on_nb_open;

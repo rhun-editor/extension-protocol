@@ -102,6 +102,12 @@ type NotebookProvider interface {
 	NbRun(ext *Ext, run *NbRun)
 }
 
+// NotebookExecs hears that a kernel started with NbExec ended: code its exit status (128 + N after
+// signal N), or killed when rhun ended it.
+type NotebookExecs interface {
+	NbExecExit(ext *Ext, exec int64, code int, killed bool)
+}
+
 // NotebookEvents receives the notebook events without a run.
 type NotebookEvents interface {
 	NbInterrupt(ext *Ext, nb int64)
@@ -444,6 +450,15 @@ func (e *Ext) notebookEvent(h Handler, ev Event) bool {
 		r.Run, _ = strconv.ParseInt(ev.Args[2], 10, 64)
 		p.NbRun(e, r)
 		return true
+	case "nb-exec-exit":
+		x, is := h.(NotebookExecs)
+		if !is || len(ev.Args) != 2 {
+			return false
+		}
+		exec, _ := strconv.ParseInt(ev.Args[0], 10, 64)
+		code, err := strconv.Atoi(ev.Args[1])
+		x.NbExecExit(e, exec, code, err != nil)
+		return true
 	case "nb-interrupt", "nb-restart", "nb-kernel", "nb-closed":
 		n, is := h.(NotebookEvents)
 		if !is || len(ev.Args) != 1 {
@@ -547,5 +562,107 @@ func (e *Ext) NbKernelLabel(nb int64, state, label string) error {
 		l = l[:n]
 	}
 	_, err := e.Request("nb-kernel-label", l, itoa(nb), state, itoa(int64(len(l))))
+	return err
+}
+
+// Command is a program to start as the user (nb-exec; the same body as test-exec's).
+type Command struct {
+	Program string   // a name of [needs] kernels, or an absolute path whose last part is one
+	Dir     string   // "": the notebook's folder
+	Args    []string // after the program
+	Env     []string // NAME=VALUE, added to the user's environment
+}
+
+// Encode is the command body.
+func (c *Command) Encode() []byte {
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "%d %d %d %d\n%s%s", len(c.Program), len(c.Dir), len(c.Args), len(c.Env), c.Program, c.Dir)
+	for _, a := range append(append([]string{}, c.Args...), c.Env...) {
+		fmt.Fprintf(&b, "%d\n%s", len(a), a)
+	}
+	return b.Bytes()
+}
+
+// ParseCommand reads a command body (for checkers and tests).
+func ParseCommand(body []byte) (*Command, error) {
+	nl := bytes.IndexByte(body, '\n')
+	if nl < 0 {
+		return nil, errors.New("no line")
+	}
+	f := strings.Fields(string(body[:nl]))
+	if len(f) != 4 {
+		return nil, errors.New("the first line is PROGRAM_LEN CWD_LEN ARGC ENVC")
+	}
+	var n [4]int
+	for i := range n {
+		v, err := strconv.Atoi(f[i])
+		if err != nil || v < 0 {
+			return nil, fmt.Errorf("%q is not a count", f[i])
+		}
+		n[i] = v
+	}
+	if n[0] == 0 || n[0] > 4096 || n[1] > 4096 || n[2] > 256 || n[3] > 64 {
+		return nil, errors.New("over a limit (program 4096 bytes, folder 4096, 256 arguments, 64 variables)")
+	}
+	rest := body[nl+1:]
+	if len(rest) < n[0]+n[1] {
+		return nil, errors.New("the program and folder are cut short")
+	}
+	c := &Command{Program: string(rest[:n[0]]), Dir: string(rest[n[0] : n[0]+n[1]])}
+	rest = rest[n[0]+n[1]:]
+	for i := 0; i < n[2]+n[3]; i++ {
+		nl := bytes.IndexByte(rest, '\n')
+		if nl < 0 {
+			return nil, errors.New("an argument or variable without its length line")
+		}
+		l, err := strconv.Atoi(string(rest[:nl]))
+		if err != nil || l < 0 || l > 32768 || len(rest) < nl+1+l {
+			return nil, errors.New("a bad argument or variable length")
+		}
+		v := string(rest[nl+1 : nl+1+l])
+		if strings.IndexByte(v, 0) >= 0 {
+			return nil, errors.New("a NUL in an argument or variable")
+		}
+		if i < n[2] {
+			c.Args = append(c.Args, v)
+		} else {
+			eq := strings.IndexByte(v, '=')
+			if eq <= 0 {
+				return nil, fmt.Errorf("variable %q is not NAME=VALUE", v)
+			}
+			c.Env = append(c.Env, v)
+		}
+		rest = rest[nl+1+l:]
+	}
+	if len(rest) != 0 {
+		return nil, errors.New("bytes after the last variable")
+	}
+	return c, nil
+}
+
+// NbExec starts a kernel for notebook nb as the user, outside the sandbox: rhun asks the user
+// the first time in a project. It returns the EXEC id that NbExecSignal and NbExecExit name;
+// the program's output goes to kernel-EXEC.log in $RHUN_STATE.
+func (e *Ext) NbExec(nb int64, c *Command) (int64, error) {
+	if err := e.nbAgreed(); err != nil {
+		return 0, err
+	}
+	body := c.Encode()
+	r, err := e.Request("nb-exec", body, itoa(nb), itoa(int64(len(body))))
+	if err != nil {
+		return 0, err
+	}
+	if len(r.Args) < 1 {
+		return 0, &Error{Code: "syntax", Text: "nb-exec's answer has no EXEC"}
+	}
+	return strconv.ParseInt(r.Args[0], 10, 64)
+}
+
+// NbExecSignal sends interrupt, terminate or kill to a kernel's process group.
+func (e *Ext) NbExecSignal(exec int64, signal string) error {
+	if err := e.nbAgreed(); err != nil {
+		return err
+	}
+	_, err := e.Request("nb-exec-signal", nil, itoa(exec), signal)
 	return err
 }

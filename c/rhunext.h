@@ -37,6 +37,8 @@ typedef int64_t rx_doc;                         /* a document id; 0 is none */
 typedef struct { int line, col; } rx_pos;       /* 1-based line, 1-based byte column */
 typedef struct { rx_pos start, end; } rx_range; /* half-open */
 typedef struct rx_ext rx_ext;
+struct rx_commit_message_ask_s;                  /* source control: rx_commit_message_ask */
+struct rx_quickdiff_ask_s;                       /* and rx_quickdiff_ask */
 
 /* bytes that grow: pictures, answers, anything built piece by piece */
 typedef struct { char *data; size_t len, cap; } rx_buf;
@@ -158,6 +160,16 @@ typedef struct {
     const char *(*nb_save)(rx_ext *ext, const rx_nb_save *req, rx_buf *out, void *user);
     void (*nb_run)(rx_ext *ext, const rx_nb_run *run, void *user);
     void (*nb_event)(rx_ext *ext, const char *what, int64_t nb, void *user);
+    /* Commit messages (feature "commit-message", [provides] commit_message = yes): append the
+     * message to out and return 1; append why not and return -1 (the user sees it); 0 for
+     * "unknown". req's strings live until it returns. */
+    int (*commit_message)(rx_ext *ext, const struct rx_commit_message_ask_s *req, rx_buf *out, void *user);
+    /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
+     * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
+    int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
+    /* Notebooks: a kernel started with rx_nb_exec ended; code its exit status (128 + N after
+     * signal N), or -1 when rhun ended it. */
+    void (*nb_exec_exit)(rx_ext *ext, int64_t exec, int code, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -184,6 +196,64 @@ int rx_unregister(rx_ext *ext, const char *name);
 int64_t rx_watch_workspace(rx_ext *ext);
 int rx_unwatch_workspace(rx_ext *ext, int64_t watch);
 int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan);
+/* Source control (protocol 1.1). Feature "git-data" with [needs] git = read: rhun's Git data.
+ * Requests return 0 on ok (-1 and rx_error otherwise); results own their body: free them with
+ * their _free function. Strings point into the body and are not NUL-terminated (use the lengths).
+ * Feature "commit-message": rhun asks the commit_message handler for a message (below). */
+typedef struct {
+    rx_buf body;
+    const char *root, *branch, *upstream;   /* work tree path; branch (7 hex digits when detached); "origin/main" or "" */
+    size_t root_len, branch_len, upstream_len;
+    char head[12];                          /* branch, detached, unborn */
+    char state[12];                         /* clean, dirty, merging, rebasing */
+    int64_t ahead, behind;
+} rx_git_repo_info;
+typedef struct { char x, y; const char *path; size_t path_len; } rx_git_status_entry;   /* '.' an unchanged side */
+typedef struct { rx_buf body; rx_git_status_entry *entries; size_t n; } rx_git_status_list;
+typedef struct {
+    char sha[72];
+    int64_t time;                           /* author time, seconds since 1970 */
+    const char *author, *mail, *summary;
+    size_t author_len, mail_len, summary_len;
+} rx_blame_commit;
+typedef struct { char sha[72]; int64_t l1, l2, orig; } rx_blame_run;   /* lines l1..l2 from commit sha (all 0s: not committed) */
+typedef struct { rx_buf body; rx_blame_commit *commits; size_t ncommits; rx_blame_run *runs; size_t nruns; } rx_blame;
+typedef struct {
+    char sha[72];
+    const char *parents;                    /* SHAs joined by ',', "" for a root commit */
+    size_t parents_len;
+    int64_t time;
+    const char *author, *subject;
+    size_t author_len, subject_len;
+} rx_log_entry;
+typedef struct { rx_buf body; rx_log_entry *entries; size_t n; } rx_log;
+int rx_git_repo(rx_ext *ext, rx_git_repo_info *out);
+int rx_git_status(rx_ext *ext, rx_git_status_list *out);
+int rx_git_blame(rx_ext *ext, rx_doc doc, rx_blame *out);
+/* path NULL: the history of HEAD; l1 = l2 = 0: the file's commits; else its lines l1..l2 at HEAD */
+int rx_git_log(rx_ext *ext, const char *path, int l1, int l2, int max, rx_log *out);
+int rx_git_show(rx_ext *ext, const char *rev, const char *path, rx_buf *out);     /* the file's bytes at rev */
+int rx_git_diff_open(rx_ext *ext, const char *rev1, const char *rev2, const char *path);  /* rev2 NULL: the work tree */
+/* decoders of the bodies (out->body already filled): 0, or -1 for a malformed body */
+int rx_parse_git_repo(rx_git_repo_info *out);
+int rx_parse_git_status(rx_git_status_list *out);
+int rx_parse_blame(rx_blame *out);
+int rx_parse_log(rx_log *out);
+void rx_git_repo_free(rx_git_repo_info *r);
+void rx_git_status_free(rx_git_status_list *s);
+void rx_blame_free(rx_blame *b);
+void rx_log_free(rx_log *l);
+int rx_is_git_changed(const rx_event *event);       /* "0 git changed": ask again */
+int rx_valid_rev(const char *rev);
+/* rhun's checks of a commit message: trims spaces, tabs and line breaks (start and length in
+ * *start, *len); 0 when it is 1 to 8192 bytes without control characters but tab, CR, LF */
+int rx_check_commit_message(const char *m, size_t n, size_t *start, size_t *len);
+/* what commit_message gets: a cancel event names id */
+typedef struct rx_commit_message_ask_s { int64_t id; const char *branch, *diff; size_t branch_len, diff_len; } rx_commit_message_ask;
+int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, rx_commit_message_ask *out);
+/* what quickdiff gets; rx_quickdiff_refresh asks rhun to ask again for a file (NULL: every file) */
+typedef struct rx_quickdiff_ask_s { int64_t id; rx_doc doc; int64_t version; } rx_quickdiff_ask;
+int rx_quickdiff_refresh(rx_ext *ext, const char *path);
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -376,6 +446,17 @@ int rx_nb_output_send(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, const 
                       const void *body, size_t len);
 int rx_nb_stream(rx_ext *ext, int64_t nb, int64_t cell, int64_t run, int is_stderr, const void *data, size_t len);
 int rx_nb_kernel_label(rx_ext *ext, int64_t nb, const char *state, const char *label);
+/* A kernel for notebook nb, started as the user outside the sandbox (rhun asks the user the first
+ * time in a project, so this may wait): program a name of [needs] kernels or an absolute path
+ * whose last part is one, dir "" for the notebook's folder, args and NAME=VALUE env. Returns its
+ * EXEC (its output goes to kernel-EXEC.log in $RHUN_STATE), or -1. rx_nb_exec_signal sends
+ * "interrupt", "terminate" or "kill" to its process group. */
+int64_t rx_nb_exec(rx_ext *ext, int64_t nb, const char *program, const char *dir, const char *const *args, int argc,
+                   const char *const *env, int envc);
+int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal);
+/* The command body of rx_nb_exec (and test-exec), onto out. */
+void rx_command_body(rx_buf *out, const char *program, const char *dir, const char *const *args, int argc,
+                     const char *const *env, int envc);
 
 /* the start of the word (letters, digits, _, non-ASCII) that ends at `at` in text */
 rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at);
@@ -541,8 +622,12 @@ static const char rx_bad_len[] = "a body's length that is not a decimal of at mo
 
 /* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
 static int rx_has_body(const char *line) {
-    return strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
-           strncmp(line, "0 nb-run ", 9) == 0;
+    if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
+        strncmp(line, "0 nb-run ", 9) == 0) return 1;
+    /* ID commit-message LEN */
+    if (line[0] < '1' || line[0] > '9') return 0;
+    const char *sp = strchr(line, ' ');
+    return sp && strncmp(sp + 1, "commit-message ", 15) == 0;
 }
 
 /* a request from rhun followed by a body: nb-open and nb-save (ID VERB NB LEN), up to 64 MB */
@@ -612,7 +697,10 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     rx_buf_free(&line);
     int context_body = strncmp(verb_args, "snippet-context ", 16) == 0;
     int wants_body = strncmp(verb_args, "text ", 5) == 0 || strncmp(verb_args, "range ", 6) == 0 ||
-                     strncmp(verb_args, "ask ", 4) == 0 || context_body;
+                     strncmp(verb_args, "ask ", 4) == 0 || context_body ||
+                     strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
+                     strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
+                     strncmp(verb_args, "git-show ", 9) == 0;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {
@@ -803,6 +891,262 @@ int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan)
     else return 0;
     *watch = id;
     return 1;
+}
+
+/* ---- source control (protocol 1.1): git-data and commit-message ---- */
+
+/* a reader of length-framed bodies: header words, LF, then raw bytes */
+typedef struct { const char *b; size_t len, pos; int bad; } rx_fr;
+
+static const char *rx_fr_word(rx_fr *r, size_t *n) {
+    if (r->pos < r->len && r->b[r->pos] == ' ') r->pos++;
+    size_t s = r->pos;
+    while (r->pos < r->len && r->b[r->pos] != ' ' && r->b[r->pos] != '\n') r->pos++;
+    *n = r->pos - s;
+    if (!*n) r->bad = 1;
+    return r->b + s;
+}
+static int64_t rx_fr_num(rx_fr *r) {
+    size_t n;
+    const char *w = rx_fr_word(r, &n);
+    if (!n || n > 18) { r->bad = 1; return 0; }
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (w[i] < '0' || w[i] > '9') { r->bad = 1; return 0; }
+        v = v * 10 + (w[i] - '0');
+    }
+    return v;
+}
+static void rx_fr_eol(rx_fr *r) {
+    if (r->pos < r->len && r->b[r->pos] == '\n') r->pos++;
+    else r->bad = 1;
+}
+static const char *rx_fr_bytes(rx_fr *r, int64_t n) {
+    if (r->bad || n < 0 || (uint64_t)n > r->len - r->pos) { r->bad = 1; return ""; }
+    const char *p = r->b + r->pos;
+    r->pos += (size_t)n;
+    return p;
+}
+static void rx_fr_sha(rx_fr *r, char out[72]) {
+    size_t n;
+    const char *w = rx_fr_word(r, &n);
+    if (n >= 72) { r->bad = 1; n = 0; }
+    memcpy(out, w, n);
+    out[n] = 0;
+}
+static int rx_fr_done(const rx_fr *r) { return !r->bad && r->pos == r->len ? 0 : -1; }
+
+static int rx_git_ok(rx_ext *ext) {
+    if (rx_has(ext, "git-data")) return 1;
+    snprintf(ext->error, sizeof ext->error, "unknown git-data was not negotiated");
+    return 0;
+}
+
+int rx_valid_rev(const char *rev) {
+    size_t n = rev ? strlen(rev) : 0;
+    if (!n || n > 200 || rev[0] == '-') return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = rev[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strchr("._/~^@{}+-", c))) return 0;
+    }
+    return 1;
+}
+
+int rx_parse_git_repo(rx_git_repo_info *o) {
+    rx_fr r = {o->body.data, o->body.len, 0, 0};
+    int64_t rl = rx_fr_num(&r), bl = rx_fr_num(&r), ul = rx_fr_num(&r);
+    size_t n;
+    const char *w = rx_fr_word(&r, &n);
+    if (n >= sizeof o->head) return -1;
+    memcpy(o->head, w, n), o->head[n] = 0;
+    o->ahead = rx_fr_num(&r), o->behind = rx_fr_num(&r);
+    w = rx_fr_word(&r, &n);
+    if (n >= sizeof o->state) return -1;
+    memcpy(o->state, w, n), o->state[n] = 0;
+    rx_fr_eol(&r);
+    o->root = rx_fr_bytes(&r, rl), o->root_len = (size_t)rl;
+    o->branch = rx_fr_bytes(&r, bl), o->branch_len = (size_t)bl;
+    o->upstream = rx_fr_bytes(&r, ul), o->upstream_len = (size_t)ul;
+    if (strcmp(o->head, "branch") && strcmp(o->head, "detached") && strcmp(o->head, "unborn")) return -1;
+    if (strcmp(o->state, "clean") && strcmp(o->state, "dirty") && strcmp(o->state, "merging") && strcmp(o->state, "rebasing")) return -1;
+    return rx_fr_done(&r);
+}
+
+int rx_parse_git_status(rx_git_status_list *o) {
+    rx_fr r = {o->body.data, o->body.len, 0, 0};
+    int64_t n = rx_fr_num(&r);
+    rx_fr_eol(&r);
+    if (r.bad || n < 0 || (uint64_t)n > r.len) return -1;
+    o->entries = (rx_git_status_entry *)calloc((size_t)n + 1, sizeof *o->entries);
+    if (!o->entries) abort();
+    for (o->n = 0; (int64_t)o->n < n && !r.bad; o->n++) {
+        size_t xl;
+        const char *xy = rx_fr_word(&r, &xl);
+        int64_t pl = rx_fr_num(&r);
+        rx_fr_eol(&r);
+        if (xl != 2) return -1;
+        rx_git_status_entry *e = &o->entries[o->n];
+        e->x = xy[0], e->y = xy[1];
+        e->path = rx_fr_bytes(&r, pl), e->path_len = (size_t)pl;
+    }
+    return rx_fr_done(&r);
+}
+
+int rx_parse_blame(rx_blame *o) {
+    rx_fr r = {o->body.data, o->body.len, 0, 0};
+    int64_t nc = rx_fr_num(&r), nr = rx_fr_num(&r);
+    rx_fr_eol(&r);
+    if (r.bad || (uint64_t)nc > r.len || (uint64_t)nr > r.len) return -1;
+    o->commits = (rx_blame_commit *)calloc((size_t)nc + 1, sizeof *o->commits);
+    o->runs = (rx_blame_run *)calloc((size_t)nr + 1, sizeof *o->runs);
+    if (!o->commits || !o->runs) abort();
+    for (o->ncommits = 0; (int64_t)o->ncommits < nc && !r.bad; o->ncommits++) {
+        rx_blame_commit *c = &o->commits[o->ncommits];
+        rx_fr_sha(&r, c->sha);
+        c->time = rx_fr_num(&r);
+        int64_t al = rx_fr_num(&r), ml = rx_fr_num(&r), sl = rx_fr_num(&r);
+        rx_fr_eol(&r);
+        c->author = rx_fr_bytes(&r, al), c->author_len = (size_t)al;
+        c->mail = rx_fr_bytes(&r, ml), c->mail_len = (size_t)ml;
+        c->summary = rx_fr_bytes(&r, sl), c->summary_len = (size_t)sl;
+    }
+    for (o->nruns = 0; (int64_t)o->nruns < nr && !r.bad; o->nruns++) {
+        rx_blame_run *u = &o->runs[o->nruns];
+        rx_fr_sha(&r, u->sha);
+        u->l1 = rx_fr_num(&r), u->l2 = rx_fr_num(&r), u->orig = rx_fr_num(&r);
+        rx_fr_eol(&r);
+    }
+    return rx_fr_done(&r);
+}
+
+int rx_parse_log(rx_log *o) {
+    rx_fr r = {o->body.data, o->body.len, 0, 0};
+    int64_t n = rx_fr_num(&r);
+    rx_fr_eol(&r);
+    if (r.bad || (uint64_t)n > r.len) return -1;
+    o->entries = (rx_log_entry *)calloc((size_t)n + 1, sizeof *o->entries);
+    if (!o->entries) abort();
+    for (o->n = 0; (int64_t)o->n < n && !r.bad; o->n++) {
+        rx_log_entry *e = &o->entries[o->n];
+        rx_fr_sha(&r, e->sha);
+        size_t pl;
+        const char *p = rx_fr_word(&r, &pl);
+        if (pl == 1 && p[0] == '-') pl = 0;
+        e->parents = p, e->parents_len = pl;
+        e->time = rx_fr_num(&r);
+        int64_t al = rx_fr_num(&r), sl = rx_fr_num(&r);
+        rx_fr_eol(&r);
+        e->author = rx_fr_bytes(&r, al), e->author_len = (size_t)al;
+        e->subject = rx_fr_bytes(&r, sl), e->subject_len = (size_t)sl;
+    }
+    return rx_fr_done(&r);
+}
+
+int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, rx_commit_message_ask *o) {
+    rx_fr r = {(const char *)(body ? body : (const unsigned char *)""), len, 0, 0};
+    int64_t bl = rx_fr_num(&r), dl = rx_fr_num(&r);
+    rx_fr_eol(&r);
+    o->id = id;
+    o->branch = rx_fr_bytes(&r, bl), o->branch_len = (size_t)bl;
+    o->diff = rx_fr_bytes(&r, dl), o->diff_len = (size_t)dl;
+    return rx_fr_done(&r);
+}
+
+int rx_check_commit_message(const char *m, size_t n, size_t *start, size_t *len) {
+    size_t a = 0, b = n;
+    while (a < b && (m[a] == ' ' || m[a] == '\t' || m[a] == '\r' || m[a] == '\n')) a++;
+    while (b > a && (m[b - 1] == ' ' || m[b - 1] == '\t' || m[b - 1] == '\r' || m[b - 1] == '\n')) b--;
+    *start = a, *len = b - a;
+    if (b == a || b - a > 8192) return -1;
+    for (size_t i = a; i < b; i++) {
+        unsigned char c = (unsigned char)m[i];
+        if (c == 0x7f || (c < 0x20 && c != '\t' && c != '\r' && c != '\n')) return -1;
+    }
+    return 0;
+}
+
+int rx_is_git_changed(const rx_event *ev) {
+    return ev && ev->name && strcmp(ev->name, "git") == 0 && ev->argc == 1 && strcmp(ev->argv[0], "changed") == 0;
+}
+
+/* a git-data request whose body (when ok) goes to body, decoded by parse */
+static int rx_git_req(rx_ext *ext, const char *line, const char *path, rx_buf *body) {
+    if (!rx_git_ok(ext)) return -1;
+    return rx_request(ext, line, path, path ? strlen(path) : 0, NULL, body);
+}
+
+int rx_git_repo(rx_ext *ext, rx_git_repo_info *out) {
+    memset(out, 0, sizeof *out);
+    if (rx_git_req(ext, "git-repo", NULL, &out->body) < 0) return -1;
+    if (rx_parse_git_repo(out) == 0) return 0;
+    snprintf(ext->error, sizeof ext->error, "syntax invalid git-repo reply");
+    return -1;
+}
+
+int rx_git_status(rx_ext *ext, rx_git_status_list *out) {
+    memset(out, 0, sizeof *out);
+    if (rx_git_req(ext, "git-status", NULL, &out->body) < 0) return -1;
+    if (rx_parse_git_status(out) == 0) return 0;
+    snprintf(ext->error, sizeof ext->error, "syntax invalid git-status reply");
+    return -1;
+}
+
+int rx_git_blame(rx_ext *ext, rx_doc doc, rx_blame *out) {
+    memset(out, 0, sizeof *out);
+    char line[64];
+    snprintf(line, sizeof line, "git-blame %lld", (long long)doc);
+    if (rx_git_req(ext, line, NULL, &out->body) < 0) return -1;
+    if (rx_parse_blame(out) == 0) return 0;
+    snprintf(ext->error, sizeof ext->error, "syntax invalid git-blame reply");
+    return -1;
+}
+
+int rx_git_log(rx_ext *ext, const char *path, int l1, int l2, int max, rx_log *out) {
+    memset(out, 0, sizeof *out);
+    char line[96];
+    snprintf(line, sizeof line, "git-log %d %d %d %zu", max, l1, l2, path ? strlen(path) : (size_t)0);
+    if (rx_git_req(ext, line, path, &out->body) < 0) return -1;
+    if (rx_parse_log(out) == 0) return 0;
+    snprintf(ext->error, sizeof ext->error, "syntax invalid git-log reply");
+    return -1;
+}
+
+int rx_git_show(rx_ext *ext, const char *rev, const char *path, rx_buf *out) {
+    if (!rx_valid_rev(rev) || !path) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid revision");
+        return -1;
+    }
+    char line[256];
+    snprintf(line, sizeof line, "git-show %s %zu", rev, strlen(path));
+    return rx_git_req(ext, line, path, out);
+}
+
+int rx_git_diff_open(rx_ext *ext, const char *rev1, const char *rev2, const char *path) {
+    if (!rev2) rev2 = "-";
+    if (!rx_valid_rev(rev1) || (strcmp(rev2, "-") && !rx_valid_rev(rev2)) || !path) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid revision");
+        return -1;
+    }
+    char line[512];
+    snprintf(line, sizeof line, "git-diff-open %s %s %zu", rev1, rev2, strlen(path));
+    if (!rx_git_ok(ext)) return -1;
+    return rx_request(ext, line, path, strlen(path), NULL, NULL);
+}
+
+void rx_git_repo_free(rx_git_repo_info *r) { rx_buf_free(&r->body); memset(r, 0, sizeof *r); }
+void rx_git_status_free(rx_git_status_list *s) { free(s->entries); rx_buf_free(&s->body); memset(s, 0, sizeof *s); }
+void rx_blame_free(rx_blame *b) { free(b->commits); free(b->runs); rx_buf_free(&b->body); memset(b, 0, sizeof *b); }
+void rx_log_free(rx_log *l) { free(l->entries); rx_buf_free(&l->body); memset(l, 0, sizeof *l); }
+
+int rx_quickdiff_refresh(rx_ext *ext, const char *path) {
+    if (!rx_has(ext, "quickdiff")) {
+        snprintf(ext->error, sizeof ext->error, "unknown quickdiff was not negotiated");
+        return -1;
+    }
+    if (!path) path = "-";
+    char line[64];
+    snprintf(line, sizeof line, "quickdiff-refresh %zu", strlen(path));
+    return rx_request(ext, line, path, strlen(path), NULL, NULL);
 }
 
 int rx_cmd(rx_ext *ext, const char *name) {
@@ -2013,7 +2357,8 @@ static int rx_nums(char **f, int from, int to) {
     return 1;
 }
 
-static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n) {
+static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                      const unsigned char *rbody, size_t rbody_len) {
     /* ID VERB DOC VERSION, then LINE COL KIND CHAR (12b to 12e), L1 C1 L2 C2 (actions), LINE COL
      * invoked NAME (rename) or TAB_WIDTH SPACES (format) */
     const char *verb = f[1];
@@ -2092,6 +2437,34 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             rx_positive_num(f[3], INT64_MAX, &req.version) && rx_source_kind(f[4])) {
             req.kind = f[4];
             if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+        }
+    } else if (strcmp(verb, "quickdiff") == 0 && n == 4 && h->quickdiff && rx_has(ext, "quickdiff")) {
+        rx_quickdiff_ask req;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
+            rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
+            rx_positive_num(f[3], INT64_MAX, &req.version))
+            ok = h->quickdiff(ext, &req, &body, user);
+    } else if (strcmp(verb, "commit-message") == 0 && n == 3 && h->commit_message && rx_has(ext, "commit-message")) {
+        rx_commit_message_ask req;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
+            rx_parse_commit_message(req.id, rbody, rbody_len, &req) == 0) {
+            rx_buf msg = {NULL, 0, 0};
+            int r = h->commit_message(ext, &req, &msg, user);
+            size_t start = 0, len = 0;
+            if (r > 0 && rx_check_commit_message(msg.data, msg.len, &start, &len) == 0) {
+                rx_buf_add(&body, msg.data + start, len);
+                ok = 1;
+            } else if (r != 0) {
+                /* refused: the handler's reason, or rhun's check, on one line */
+                e.fail = "refused";
+                size_t w = 0;
+                const char *why = r < 0 && msg.len ? msg.data : "an empty, oversized or invalid commit message";
+                size_t wl = r < 0 && msg.len ? msg.len : strlen(why);
+                for (size_t i = 0; i < wl && w + 1 < sizeof e.why; i++) e.why[w++] = why[i] == '\n' || why[i] == '\r' ? ' ' : why[i];
+                e.why[w] = 0;
+                ok = 1;
+            }
+            rx_buf_free(&msg);
         }
     }
     if (ok && e.fail) {
@@ -2297,6 +2670,37 @@ int rx_nb_kernel_label(rx_ext *ext, int64_t nb, const char *state, const char *l
     return rx_request(ext, line, text, n, NULL, NULL);
 }
 
+void rx_command_body(rx_buf *out, const char *program, const char *dir, const char *const *args, int argc,
+                     const char *const *env, int envc) {
+    rx_buf_fmt(out, "%zu %zu %d %d\n", strlen(program), strlen(dir), argc, envc);
+    rx_buf_str(out, program);
+    rx_buf_str(out, dir);
+    for (int i = 0; i < argc + envc; i++) {
+        const char *a = i < argc ? args[i] : env[i - argc];
+        rx_buf_fmt(out, "%zu\n", strlen(a));
+        rx_buf_str(out, a);
+    }
+}
+
+int64_t rx_nb_exec(rx_ext *ext, int64_t nb, const char *program, const char *dir, const char *const *args, int argc,
+                   const char *const *env, int envc) {
+    if (!rx_nb_agreed(ext)) return -1;
+    rx_buf b = {NULL, 0, 0};
+    rx_command_body(&b, program, dir ? dir : "", args, argc, env, envc);
+    char line[96];
+    snprintf(line, sizeof line, "nb-exec %lld %zu", (long long)nb, b.len);
+    int64_t v = rx_req_num(ext, line, b.data, b.len);
+    rx_buf_free(&b);
+    return v;
+}
+
+int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal) {
+    if (!rx_nb_agreed(ext)) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "nb-exec-signal %lld %s", (long long)exec, signal);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
 /* nb-open and nb-save (f: ID VERB NB LEN) with their bodies */
 static void rx_nb_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, const unsigned char *body, size_t len) {
     rx_buf out = {NULL, 0, 0}, line = {NULL, 0, 0};
@@ -2427,6 +2831,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 run.source = m->body ? m->body : (const unsigned char *)"";
                 run.len = m->body_len;
                 h->nb_run(ext, &run, user);
+            } else if (strcmp(f[1], "nb-exec-exit") == 0 && n == 4 && h->nb_exec_exit && rx_has(ext, "notebooks")) {
+                h->nb_exec_exit(ext, atoll(f[2]), strcmp(f[3], "killed") == 0 ? -1 : atoi(f[3]), user);
             } else if (strncmp(f[1], "nb-", 3) == 0 && n == 3 && h->nb_event && rx_has(ext, "notebooks") &&
                        (strcmp(f[1], "nb-interrupt") == 0 || strcmp(f[1], "nb-restart") == 0 ||
                         strcmp(f[1], "nb-kernel") == 0 || strcmp(f[1], "nb-closed") == 0)) {
@@ -2438,7 +2844,7 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
         } else if (n == 4 && f[0][0] >= '1' && f[0][0] <= '9' && rx_host_body(m->line)) {
             rx_nb_answer(ext, h, user, f, m->body, m->body_len);
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9') {
-            rx_answer(ext, h, user, f, n);
+            rx_answer(ext, h, user, f, n, m->body, m->body_len);
         }
         free(copy);
         rx_free_msg(m);

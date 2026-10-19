@@ -68,6 +68,10 @@ request      =/ id SP "nb-output" SP id SP id SP id SP nb-op SP ( num / nb-token
               ; an output body; clear and clear-wait carry none (LEN 0)
 request      =/ id SP "nb-stream" SP id SP id SP id SP ( "stdout" / "stderr" ) SP len
 request      =/ id SP "nb-kernel-label" SP id SP nb-kstate SP len
+request      =/ id SP "nb-exec" SP id SP len
+              ; NB, then a command body as test-exec's; answered "ok" SP id SP num (EXEC)
+request      =/ id SP "nb-exec-signal" SP num SP ( "interrupt" / "terminate" / "kill" )
+event        =/ "0" SP "nb-exec-exit" SP num SP ( num / "killed" )
 nb-state     = "queued" / "running" / "done" / "failed" / "cancelled"
 nb-kstate    = "idle" / "busy" / "starting" / "dead" / "none"
 nb-op        = "append" / "replace" / "clear" / "clear-wait"
@@ -83,3 +87,29 @@ nb-output-body = ( "stdout" / "stderr" / "result" / "display" / "error" ) SP ( n
 nb-item      = nb-token SP num SP num SP len LF
               ; TYPE W H LEN, then LEN bytes
 nb-meta      = *OCTET                        ; META_LEN opaque bytes
+
+; Source control. git-data requires [needs] git = read; replies are length-framed (v1.1.md).
+feature      =/ "git-data"
+request      =/ id SP r-git
+r-git        = "git-repo" / "git-status" / "git-blame" SP doc
+             / "git-log" SP num SP num SP num SP len      ; MAX 1..1000, L1 L2 (0 0: the whole file), path body
+             / "git-show" SP rev SP len                   ; path body
+             / "git-diff-open" SP rev SP ( rev / "-" ) SP len   ; path body; "-" the work tree
+rev          = ( ALPHA / DIGIT / "_" / "." / "/" / "~" / "^" / "@" / "{" / "}" / "+" ) *199( ALPHA / DIGIT / "_" / "." / "/" / "~" / "^" / "@" / "{" / "}" / "+" / "-" )
+event        =/ "0" SP "git" SP "changed"
+git-repo-head = len SP len SP len SP ( "branch" / "detached" / "unborn" ) SP num SP num SP ( "clean" / "dirty" / "merging" / "rebasing" ) LF
+git-status-entry = 2( %x21-7E ) SP len LF                  ; XY ("." an unchanged side), then the path's bytes
+blame-head   = num SP num LF                               ; NC NR
+blame-commit = sha SP num SP len SP len SP len LF          ; then AUTHOR MAIL SUMMARY bytes
+blame-run    = sha SP num SP num SP num LF                 ; L1 L2 ORIG_L1
+log-entry    = sha SP ( sha *( "," sha ) / "-" ) SP num SP len SP len LF   ; then AUTHOR SUBJECT bytes
+sha          = 40HEXDIG / 64HEXDIG
+
+; commit-message: rhun asks; body BRANCH_LEN DIFF_LEN LF <BRANCH><DIFF>; the answer is the message
+feature      =/ "commit-message"
+host-request =/ id SP "commit-message" SP len
+
+; quickdiff: rhun asks for a file's base text (ok ID LEN + the bytes, ok ID 0 for none)
+feature      =/ "quickdiff"
+host-request =/ id SP "quickdiff" SP doc SP version
+request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"

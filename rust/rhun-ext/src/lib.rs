@@ -37,6 +37,7 @@ pub mod complete;
 pub mod lang;
 pub mod notebook;
 pub mod picture;
+pub mod scm;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
@@ -57,12 +58,16 @@ pub use lang::{
     SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
 };
 pub use picture::{Color, Picture};
-pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
+pub use scm::{
+    Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
+    LogEntry, LogOf, QuickDiffRequest,
+};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
 };
+pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 
 #[cfg(test)]
 mod tests {
@@ -149,6 +154,14 @@ pub enum Feature {
     /// Notebooks: [`Handler::nb_open`], [`Handler::nb_save`], [`Handler::nb_run`] and the
     /// [`Ext::nb_state`] family ([`notebook`]).
     Notebooks,
+    /// Git data through rhun: [`Ext::git_repo`], [`Ext::git_status`], [`Ext::git_blame`],
+    /// [`Ext::git_log`], [`Ext::git_show`], [`Ext::git_diff_open`]; needs `[needs] git = read`.
+    GitData,
+    /// Commit messages for Generate: [`Handler::commit_message`]; `[provides] commit_message = yes`.
+    CommitMessage,
+    /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
+    /// `[provides] quickdiff = PATTERNS`.
+    QuickDiff,
 }
 
 impl Feature {
@@ -170,6 +183,9 @@ impl Feature {
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
             Feature::Notebooks => "notebooks",
+            Feature::GitData => "git-data",
+            Feature::CommitMessage => "commit-message",
+            Feature::QuickDiff => "quickdiff",
         }
     }
 }
@@ -570,6 +586,24 @@ pub trait Handler: Send {
     fn nb_kernel(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
     /// The notebook's tab closed.
     fn nb_closed(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// A kernel started with [`Ext::nb_exec`] ended: its exit status (128 + N after signal N), or
+    /// `None` when rhun ended it.
+    fn nb_exec_exit(&mut self, _ext: &Ext, _exec: notebook::ExecId, _code: Option<i32>) {}
+    /// rhun asks for a commit message (feature `commit-message`): the message, or why not (shown
+    /// to the user). rhun trims it and refuses one over 8192 bytes or with control characters
+    /// ([`scm::check_commit_message`]). A `cancel` event names `req.id`.
+    fn commit_message(
+        &mut self,
+        _ext: &Ext,
+        _req: &CommitMessageRequest,
+    ) -> Result<String, String> {
+        Err("no commit messages here".to_string())
+    }
+    /// rhun asks for a file's quick-diff base (feature `quickdiff`): its bytes, or `None` to
+    /// leave the gutter marks to git.
+    fn quickdiff(&mut self, _ext: &Ext, _req: &QuickDiffRequest) -> Option<Vec<u8>> {
+        None
+    }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
 }
@@ -580,6 +614,7 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
+        /// The body of a request that has one (`commit-message`, `nb-open`, `nb-save`).
         body: Vec<u8>,
     },
     End,
@@ -1073,7 +1108,18 @@ impl Ext {
                     let verb = waiter.as_ref().map(|w| w.0.as_str()).unwrap_or("");
                     let mut body = Vec::new();
                     if fields[0] == "ok"
-                        && matches!(verb, "text" | "range" | "ask" | "snippet-context")
+                        && matches!(
+                            verb,
+                            "text"
+                                | "range"
+                                | "ask"
+                                | "snippet-context"
+                                | "git-repo"
+                                | "git-status"
+                                | "git-blame"
+                                | "git-log"
+                                | "git-show"
+                        )
                     {
                         let len: usize = if verb == "snippet-context" {
                             match fields
@@ -1152,10 +1198,16 @@ impl Ext {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
                         let mut body = Vec::new();
-                        if verb == "nb-open" || verb == "nb-save" {
+                        let cap: Option<usize> = match verb.as_str() {
                             // a notebook body: 64 MB at most, and its path
+                            "nb-open" | "nb-save" => Some(notebook::BODY_MAX + 65536),
+                            // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
+                            "commit-message" => Some(4 << 20),
+                            _ => None,
+                        };
+                        if let Some(cap) = cap {
                             let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
-                                Some(n) if n <= notebook::BODY_MAX + 65536 => n,
+                                Some(n) if n <= cap => n,
                                 _ => break,
                             };
                             body = vec![0; len];
@@ -1232,6 +1284,10 @@ impl Ext {
                                 h.nb_run(self, &r);
                             }
                         }
+                        "nb-exec-exit" if self.has(Feature::Notebooks) && ev.fields.len() == 2 => {
+                            let code = ev.fields[1].parse::<i32>().ok();
+                            h.nb_exec_exit(self, ev.num(0) as u64, code);
+                        }
                         "nb-interrupt" | "nb-restart" | "nb-kernel" | "nb-closed"
                             if self.has(Feature::Notebooks) =>
                         {
@@ -1254,7 +1310,7 @@ impl Ext {
                     id,
                     verb,
                     fields,
-                    body: hbody,
+                    body: req_body,
                 } => {
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
@@ -1289,15 +1345,30 @@ impl Ext {
                                 }
                             })
                         }
-                        "nb-open" if self.has(Feature::Notebooks) => notebook::NbOpen::parse(id, &fields, &hbody)
+                        "nb-open" if self.has(Feature::Notebooks) => notebook::NbOpen::parse(id, &fields, &req_body)
                             .map(|r| match h.nb_open(self, &r) {
                                 Ok(n) => Ok(n.encode()),
                                 Err(why) => Err(("refused", why)),
                             }),
                         "nb-save" if self.has(Feature::Notebooks) => {
-                            notebook::NbSave::parse(id, &fields, &hbody).map(|r| match r {
+                            notebook::NbSave::parse(id, &fields, &req_body).map(|r| match r {
                                 Ok(r) => h.nb_save(self, &r).map_err(|why| ("refused", why)),
                                 Err(why) => Err(("syntax", why)),
+                            })
+                        }
+                        "quickdiff" if self.has(Feature::QuickDiff) => {
+                            QuickDiffRequest::parse(id, &fields)
+                                .map(|r| Ok(h.quickdiff(self, &r).unwrap_or_default()))
+                        }
+                        "commit-message" if self.has(Feature::CommitMessage) => {
+                            CommitMessageRequest::parse(id, &req_body).map(|r| {
+                                match h.commit_message(self, &r) {
+                                    Ok(m) => match scm::check_commit_message(&m) {
+                                        Ok(m) => Ok(m.as_bytes().to_vec()),
+                                        Err(why) => Err(("refused", why)),
+                                    },
+                                    Err(why) => Err(("refused", why)),
+                                }
                             })
                         }
                         _ => None,

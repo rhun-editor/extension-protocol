@@ -128,3 +128,50 @@ func TestNotebookWire(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type toyExecs struct{ exits chan [2]int64 }
+
+func (p *toyExecs) Ready(*Ext, string)    {}
+func (p *toyExecs) Event(*Ext, Event)     {}
+func (p *toyExecs) Run(*Ext, string, Doc) {}
+func (p *toyExecs) NbExecExit(e *Ext, exec int64, code int, killed bool) {
+	if killed {
+		code = -1
+	}
+	p.exits <- [2]int64{exec, int64(code)}
+}
+
+func TestNotebookExec(t *testing.T) {
+	c := &Command{Program: "python3", Args: []string{"-m", "ipykernel_launcher"}, Env: []string{"A=b"}}
+	b := c.Encode()
+	if string(b) != "7 0 2 1\npython32\n-m18\nipykernel_launcher3\nA=b" {
+		t.Fatalf("%q", b)
+	}
+	back, err := ParseCommand(b)
+	if err != nil || !reflect.DeepEqual(back, c) {
+		t.Fatal(back, err)
+	}
+	for _, bad := range []string{"0 0 0 0\n", "1 0 0 1\nx1\nA", "1 0 1 0\nx5\nab", "1 0 0 0\nxy"} {
+		if _, err := ParseCommand([]byte(bad)); err == nil {
+			t.Fatal(bad)
+		}
+	}
+	input, hostW := io.Pipe()
+	hostR, output := io.Pipe()
+	defer hostR.Close()
+	p := &toyExecs{exits: make(chan [2]int64, 2)}
+	done := make(chan error, 1)
+	go func() { done <- RunOnWith(input, output, io.Discard, []string{FeatureNotebooks}, p) }()
+	r := bufio.NewReader(hostR)
+	r.ReadString('\n')
+	io.WriteString(hostW, "0 features notebooks\n0 ready -\n0 nb-exec-exit 4 3\n0 nb-exec-exit 5 killed\n0 bye\n")
+	if x := <-p.exits; x != [2]int64{4, 3} {
+		t.Fatal(x)
+	}
+	if x := <-p.exits; x != [2]int64{5, -1} {
+		t.Fatal(x)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
