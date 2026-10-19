@@ -279,7 +279,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				ext.answerChildren(h, ev)
 				continue
 			}
-			ext.answer(h, ev.Args)
+			ext.answer(h, ev.Args, ev.Body)
 		case "view":
 			if rv, ok := h.(RetainedViewer); ok {
 				if open, ok := parseViewOpen(ev); ok {
@@ -462,6 +462,20 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			}
 		}
 		if len(fields) > 1 && fields[1] == "save-actions" {
+			if _, err := e.beginSource(id); err != nil {
+				return nil, err
+			}
+		}
+		// commit-message (LEN) is followed by a body; "0 cancel ID" ends its context
+		if len(fields) == 3 && fields[1] == FeatureCommitMessage {
+			n, ok := bodyLen(fields[2], MaxEventBody)
+			if !ok {
+				return nil, fmt.Errorf("a commit-message length %q", fields[2])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err
 			}
