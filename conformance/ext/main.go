@@ -1310,8 +1310,8 @@ func main() {
 	if m.protocol != 1 {
 		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
 	}
-	if len(m.commands) == 0 {
-		h.fail("manifest", "no [commands]: the extension can never be started on a command")
+	if len(m.commands) == 0 && len(m.provides) == 0 {
+		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
 	schemaFails := 0
@@ -1517,7 +1517,12 @@ func main() {
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
-	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0]))
+	// an extension without commands (one that [provides] only) gets a command it does not have
+	first := "nothing"
+	if len(m.commands) > 0 {
+		first = m.commands[0]
+	}
+	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, first))
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1527,7 +1532,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0])
+	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, first)
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)
