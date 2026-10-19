@@ -159,3 +159,139 @@ func TestHoverQuery(t *testing.T) {
 	s2.send("0 ready -\n6 hover-query 4 7 2 5 pointer -\n")
 	s2.expect("error 6 unknown no such request")
 }
+
+func (m *moreProbe) SelectionRanges(ext *Ext, req SelectionRangesRequest) [][]Range {
+	out := make([][]Range, 0, len(req.Positions))
+	for _, p := range req.Positions {
+		switch p.Line {
+		case 1: // equal ranges skipped, the chain ends at one not containing the one before
+			out = append(out, []Range{rg(1, 5, 1, 8), rg(1, 5, 1, 8), rg(1, 1, 1, 20), rg(1, 2, 2, 1), rg(1, 1, 9, 1)})
+		case 2: // nothing for this one
+			out = append(out, nil)
+		default:
+			out = append(out, []Range{rg(p.Line, 1, p.Line, 9), rg(p.Line, 9, p.Line, 1)})
+		}
+	}
+	return out
+}
+
+func item(name string, data string) HierarchyItem {
+	return HierarchyItem{Kind: SymbolFunction, Name: name, Detail: "pkg", Target: Target{Path: "/p/a.go"},
+		Range: rg(3, 1, 9, 2), Selection: rg(3, 6, 3, 6+len(name)), Data: []byte(data)}
+}
+
+func itemRec(kind, rng, sel, path, name, detail, data string, sites ...string) string {
+	head := fmt.Sprintf("%s %s %s %d %d %d %d", kind, rng, sel, len(path), len(name), len(detail), len(data))
+	if len(sites) > 0 {
+		head += fmt.Sprintf(" %d", len(sites))
+	}
+	s := head + "\n" + path + name + detail + data
+	for _, r := range sites {
+		s += r + "\n"
+	}
+	return s
+}
+
+func (m *moreProbe) CallHierarchy(ext *Ext, req HierarchyRequest) []HierarchyItem {
+	bad := item("bad", "")
+	bad.Range = rg(9, 1, 3, 1)
+	sel := item("outside", "o")
+	sel.Selection = rg(1, 1, 1, 2)
+	return []HierarchyItem{item("main", "m1"), {Name: ""}, bad, sel}
+}
+
+func (m *moreProbe) CallsIn(ext *Ext, data []byte, out *Stream) []Call {
+	if err := out.PartCalls([]Call{{Item: item("caller", "c1"), Sites: []Range{rg(4, 2, 4, 6)}}}); err != nil {
+		return []Call{{Item: item("nostream", ""), Sites: []Range{rg(1, 1, 1, 2)}}}
+	}
+	return []Call{{Item: item("late"+string(data), ""), Sites: []Range{rg(5, 1, 5, 2), rg(6, 2, 6, 1), rg(7, 1, 7, 3)}},
+		{Item: item("nosites", "")}}
+}
+
+func (m *moreProbe) CallsOut(ext *Ext, data []byte, out *Stream) []Call { return nil }
+
+func (m *moreProbe) TypeHierarchy(ext *Ext, req HierarchyRequest) []HierarchyItem {
+	it := item("Shape", "t")
+	it.Kind = SymbolInterface
+	return []HierarchyItem{it}
+}
+
+func (m *moreProbe) Supertypes(ext *Ext, data []byte, out *Stream) []HierarchyItem {
+	return []HierarchyItem{item("Base"+string(data), "b")}
+}
+
+func (m *moreProbe) Subtypes(ext *Ext, data []byte, out *Stream) []HierarchyItem {
+	huge := item("Huge", strings.Repeat("x", MaxHierarchyData+1))
+	return []HierarchyItem{huge, item("Sub", "")}
+}
+
+func TestSelectionRanges(t *testing.T) {
+	s := startHost(t, []string{FeatureSelectionRanges}, &moreProbe{})
+	s.expect("hello 1 selection-ranges")
+	s.send("0 features selection-ranges\n0 ready -\n")
+	s.send("3 selection-ranges 4 7 3 12\n1 6\n2 3\n5 4\n")
+	s.answer(3, "2\n1 5 1 8\n1 1 1 20\n1\n2 3 2 3\n1\n5 1 5 9\n")
+	s.send("4 selection-ranges 4 7 2 8\n5 4\n2 3\n") // the empty group last: the answer ends before it
+	s.answer(4, "1\n5 1 5 9\n")
+	s.send("5 selection-ranges 4 7 2 4\n5 4\n") // N does not match the positions
+	s.expect("error 5 unknown no such request")
+	// the outermost ranges go until the body fits 64 KiB
+	at := make([]Pos, 64)
+	groups := make([][]Range, 64)
+	for i := range groups {
+		at[i] = Pos{1000000, 1000}
+		for j := 0; j < 64; j++ {
+			groups[i] = append(groups[i], rg(1000000-j, 1000-j, 1000000+j, 1000+j))
+		}
+	}
+	b := EncodeSelectionRanges(at, groups)
+	if len(b) > MaxSelectionBody || !strings.HasPrefix(string(b), "42\n1000000 1000 1000000 1000\n") {
+		t.Fatalf("%d bytes: %q", len(b), b[:40])
+	}
+}
+
+func TestHierarchy(t *testing.T) {
+	s := startHost(t, []string{FeatureHierarchy, FeatureQueryStream}, &moreProbe{})
+	s.expect("hello 1 hierarchy query-stream")
+	s.send("0 features hierarchy query-stream\n0 ready -\n")
+	s.send("3 call-hierarchy 4 7 3 7 invoked -\n")
+	s.answer(3, "2\n"+itemRec("function", "3 1 9 2", "3 6 3 10", "/p/a.go", "main", "pkg", "m1")+
+		itemRec("function", "3 1 9 2", "3 1 9 2", "/p/a.go", "outside", "pkg", "o"))
+	s.send("4 calls-in 2\nm1")
+	part := "1\n" + itemRec("function", "3 1 9 2", "3 6 3 12", "/p/a.go", "caller", "pkg", "c1", "4 2 4 6")
+	s.expect(fmt.Sprintf("1 query-part 4 %d", len(part)))
+	if b := s.body(len(part)); b != part {
+		t.Fatalf("part %q", b)
+	}
+	s.send("ok 1\n")
+	s.answer(4, "1\n"+itemRec("function", "3 1 9 2", "3 6 3 12", "/p/a.go", "latem1", "pkg", "", "5 1 5 2", "7 1 7 3"))
+	s.send("5 calls-out 1\nx")
+	s.answer(5, "0\n")
+	s.send("6 type-hierarchy 4 7 3 7 invoked -\n")
+	s.answer(6, "1\n"+itemRec("interface", "3 1 9 2", "3 6 3 11", "/p/a.go", "Shape", "pkg", "t"))
+	s.send("7 supertypes 1\nt")
+	s.answer(7, "1\n"+itemRec("function", "3 1 9 2", "3 6 3 11", "/p/a.go", "Baset", "pkg", "b"))
+	s.send("8 subtypes 1\nt")
+	s.answer(8, "1\n"+itemRec("function", "3 1 9 2", "3 6 3 9", "/p/a.go", "Sub", "pkg", ""))
+	// a part answered cancelled: the handler returns what it has, rhun drops it
+	s.send("9 calls-in 2\nm1")
+	s.line()
+	s.body(len(part))
+	s.send("error 2 cancelled\n")
+	s.answer(9, "1\n"+itemRec("function", "3 1 9 2", "3 6 3 14", "/p/a.go", "nostream", "pkg", "", "1 1 1 2"))
+	// roots: at most 64
+	roots := make([]HierarchyItem, 70)
+	for i := range roots {
+		roots[i] = item("r", "")
+	}
+	if b := EncodeHierarchyRoots(roots); !strings.HasPrefix(string(b), "64\n") {
+		t.Fatalf("roots %q", b[:8])
+	}
+	sites := make([]Range, MaxCallSites+5)
+	for i := range sites {
+		sites[i] = rg(1, 1, 1, 2)
+	}
+	if b := EncodeCalls([]Call{{Item: item("c", ""), Sites: sites}}); !strings.Contains(string(b), " 1000\n") {
+		t.Fatalf("sites %q", b[:80])
+	}
+}
