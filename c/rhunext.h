@@ -164,6 +164,10 @@ typedef struct {
     /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
      * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
     int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
+    /* Resources group, feature urls: "0 link ID LEN", a link made by rx_link (request ID) reached
+     * rhun; link is the whole link with the path and query the browser added (len bytes, NUL
+     * after them). */
+    void (*link)(rx_ext *ext, int64_t id, const char *link, size_t len, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -205,6 +209,36 @@ int rx_secret_key_valid(const char *key);
  * without LF, CR or NUL. rx_open takes a URI too; rx_content_changed asks rhun to read again. */
 int rx_uri_valid(const char *uri);
 int rx_content_changed(rx_ext *ext, const char *uri);
+/* Feature urls. rx_open_url asks rhun to open an http(s) URL in the user's browser (the user sees
+ * the extension and the host, and chooses): 1 opened, 2 copied (the user copied the link), -1 on
+ * an error ("cancelled" when the user said no). rx_external_uri: the URI the user's browser can use
+ * for a loopback URL or a rhun: link; rx_link: a one-shot rhun://ext/OWNER/NAME/TOKEN link (ten
+ * minutes) to append a path and query to; both malloc'd and NUL-terminated (free() them), or NULL.
+ * rx_parse_link reads the link event (also given to the link handler). */
+int rx_open_url(rx_ext *ext, const char *url);
+char *rx_external_uri(rx_ext *ext, const char *uri);
+char *rx_link(rx_ext *ext);
+int rx_parse_link(const rx_event *event, int64_t *id, const char **link, size_t *len);
+#ifdef RHUNEXT_AUTH
+/* Signing in (define RHUNEXT_AUTH before including; on Windows link ws2_32 and bcrypt; with
+ * -std=c99 on Linux define _POSIX_C_SOURCE 200809L first): OAuth's authorization code flow with
+ * PKCE (RFC 7636, S256) and the redirect received on a one-shot loopback HTTP listener on
+ * 127.0.0.1. Pass rx_loopback_redirect_uri through rx_external_uri, open the authorization URL with
+ * rx_open_url, then rx_loopback_wait: 1 with the redirect's query (malloc'd, free() it) once its
+ * state matches, 0 on the timeout, -1 on an error parameter or a wrong state. The browser is told
+ * "Signed in. You can close this tab." rx_query_get: a query value decoded (malloc'd) or NULL. */
+typedef struct { char verifier[44], challenge[44]; } rx_pkce;
+int rx_random_hex(char *out, size_t nbytes);            /* out holds 2 * nbytes + 1 */
+int rx_pkce_new(rx_pkce *p);
+void rx_pkce_challenge(const char *verifier, char out[44]);
+void rx_sha256(const void *data, size_t len, unsigned char out[32]);
+typedef struct { intptr_t fd; int port; } rx_loopback;
+int rx_loopback_listen(rx_loopback *lb);
+void rx_loopback_redirect_uri(const rx_loopback *lb, char *out, size_t cap);
+int rx_loopback_wait(rx_loopback *lb, const char *state, int timeout_ms, char **query);
+void rx_loopback_close(rx_loopback *lb);
+char *rx_query_get(const char *query, const char *name);
+#endif
 /* Source control (protocol 1.1). Feature "git-data" with [needs] git = read: rhun's Git data.
  * Requests return 0 on ok (-1 and rx_error otherwise); results own their body: free them with
  * their _free function. Strings point into the body and are not NUL-terminated (use the lengths).
@@ -446,8 +480,19 @@ const char *rx_event_tail(const rx_event *ev, int n);
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
+#ifdef RHUNEXT_AUTH
+#include <winsock2.h>
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 #include <fcntl.h>
 #include <io.h>
+#elif defined(RHUNEXT_AUTH)
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #endif
 
 #define RX_MAXF 32
@@ -589,9 +634,10 @@ static void rx_gone(rx_ext *ext, const char *why) {
 
 static const char rx_bad_len[] = "a body's length that is not a decimal of at most 10 digits within its cap";
 
-/* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
+/* the events followed by a body, LEN their last field: edits (6a), action (12f) and link */
 static int rx_has_body(const char *line) {
-    if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
+    if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
+        strncmp(line, "0 link ", 7) == 0) return 1;
     /* ID commit-message LEN */
     if (line[0] < '1' || line[0] > '9') return 0;
     const char *sp = strchr(line, ' ');
@@ -659,6 +705,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     int wants_body = strncmp(verb_args, "text ", 5) == 0 || strncmp(verb_args, "range ", 6) == 0 ||
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
                      strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0 ||
+                     strncmp(verb_args, "external-uri ", 13) == 0 || strcmp(verb_args, "link") == 0 ||
 
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
@@ -865,6 +912,279 @@ int rx_content_changed(rx_ext *ext, const char *uri) {
     rx_buf_free(&line);
     return r;
 }
+
+int rx_open_url(rx_ext *ext, const char *url) {
+    if (!rx_has(ext, "urls")) {
+        snprintf(ext->error, sizeof ext->error, "unknown urls feature was not agreed");
+        return -1;
+    }
+    size_t n = url ? strlen(url) : 0;
+    int ok = n && n <= 8192 && (strncmp(url, "https://", 8) == 0 || strncmp(url, "http://", 7) == 0);
+    for (size_t i = 0; ok && i < n; i++)
+        if ((unsigned char)url[i] <= ' ' || url[i] == 0x7f) ok = 0;
+    if (!ok) {
+        snprintf(ext->error, sizeof ext->error, "syntax not an http or https URL");
+        return -1;
+    }
+    char line[48];
+    snprintf(line, sizeof line, "open-url %zu", n);
+    rx_buf f = {NULL, 0, 0};
+    int r = rx_request(ext, line, url, n, &f, NULL);
+    int copied = r == 0 && f.data && strncmp(f.data, "copied", 6) == 0;
+    rx_buf_free(&f);
+    return r < 0 ? -1 : copied ? 2 : 1;
+}
+
+static char *rx_url_body(rx_ext *ext, const char *line, const char *body, size_t n) {
+    if (!rx_has(ext, "urls")) {
+        snprintf(ext->error, sizeof ext->error, "unknown urls feature was not agreed");
+        return NULL;
+    }
+    rx_buf b = {NULL, 0, 0};
+    if (rx_request(ext, line, body, n, NULL, &b) < 0) {
+        rx_buf_free(&b);
+        return NULL;
+    }
+    rx_buf_add(&b, "", 1);
+    return b.data;
+}
+
+char *rx_external_uri(rx_ext *ext, const char *uri) {
+    char line[48];
+    size_t n = uri ? strlen(uri) : 0;
+    snprintf(line, sizeof line, "external-uri %zu", n);
+    return rx_url_body(ext, line, uri, n);
+}
+
+char *rx_link(rx_ext *ext) { return rx_url_body(ext, "link", NULL, 0); }
+
+int rx_parse_link(const rx_event *event, int64_t *id, const char **link, size_t *len) {
+    if (!event || !event->name || strcmp(event->name, "link") || event->argc != 2) return 0;
+    int64_t v = atoll(event->argv[0]);
+    if (v <= 0) return 0;
+    if (id) *id = v;
+    if (link) *link = event->body ? (const char *)event->body : "";
+    if (len) *len = event->body_len;
+    return 1;
+}
+
+#ifdef RHUNEXT_AUTH
+void rx_sha256(const void *data, size_t len, unsigned char out[32]) {
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    const unsigned char *p = (const unsigned char *)data;
+    size_t total = len + 9 + (64 - (len + 9) % 64) % 64;
+#define RX_ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+    for (size_t off = 0; off < total; off += 64) {
+        unsigned char blk[64];
+        for (int i = 0; i < 64; i++) {
+            size_t j = off + i;
+            if (j < len) blk[i] = p[j];
+            else if (j == len) blk[i] = 0x80;
+            else if (j >= total - 8) blk[i] = (unsigned char)(((uint64_t)len * 8) >> (8 * (total - 1 - j)));
+            else blk[i] = 0;
+        }
+        uint32_t w[64], v[8];
+        for (int i = 0; i < 16; i++)
+            w[i] = (uint32_t)blk[4 * i] << 24 | (uint32_t)blk[4 * i + 1] << 16 | (uint32_t)blk[4 * i + 2] << 8 | blk[4 * i + 3];
+        for (int i = 16; i < 64; i++) {
+            uint32_t s0 = RX_ROR(w[i - 15], 7) ^ RX_ROR(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            uint32_t s1 = RX_ROR(w[i - 2], 17) ^ RX_ROR(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        memcpy(v, h, sizeof v);
+        for (int i = 0; i < 64; i++) {
+            uint32_t t1 = v[7] + (RX_ROR(v[4], 6) ^ RX_ROR(v[4], 11) ^ RX_ROR(v[4], 25)) +
+                          ((v[4] & v[5]) ^ (~v[4] & v[6])) + k[i] + w[i];
+            uint32_t t2 = (RX_ROR(v[0], 2) ^ RX_ROR(v[0], 13) ^ RX_ROR(v[0], 22)) +
+                          ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+            memmove(v + 1, v, 7 * sizeof v[0]);
+            v[4] += t1;
+            v[0] = t1 + t2;
+        }
+        for (int i = 0; i < 8; i++) h[i] += v[i];
+    }
+#undef RX_ROR
+    for (int i = 0; i < 8; i++)
+        out[4 * i] = (unsigned char)(h[i] >> 24), out[4 * i + 1] = (unsigned char)(h[i] >> 16),
+        out[4 * i + 2] = (unsigned char)(h[i] >> 8), out[4 * i + 3] = (unsigned char)h[i];
+}
+
+static int rx_random(unsigned char *out, size_t n) {
+#ifdef _WIN32
+    return BCryptGenRandom(NULL, out, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0 ? 0 : -1;
+#else
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (!f) return -1;
+    size_t got = fread(out, 1, n, f);
+    fclose(f);
+    return got == n ? 0 : -1;
+#endif
+}
+
+int rx_random_hex(char *out, size_t nbytes) {
+    unsigned char b[256];
+    if (nbytes > sizeof b || rx_random(b, nbytes)) return -1;
+    for (size_t i = 0; i < nbytes; i++) snprintf(out + 2 * i, 3, "%02x", b[i]);
+    out[2 * nbytes] = 0;
+    return 0;
+}
+
+static void rx_base64url(const unsigned char *d, size_t n, char *out) {
+    static const char a[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = (uint32_t)d[i] << 16 | (i + 1 < n ? (uint32_t)d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        size_t chars = n - i >= 3 ? 4 : n - i + 1;
+        for (size_t c = 0; c < chars; c++) out[o++] = a[(v >> (18 - 6 * c)) & 63];
+    }
+    out[o] = 0;
+}
+
+void rx_pkce_challenge(const char *verifier, char out[44]) {
+    unsigned char sum[32];
+    rx_sha256(verifier, strlen(verifier), sum);
+    rx_base64url(sum, 32, out);
+}
+
+int rx_pkce_new(rx_pkce *p) {
+    unsigned char b[32];
+    if (rx_random(b, sizeof b)) return -1;
+    rx_base64url(b, sizeof b, p->verifier);
+    rx_pkce_challenge(p->verifier, p->challenge);
+    return 0;
+}
+
+#ifdef _WIN32
+#define RX_CLOSESOCK(fd) closesocket((SOCKET)(fd))
+#else
+#define RX_CLOSESOCK(fd) close((int)(fd))
+#endif
+
+int rx_loopback_listen(rx_loopback *lb) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa)) return -1;
+#endif
+    intptr_t fd = (intptr_t)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(0x7f000001);
+    socklen_t al = sizeof a;
+    if (bind(fd, (struct sockaddr *)&a, sizeof a) || listen(fd, 8) || getsockname(fd, (struct sockaddr *)&a, &al)) {
+        RX_CLOSESOCK(fd);
+        return -1;
+    }
+    lb->fd = fd;
+    lb->port = ntohs(a.sin_port);
+    return 0;
+}
+
+void rx_loopback_redirect_uri(const rx_loopback *lb, char *out, size_t cap) {
+    snprintf(out, cap, "http://127.0.0.1:%d/callback", lb->port);
+}
+
+void rx_loopback_close(rx_loopback *lb) {
+    if (lb->fd >= 0) RX_CLOSESOCK(lb->fd);
+    lb->fd = -1;
+}
+
+static int rx_hexval(int c) {
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+char *rx_query_get(const char *query, const char *name) {
+    size_t nl = strlen(name);
+    for (const char *p = query; p && *p;) {
+        const char *end = strchr(p, '&');
+        if (!end) end = p + strlen(p);
+        if ((size_t)(end - p) > nl && strncmp(p, name, nl) == 0 && p[nl] == '=') {
+            char *out = (char *)malloc((size_t)(end - p));
+            if (!out) abort();
+            size_t o = 0;
+            for (const char *q = p + nl + 1; q < end; q++) {
+                if (*q == '%' && q + 2 < end && rx_hexval(q[1]) >= 0 && rx_hexval(q[2]) >= 0) {
+                    out[o++] = (char)(rx_hexval(q[1]) * 16 + rx_hexval(q[2]));
+                    q += 2;
+                } else {
+                    out[o++] = *q == '+' ? ' ' : *q;
+                }
+            }
+            out[o] = 0;
+            return out;
+        }
+        p = *end ? end + 1 : end;
+    }
+    return NULL;
+}
+
+int rx_loopback_wait(rx_loopback *lb, const char *state, int timeout_ms, char **query) {
+    for (;;) {
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(lb->fd, &rd);
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000, tv.tv_usec = (timeout_ms % 1000) * 1000;
+        if (select((int)lb->fd + 1, &rd, NULL, NULL, &tv) <= 0) return 0;
+        intptr_t c = (intptr_t)accept(lb->fd, NULL, NULL);
+        if (c < 0) return -1;
+        char req[8192];
+        size_t n = 0;
+        while (n < sizeof req - 1) {
+            FD_ZERO(&rd);
+            FD_SET(c, &rd);
+            tv.tv_sec = 5, tv.tv_usec = 0;
+            if (select((int)c + 1, &rd, NULL, NULL, &tv) <= 0) break;
+            int got = (int)recv(c, req + n, (int)(sizeof req - 1 - n), 0);
+            if (got <= 0) break;
+            n += (size_t)got;
+            req[n] = 0;
+            if (strstr(req, "\r\n\r\n")) break;
+        }
+        req[n] = 0;
+        /* GET /callback?QUERY HTTP/1.1 */
+        char *target = strchr(req, ' ');
+        char *end = target ? strchr(target + 1, ' ') : NULL;
+        int is_cb = end && strncmp(target + 1, "/callback", 9) == 0 && (target[10] == '?' || target + 10 == end);
+        if (!is_cb) {
+            const char nf[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            send(c, nf, (int)(sizeof nf - 1), 0);
+            RX_CLOSESOCK(c);
+            continue;
+        }
+        *end = 0;
+        const char *q = target[10] == '?' ? target + 11 : "";
+        char *got_state = rx_query_get(q, "state"), *code = rx_query_get(q, "code"), *err = rx_query_get(q, "error");
+        int ok = !err && code && got_state && strcmp(got_state, state) == 0;
+        free(got_state), free(code), free(err);
+        const char *body = ok ? "<!doctype html><title>Signed in</title><p>Signed in. You can close this tab and return to rhun."
+                              : "<!doctype html><title>Sign-in failed</title><p>Sign-in failed. You can close this tab.";
+        char head[160];
+        int hl = snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+                          "Content-Length: %zu\r\nConnection: close\r\n\r\n", strlen(body));
+        send(c, head, hl, 0);
+        send(c, body, (int)strlen(body), 0);
+        RX_CLOSESOCK(c);
+        if (!ok) return -1;
+        if (query) {
+            *query = (char *)malloc(strlen(q) + 1);
+            if (!*query) abort();
+            strcpy(*query, q);
+        }
+        return 1;
+    }
+}
+#endif /* RHUNEXT_AUTH */
 
 int rx_secret_key_valid(const char *key) {
     size_t n = key ? strlen(key) : 0;
@@ -2638,6 +2958,11 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 rx_view_dispatch(ext, h, user, f, n);
             } else if (strcmp(f[1], "content-closed") == 0 && h->content_closed) {
                 h->content_closed(ext, ev.rest, user);
+            } else if (strcmp(f[1], "link") == 0 && h->link) {
+                int64_t id;
+                const char *link;
+                size_t len;
+                if (rx_parse_link(&ev, &id, &link, &len)) h->link(ext, id, link, len, user);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "bye") == 0) {

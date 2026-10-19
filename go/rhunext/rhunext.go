@@ -390,12 +390,14 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "bye" {
 			e.cancelSources(false)
 		}
-		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
+		// edits (DOC VERSION LEN), action (LEN) and link (ID LEN) are followed by a body
 		lenAt := -1
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "link" && len(ev.Args) == 2 {
+			lenAt = 1
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the

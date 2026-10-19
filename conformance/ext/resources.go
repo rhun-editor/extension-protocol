@@ -1,8 +1,9 @@
 package main
 
 // The resources group of protocol 1.1: idle = stop and busy (feature idle), secrets (feature
-// secrets, [needs] secrets = yes). The checker keeps secrets in memory, as rhun does without a
-// keyring.
+// secrets, [needs] secrets = yes), virtual documents (feature uris), and URLs with link callbacks
+// (feature urls). The checker keeps secrets in memory, as rhun does without a keyring; it answers
+// open-url as a user choosing Open, and delivers every link it makes right away.
 
 import (
 	"fmt"
@@ -25,6 +26,15 @@ func validURI(uri string) bool {
 	rest := uri[loc[1]:]
 	return len(rest) >= 1 && len(rest) <= 4095 && !strings.ContainsAny(rest, "\r\n\x00")
 }
+
+// validURL: http(s), 8192 bytes at most, no spaces or controls
+func validURL(u string) bool {
+	if !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") || len(u) > 8192 {
+		return false
+	}
+	return !strings.ContainsFunc(u, func(r rune) bool { return r <= ' ' || r == 0x7f })
+}
+
 var reservedSchemes = map[string]bool{"file": true, "untitled": true, "rhun": true, "http": true, "https": true,
 	"mailto": true, "data": true, "git": true, "remote": true}
 
@@ -144,6 +154,57 @@ func (h *host) resourcesRequest(verb string, id int64, args []string, body func(
 			return true
 		}
 		reply(fmt.Sprintf("ok %d", id))
+	case "open-url", "external-uri", "link":
+		var arg []byte
+		if verb != "link" {
+			if len(args) != 1 {
+				h.fail("request grammar", verb+" takes LEN and the body")
+				rerr("syntax", "cannot parse the line")
+				return true
+			}
+			b, ok := body(args[0])
+			if !ok {
+				return true
+			}
+			arg = b
+		} else if len(args) != 0 {
+			h.fail("request grammar", "link takes nothing")
+			rerr("syntax", "cannot parse the line")
+			return true
+		}
+		if !h.features["urls"] {
+			h.fail("features", verb+" without urls agreed after hello")
+			rerr("unknown", "no such request")
+			return true
+		}
+		switch verb {
+		case "open-url":
+			u := string(arg)
+			if !validURL(u) {
+				h.fail("urls", fmt.Sprintf("open-url %q: rhun opens http and https URLs only, of 8192 bytes at most", u))
+				rerr("syntax", "not an http or https URL")
+				return true
+			}
+			reply(fmt.Sprintf("ok %d opened", id))
+		case "external-uri":
+			u := string(arg)
+			if !validURL(u) && !(strings.HasPrefix(u, "rhun:") && len(u) <= 8192) {
+				h.fail("urls", "external-uri takes an http(s) URL or a rhun: link")
+				rerr("syntax", "not an http(s) URL or rhun: link")
+				return true
+			}
+			h.write(fmt.Sprintf("ok %d %d\n%s", id, len(arg), arg))
+		case "link":
+			owner := h.m.owner
+			if owner == "" {
+				owner = "local"
+			}
+			link := fmt.Sprintf("rhun://ext/%s/%s/%016x", owner, h.m.name, id*7919+12345)
+			h.write(fmt.Sprintf("ok %d %d\n%s", id, len(link), link))
+			back := link + "/callback?code=conformance"
+			h.write(fmt.Sprintf("0 link %d %d\n%s", id, len(back), back))
+			h.ok("asks for a rhun:// link (the checker delivers it at once)")
+		}
 	case "busy":
 		if !h.features["idle"] {
 			h.fail("features", "busy without idle agreed after hello")

@@ -1,12 +1,14 @@
 package rhunext
 
 // The resources group of protocol 1.1: staying alive while busy (feature "idle"), passwords
-// and tokens in the system keychain (feature "secrets", with [needs] secrets = yes), and URIs
-// with virtual documents (feature "uris", with [provides] schemes).
+// and tokens in the system keychain (feature "secrets", with [needs] secrets = yes), URIs
+// with virtual documents (feature "uris", with [provides] schemes), and opening URLs with link
+// callbacks (feature "urls"; sign-in helpers in auth.go).
 
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -14,6 +16,7 @@ const (
 	FeatureIdle    = "idle"
 	FeatureSecrets = "secrets"
 	FeatureURIs    = "uris"
+	FeatureURLs    = "urls"
 	// SecretValueMax is the most bytes one value holds.
 	SecretValueMax = 8192
 )
@@ -188,4 +191,62 @@ func ParseContentClosed(ev Event) (string, bool) {
 		return "", false
 	}
 	return strings.Join(ev.Args, " "), true
+}
+
+// OpenURLContext asks rhun to open an http(s) URL in the user's browser (feature urls). The user
+// sees the extension and the host and chooses Open, Copy Link or Cancel (an *Error with Code
+// "cancelled"). copied is true when the user copied the link instead.
+func (e *Ext) OpenURLContext(ctx context.Context, url string) (copied bool, err error) {
+	if !e.Has(FeatureURLs) {
+		return false, notAgreed(FeatureURLs)
+	}
+	if !(strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://")) || len(url) > 8192 ||
+		strings.IndexFunc(url, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+		return false, &Error{Code: "syntax", Text: "not an http or https URL"}
+	}
+	r, err := e.RequestContext(ctx, "open-url", []byte(url), itoa(int64(len(url))))
+	if err != nil {
+		return false, err
+	}
+	return len(r.Args) > 0 && r.Args[0] == "copied", nil
+}
+
+// ExternalURIContext returns the URI the user's browser can use for uri (a loopback URL, a rhun:
+// link): pass every loopback URL you hand to a browser through it (a remote window forwards the
+// port).
+func (e *Ext) ExternalURIContext(ctx context.Context, uri string) (string, error) {
+	if !e.Has(FeatureURLs) {
+		return "", notAgreed(FeatureURLs)
+	}
+	r, err := e.RequestContext(ctx, "external-uri", []byte(uri), itoa(int64(len(uri))))
+	if err != nil {
+		return "", err
+	}
+	return string(r.Body), nil
+}
+
+// LinkContext returns a one-shot rhun://ext/OWNER/NAME/TOKEN link (ten minutes); append a path
+// and query. When it reaches rhun, the event link (see ParseLink) brings it back.
+func (e *Ext) LinkContext(ctx context.Context) (string, error) {
+	if !e.Has(FeatureURLs) {
+		return "", notAgreed(FeatureURLs)
+	}
+	r, err := e.RequestContext(ctx, "link", nil)
+	if err != nil {
+		return "", err
+	}
+	return string(r.Body), nil
+}
+
+// ParseLink reads "0 link ID LEN" and its body: the id of the link request that made the token,
+// and the whole link as it reached rhun (with the path and query the browser added).
+func ParseLink(ev Event) (id int64, link string, ok bool) {
+	if ev.Name != "link" || len(ev.Args) != 2 {
+		return 0, "", false
+	}
+	id, err := strconv.ParseInt(ev.Args[0], 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return id, string(ev.Body), true
 }

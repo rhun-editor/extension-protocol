@@ -586,7 +586,31 @@ static void on_content_closed(rx_ext *ext, const char *uri, void *user) {
     snprintf(closed_uri, sizeof closed_uri, "%s", uri);
 }
 
-/* the resources group: idle, secrets, uris */
+static int urls_ok;
+static void on_ready_urls(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    assert(rx_open_url(ext, "ftp://x") == -1 && strncmp(rx_error(ext), "syntax ", 7) == 0);
+    assert(rx_open_url(ext, "https://a b") == -1);
+    assert(rx_open_url(ext, "https://x") == 1);
+    assert(rx_open_url(ext, "https://y") == 2);
+    assert(rx_open_url(ext, "https://z") == -1 && strncmp(rx_error(ext), "cancelled", 9) == 0);
+    char *e = rx_external_uri(ext, "http://127.0.0.1:5/cb");
+    assert(e && strcmp(e, "http://127.0.0.1:5/cb") == 0);
+    free(e);
+    char *l = rx_link(ext);
+    assert(l && strcmp(l, "rhun://ext/o/n/abcdef0") == 0);
+    free(l);
+    urls_ok = 1;
+}
+static int64_t link_id;
+static char link_got[64];
+static void on_link(rx_ext *ext, int64_t id, const char *link, size_t len, void *user) {
+    (void)ext, (void)user;
+    link_id = id;
+    snprintf(link_got, sizeof link_got, "%.*s", (int)len, link);
+}
+
+/* the resources group: idle, secrets, uris, urls */
 static void resources_requests(void) {
     rx_ext none = {0};
     assert(rx_busy(&none, 1) == -1 && strncmp(rx_error(&none), "unknown ", 8) == 0);
@@ -612,6 +636,18 @@ static void resources_requests(void) {
     run_bytes("uris", &h, input, strlen(input), &got);
     same(&got, "hello 1 uris\nok 7 23\n12 1 3\nVisual_Basicthi\nerror 8 nofile no such document\n");
     assert(strcmp(closed_uri, "res-gen:/a b.txt") == 0);
+    /* urls: open-url, external-uri, link and the link event */
+    rx_buf_clear(&got);
+    assert(rx_open_url(&none, "https://x") == -1 && strncmp(rx_error(&none), "unknown ", 8) == 0);
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_urls;
+    h.link = on_link;
+    input = "0 features urls\n0 ready -\nok 1 opened\nok 2 copied\nerror 3 cancelled no\n"
+            "ok 4 21\nhttp://127.0.0.1:5/cbok 5 22\nrhun://ext/o/n/abcdef0\n0 link 5 26\nrhun://ext/o/n/abcdef0/x?y0 bye\n";
+    run_bytes("urls", &h, input, strlen(input), &got);
+    same(&got, "hello 1 urls\n1 open-url 9\nhttps://x2 open-url 9\nhttps://y3 open-url 9\nhttps://z"
+               "4 external-uri 21\nhttp://127.0.0.1:5/cb5 link\n");
+    assert(urls_ok && link_id == 5 && strcmp(link_got, "rhun://ext/o/n/abcdef0/x?y") == 0);
     rx_buf_free(&got);
 }
 

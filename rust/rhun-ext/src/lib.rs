@@ -42,6 +42,8 @@ pub mod snippet_context;
 pub mod snippet_transform;
 pub mod watch;
 pub mod resources;
+pub mod auth;
+pub use resources::{parse_link, Content, UrlOpened};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -165,6 +167,9 @@ pub enum Feature {
     Secrets,
     /// URIs and virtual documents: [`Handler::content`], [`Ext::open_uri`], [`Ext::content_changed`].
     Uris,
+    /// Opening URLs and link callbacks: [`Ext::open_url`], [`Ext::external_uri`], [`Ext::link`]
+    /// and [`parse_link`]; sign-in helpers in [`auth`].
+    Urls,
 }
 
 impl Feature {
@@ -191,6 +196,7 @@ impl Feature {
             Feature::Idle => "idle",
             Feature::Secrets => "secrets",
             Feature::Uris => "uris",
+            Feature::Urls => "urls",
         }
     }
 }
@@ -1110,6 +1116,8 @@ impl Ext {
                                 | "git-show"
                                 | "secret-get"
                                 | "secret-keys"
+                                | "external-uri"
+                                | "link"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1153,7 +1161,7 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" {
+                    if ev.name == "edits" || ev.name == "action" || ev.name == "link" {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
