@@ -196,9 +196,15 @@ func (h *host) checkDebug() {
 			h.fail("debug", fmt.Sprintf("[debugger.%s] resolve = yes without saying debug after hello 1: every launch fails", t))
 			continue
 		}
+		active := h.docs[h.active]
+		base := filepath.Base(active.path)
+		vars := strings.NewReplacer("${project}", h.project, "${projectName}", filepath.Base(h.project),
+			"${file}", active.path, "${fileDir}", filepath.Dir(active.path), "${fileName}", base,
+			"${fileStem}", strings.TrimSuffix(base, filepath.Ext(base)), "${fileExt}", filepath.Ext(base),
+			"${relativeFile}", base, "${line}", "1", "${column}", "1", "${selection}", "", "$$", "$")
 		configs := []rhunext.DebugConfig{}
 		for _, tpl := range strings.Fields(d["templates"]) {
-			configs = append(configs, templateConfigs(filepath.Join(h.dir, tpl), t, d)...)
+			configs = append(configs, templateConfigs(filepath.Join(h.dir, tpl), t, d, vars)...)
 		}
 		if len(configs) == 0 {
 			var c rhunext.DebugConfig
@@ -207,7 +213,6 @@ func (h *host) checkDebug() {
 			c.Set("name", rhunext.DebugStr("Checker"))
 			configs = append(configs, c)
 		}
-		active := h.docs[h.active]
 		answered := 0
 		for i, c := range configs {
 			b, err := c.Encode()
@@ -259,9 +264,10 @@ func (h *host) checkDebug() {
 	}
 }
 
-// templateConfigs reads a launch.ini fragment's sections as configurations, with the debugger's
-// attr.* types applied as rhun applies them (a value that does not fit stays a string)
-func templateConfigs(path, typ string, d map[string]string) []rhunext.DebugConfig {
+// templateConfigs reads a launch.ini fragment's sections as configurations, with the variables
+// replaced (the checker's project and active document) and the debugger's attr.* types applied as
+// rhun applies them (a value that does not fit stays a string)
+func templateConfigs(path, typ string, d map[string]string, vars *strings.Replacer) []rhunext.DebugConfig {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -284,7 +290,7 @@ func templateConfigs(path, typ string, d map[string]string) []rhunext.DebugConfi
 		if !ok || cur == nil {
 			continue
 		}
-		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		k, v = strings.TrimSpace(k), vars.Replace(strings.TrimSpace(v))
 		switch k {
 		case "before", "after", "server", "compound", "hidden":
 			continue
