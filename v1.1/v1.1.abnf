@@ -52,3 +52,45 @@ feature      =/ "snippet-transforms"
 c-extra      =/ "transforms" SP "0" SP len LF
               ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
               ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.
+
+; ---- workspace edits and the editor model (features workspace-edits, file-operations,
+;      selections, reveal, diff, linked-editing)
+
+; With workspace-edits agreed, a workspace edit (apply, a rename answer, a code action's EDIT; not
+; format or save-actions answers) is "N" LF, N entries, then extra records to the end of the body.
+feature      =/ "workspace-edits" / "file-operations" / "selections" / "reveal" / "diff" / "linked-editing"
+w-entry       = w-group-11 / w-create / w-rename / w-delete   ; file operations need file-operations
+w-group-11    = len SP ( version / "-" / w-hash ) SP num LF  ; PATH_LEN PRE M, PATH, M edits (w-edit)
+w-hash        = "fnv1a64:" 16( DIGIT / %x61-66 )             ; FNV-1a 64 of the file's bytes on disk
+w-create      = "create" SP len SP w-flags LF                ; PATH follows; a PATH ending in "/" is a folder
+w-rename      = "rename" SP len SP len SP w-flags LF         ; FROM and TO follow
+w-delete      = "delete" SP len SP w-flags LF                ; PATH follows
+w-flags       = "-" / w-flag *( "," w-flag )
+w-flag        = "overwrite" / "ignore-existing" / "recursive" / "ignore-missing"
+              ; create and rename take overwrite, ignore-existing; delete recursive, ignore-missing
+w-record      = ( "label" SP len / "confirm" SP "0" / field *( SP field ) SP len ) LF
+              ; label: one line of at most 200 bytes follows; unknown records are skipped
+error-apply   = "error" SP id SP code SP num SP rest     ; with workspace-edits: CODE ENTRY TEXT
+code         =/ "io"
+
+; selections
+event        =/ "0" SP e-selections / "0" SP e-visible
+e-selections  = "selections" SP doc SP num SP len        ; N lines of sel-line follow, the primary first
+e-visible     = "visible" SP doc SP num 1*( SP line SP line )   ; N (1 to 64) inclusive line ranges
+request      =/ id SP r-select-many
+r-select-many = "select-many" SP doc SP num SP len        ; N (1 to 512) lines of sel-line follow
+sel-line      = range LF                                  ; anchor, then cursor
+
+; reveal
+request      =/ id SP r-reveal / id SP r-show-locations
+r-reveal      = "reveal" SP doc SP pos SP ( "top" / "center" / "nearest" / "center-if-outside" )
+r-show-locations = "show-locations" SP len                ; a title line (200 bytes), then a 12d locations body
+
+; diff: the reply is "ok ID DOC", DOC the tab's id
+request      =/ id SP r-diff / id SP r-diff-close
+r-diff        = "diff" SP doc SP doc SP ( "show" / "background" ) SP len   ; TITLE follows, one line
+r-diff-close  = "diff-close" SP doc
+
+; linked-editing: answered "ok ID LEN" and "N" LF (0, or 2 to 64), N lines of range LF, and
+; optionally the record "word" SP len LF with that many printable ASCII bytes
+host-request =/ id SP "linked" SP doc SP version SP pos

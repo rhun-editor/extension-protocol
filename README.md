@@ -30,11 +30,11 @@ test and a release workflow that builds Linux, macOS and Windows binaries. In C 
 plugin from [rhun-editor/skills](https://github.com/rhun-editor/skills).
 
 ```toml
-rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.3.0" }
+rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.4.0" }
 ```
 
 ```sh
-go get github.com/rhun-editor/extension-protocol@v1.3.0
+go get github.com/rhun-editor/extension-protocol@v1.4.0
 ```
 
 Test with the checker, `rhun-ext-check DIR` (it asks every feature the extension agreed, checks
@@ -59,6 +59,33 @@ connection after two seconds. Native streams are closed to interrupt blocked IO.
 passed to `RunOn` should implement `io.Closer` with interruptible IO; Go cannot stop an arbitrary
 non-closable reader or writer. Context cancellation still releases callers, and no extra writer
 worker is started for that connection.
+
+## Workspace edits and the editor model
+
+Protocol 1.1 (v1.4.0 of the SDKs) adds six features, specified in [v1.1](v1.1/v1.1.md#feature-workspace-edits):
+
+| Feature | Rust | Go | C |
+| --- | --- | --- | --- |
+| `workspace-edits`: an edit is one transaction, files that are not open are edited on disk, one undo | `WorkspaceEdit::file_hashed`, `.label`, `.confirm`, `Ext::apply` returns `ApplyError` (code, entry, text) | `AddFileHashed`, `Label`, `Confirm`, `Apply` returns `*ApplyError` | `rx_wedit_file_hashed`, `rx_fnv1a64`, `rx_wedit_label`, `rx_wedit_confirm`, `rx_last_apply_error` |
+| `file-operations`: create, rename and delete entries | `.create`, `.rename`, `.delete` with `Create`, `Rename`, `Delete` | `Create`, `Rename`, `Delete` with their options | `rx_wedit_create`, `rx_wedit_rename`, `rx_wedit_delete` with `RX_OVERWRITE` … |
+| LSP's ordered `documentChanges` onto rhun's phases | `edits::from_ordered`, `edits::locate` | `NormalizeOrdered`, `Locate` | `rx_wedit_from_ordered`, `rx_locate` |
+| `selections`: every selection, the visible lines | `Ext::select_many`, `Handler::selections`, `Handler::visible` | `SelectMany`, `ParseSelections`, `ParseVisible` | `rx_select_many`, `rx_parse_selections`, `rx_parse_visible` |
+| `reveal`: scroll to a place, list locations | `Ext::reveal`, `Ext::show_locations` | `Reveal`, `ShowLocations` | `rx_reveal`, `rx_show_locations` |
+| `diff`: a diff tab between two open documents | `Ext::diff`, `Ext::diff_close` | `Diff`, `DiffClose` | `rx_diff`, `rx_diff_close` |
+| `linked-editing`: ranges that change together (`[provides] linked`) | `Handler::linked` → `Linked` | `LinkedEditor` → `Linked` | the `linked` handler, `rx_linked_range`, `rx_linked_word` |
+
+A file that is not open is named with the bytes the extension read it from (`fnv1a64:HEX`
+precondition): rhun refuses the edit (`stale`) when the file changed since. The body lists the
+creates, then the text groups, then the renames, then the deletes; an apply error's ENTRY counts
+in that order (`WorkspaceEdit::entry`, `Entry`). The ordered normaliser rewrites an edit that
+follows a rename to the name before it, composes repeated edits of one file into one group, and
+refuses what the phases cannot express with the index of the change at fault (for LSP's
+`failedChange`). Without the features an edit goes as 12g's grammar (the hash as `-`, no label or
+confirm) and file operations fail as `unknown` without being sent; format and save-action answers
+always keep 12g's grammar. A create path ending in `/` makes a folder: Go's `filepath.Join` and
+Rust's `Path::join` drop that slash, so append it after joining. The checker serves all of it: it
+makes transactions in its scratch project as rhun does (files written on disk, renamed documents
+reopened under a new id) and answers a refused apply with `error ID CODE ENTRY TEXT`.
 
 ## Source actions before saving
 
