@@ -49,6 +49,7 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
+	views                       map[string]string // [views] KEY.FIELD -> value (views.go)
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -127,6 +128,11 @@ func readManifest(dir string) (*manifest, error) {
 			m.subscribe[k] = v
 		case "provides":
 			m.provides[k] = v
+		case "views":
+			if m.views == nil {
+				m.views = map[string]string{}
+			}
+			m.views[k] = v
 		}
 	}
 	return m, nil
@@ -184,6 +190,8 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
+	rviews      map[int64]*rview // retained views it was given (views.go)
+	patches     int              // vpatch requests that passed
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -356,7 +364,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true, "vpatch": true, "vreveal": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1044,6 +1052,8 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "vpatch", "vshow", "vreveal":
+		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1424,6 +1434,7 @@ func main() {
 	h.write("0 ready " + h.project + "\n")
 	h.sendSettings()
 	h.catchUp()
+	h.openRetained()
 	h.serve(300 * time.Millisecond)
 	if len(h.fails) == 0 {
 		h.ok("ready and catch-up accepted")
