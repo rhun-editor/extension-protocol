@@ -20,7 +20,12 @@
  *
  * Features (section 12 of the spec) are asked for by name in rx_run: "views" for pictures in
  * tabs of their own; "complete", "signature", "definition", "references", "symbols", "actions",
- * "rename" and "format" for language support ("views complete definition").
+ * "rename" and "format" for language support ("views complete definition"). Protocol 1.1 adds
+ * workspace edits as transactions and file operations ("workspace-edits file-operations":
+ * rx_wedit_file_hashed, rx_wedit_create/rename/delete, rx_wedit_label, rx_wedit_confirm,
+ * rx_wedit_from_ordered for LSP's ordered changes, rx_last_apply_error), several selections
+ * ("selections": rx_select_many, rx_parse_selections), "reveal" (rx_reveal,
+ * rx_show_locations), "diff" (rx_diff, rx_diff_close) and "linked-editing" (the linked handler).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * The same source builds for wasm32-wasip1 (clang --target=wasm32-wasip1 with a WASI sysroot), one
  * module rhun runs itself on every system: run.wasm32-wasip1 = bin/NAME.wasm in the manifest.
@@ -113,13 +118,18 @@ typedef struct {
  * the fields are the builders' own */
 typedef struct { rx_buf recs; int n, full; } rx_locations;
 typedef struct { rx_buf recs; int n, full; } rx_symbols;
-typedef struct { rx_buf recs; int n, full; } rx_actions;
+typedef struct { rx_buf recs; int n, full; int caps; } rx_actions;   /* caps: set by rx_run */
 typedef struct {
     rx_buf body, group, target;     /* the files so far; the open file's edits and PATH */
     int64_t version;
     int files, edits, group_edits, open;
     const char *fail;               /* NULL, or the code it is refused with (toobig, refused, */
-    char why[256];                  /* syntax) and why, one line */
+    char why[256];                  /* syntax, unknown) and why, one line */
+    /* protocol 1.1: the creates, renames and deletes so far, where hashed PREs start in body (for
+     * a rhun without workspace-edits), the label, confirm, and the open file's hash */
+    rx_buf ops[3], hashes, label;
+    int nops, confirm, hashed;
+    uint64_t hash;
 } rx_wedit;
 
 struct rx_view_open;            /* retained views, below */
@@ -146,6 +156,20 @@ typedef struct {
     int64_t accepted, hunks, rejected;  /* partial: hunks accepted of hunks; done: files */
 } rx_proposal_event;
 typedef struct { char *name, *title, *description, *input; int readonly; } rx_tool;
+
+/* linked editing (1.1): rhun asks for the ranges that change with the word at `at` */
+typedef struct rx_linked_ask {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;            /* the ranges are in the document at this version */
+    rx_pos at;
+} rx_linked_ask;
+/* the answer, built with rx_linked_range and rx_linked_word; the fields are the builder's own */
+typedef struct rx_linked {
+    rx_buf ranges;
+    int n, has_word;
+    char word[96];
+} rx_linked;
 
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
@@ -204,6 +228,9 @@ typedef struct {
      * "CODE TEXT" and -1. agent_stop: the user's Stop. */
     int (*agent_prompt)(rx_ext *ext, const char *sid, const char *text, size_t len, rx_buf *out, void *user);
     void (*agent_stop)(rx_ext *ext, const char *sid, void *user);
+    /* Linked editing (1.1, "linked-editing", [provides] linked): add the ranges that change
+     * together to out (rx_linked_range, rx_linked_word) and return 1 (none: nothing to link). */
+    int (*linked)(rx_ext *ext, const struct rx_linked_ask *req, struct rx_linked *out, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -303,6 +330,14 @@ void rx_tools_free(rx_tool *tools, int n);
 int rx_tool_call(rx_ext *ext, const char *tool, const void *input, size_t len, rx_buf *out);
 /* Feature agent-prompts: a card in a session; the option picked, from 0, or -1 (cancelled). */
 int rx_agent_ask(rx_ext *ext, const char *sid, const char *prompt, const char *const *options, int n);
+
+/* The features of protocol 1.1's editor model, for rx_run and rx_has. */
+#define RX_FEATURE_WORKSPACE_EDITS "workspace-edits"
+#define RX_FEATURE_FILE_OPERATIONS "file-operations"
+#define RX_FEATURE_SELECTIONS "selections"
+#define RX_FEATURE_REVEAL "reveal"
+#define RX_FEATURE_DIFF "diff"
+#define RX_FEATURE_LINKED_EDITING "linked-editing"
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
 int rx_run(const char *features, const rx_handlers *h, void *user);
@@ -471,6 +506,116 @@ int rx_snippet_validate(const rx_snippet *snippet);
 /* Append an explicit snippet record, or return -1 without changing out for invalid input. */
 int rx_snippet_encode(const rx_snippet *snippet, rx_buf *out);
 int64_t rx_insert_snippet(rx_ext *ext, rx_doc doc, int64_t version, rx_range range, const rx_snippet *snippet);
+/* ---- protocol 1.1: workspace edits as transactions ("workspace-edits") and file operations
+ * ("file-operations"). With the feature, rx_apply's edit is one transaction: files that are not
+ * open are edited on disk (a group from rx_wedit_file_hashed names the bytes it was made against),
+ * documents written when the edit touches disk anyway, one undo everywhere. The body lists the
+ * creates, then the text groups, then the renames, then the deletes, each in the order added: an
+ * error's entry counts in that order. Without the features the hash goes as "-", the label and
+ * confirm are left out, and file operations make the edit fail as unknown. */
+
+/* the 64-bit FNV-1a hash of len bytes (offset basis 0xcbf29ce484222325, prime 0x100000001b3) */
+static inline uint64_t rx_fnv1a64(const void *data, size_t len) {
+    const unsigned char *p = (const unsigned char *)data;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+/* a group for a file that is not open, made against data, its len bytes as read from disk (CR
+ * included): the file must still hash to them (PRE fnv1a64:HEX), else the edit is stale. Positions
+ * refer to rhun's text of it (CR before LF dropped). Add its edits with rx_wedit_edit. */
+void rx_wedit_file_hashed(rx_wedit *e, const char *path, const void *data, size_t len);
+/* file operations; paths absolute, a create path ending in "/" makes a folder. flags: create and
+ * rename take RX_OVERWRITE (replace an existing file) and RX_IGNORE_EXISTING (skip the entry when
+ * the path exists; overwrite wins), delete RX_RECURSIVE (a folder and everything in it) and
+ * RX_IGNORE_MISSING; another flag fails the edit as syntax */
+#define RX_OVERWRITE 1
+#define RX_IGNORE_EXISTING 2
+#define RX_RECURSIVE 4
+#define RX_IGNORE_MISSING 8
+void rx_wedit_create(rx_wedit *e, const char *path, int flags);
+void rx_wedit_rename(rx_wedit *e, const char *from, const char *to, int flags);
+void rx_wedit_delete(rx_wedit *e, const char *path, int flags);
+/* names the change in the confirmation list, toasts and Undo: one line, cut at 200 bytes */
+void rx_wedit_label(rx_wedit *e, const char *label);
+/* shows the confirmation list even when the extension may write */
+void rx_wedit_confirm(rx_wedit *e);
+/* the last rx_apply refused with workspace-edits agreed ("error ID CODE ENTRY TEXT"): code
+ * (syntax needs nofile nodoc stale readonly badpos toobig refused cancelled busy io, or unknown
+ * for a feature rhun did not agree), entry the 1-based entry at fault (0 for none, and always 0
+ * without the feature) and text one sentence; empty code after a successful rx_apply */
+typedef struct { char code[24]; int entry; char text[480]; } rx_apply_error;
+const rx_apply_error *rx_last_apply_error(rx_ext *ext);
+
+/* LSP's ordered changes (documentChanges) onto rhun's phases. A change is a text edit of a file
+ * (RX_CHANGE_EDIT: nedits edits, ranges in rhun's byte columns against the file's text at this
+ * point of the sequence, see rx_locate; version the open document's or RX_ON_DISK with hashed and
+ * hash for the file on disk; only a file's first edit sets the precondition, a created file takes
+ * "-"), or a create, rename (path to to) or delete with its flags. Texts are borrowed until the
+ * call returns. An edit after a rename names the file by its name before it; repeated edits of
+ * one file become one group; edits of a file a later delete removes are left out. What the phases
+ * cannot express (an edit after its file was renamed away or deleted, two file operations on one
+ * path, an operation inside a folder another renames or deletes, an edit of a later rename's
+ * target, a create after an edit of its path, an edit of text an earlier edit put in) returns -1
+ * with the 0-based index of the change at fault in *bad and why in why (one line). On 0 the edit
+ * is added to out (start from a zeroed rx_wedit) and, when origins is not NULL, origins[k] is the
+ * change entry k + 1 came from (room for n). */
+#define RX_CHANGE_EDIT 0
+#define RX_CHANGE_CREATE 1
+#define RX_CHANGE_RENAME 2
+#define RX_CHANGE_DELETE 3
+typedef struct {
+    int kind;
+    const char *path, *to;
+    int64_t version;
+    int hashed;
+    uint64_t hash;
+    const rx_range *ranges;
+    const char *const *texts;
+    const size_t *lens;             /* NULL: the texts are NUL-terminated */
+    int nedits;
+    int flags;
+} rx_change;
+int rx_wedit_from_ordered(rx_wedit *out, const rx_change *changes, int n, int *origins, int *bad, char *why, size_t cap);
+/* where the text of path comes from after the n changes before: its name then in src (cap bytes)
+ * and *created 1 when an earlier change created it (its text starts empty); -1 when an earlier
+ * change renamed it away or deleted it */
+int rx_locate(const rx_change *before, int n, const char *path, char *src, size_t cap, int *created);
+
+/* ---- protocol 1.1: the editor model */
+
+/* a selection: anchor and cursor (equal for a caret) */
+typedef struct { rx_pos anchor, cursor; } rx_selection;
+/* "selections": sets a document's selections, the first becoming primary (1 to 512) */
+int rx_select_many(rx_ext *ext, rx_doc doc, const rx_selection *sels, int n);
+/* the event "0 selections DOC N LEN" (every selection, the primary first): up to max into sels,
+ * the count, or -1 when ev is not one or does not read */
+int rx_parse_selections(const rx_event *ev, rx_doc *doc, rx_selection *sels, int max);
+/* "reveal": scrolls the document's view so at shows, the cursor stays: where is "top", "center",
+ * "nearest" or "center-if-outside" */
+int rx_reveal(rx_ext *ext, rx_doc doc, rx_pos at, const char *where);
+/* "reveal": lists locations (built with rx_location; used up) in the palette under title */
+int rx_show_locations(rx_ext *ext, const char *title, rx_locations *locs);
+/* "diff": a read-only tab with a unified diff from document left to right, titled title (one
+ * line, 200 bytes), activated unless background; the tab's id (not a document), or -1 */
+int64_t rx_diff(rx_ext *ext, rx_doc left, rx_doc right, const char *title, int background);
+int rx_diff_close(rx_ext *ext, int64_t tab);
+/* "diff" and "uris": rx_diff with sides named by URI (1 to 4128 bytes, no spaces or line breaks):
+ * a virtual document's (opened without a tab when it is not open, closed with the last diff tab
+ * showing it unless the user opened it meanwhile), a file: URI of an open file, or a document id */
+int64_t rx_diff_uris(rx_ext *ext, const char *left, const char *right, const char *title, int background);
+/* "reveal" and "uris": rx_reveal for the open document with that URI */
+int rx_reveal_uri(rx_ext *ext, const char *uri, rx_pos at, const char *where);
+/* the linked handler's answer: 2 to 64 ranges at the asked version with equal text, one holding
+ * the cursor (another count is sent as none); word: the printable ASCII characters that may be
+ * typed in them besides letters, digits and non-ASCII (rhun's default "-_.:" without it) */
+void rx_linked_range(rx_linked *l, rx_range r);
+void rx_linked_word(rx_linked *l, const char *chars);
+void rx_linked_finish(rx_linked *l, rx_buf *out);
+
 /* any request: "VERB ARGS" without the id (and with LEN last when there is a body); the reply's
  * fields after "ok ID" go to fields (NUL-terminated), a text/range/ask body to body */
 int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len, rx_buf *fields, rx_buf *body_out);
@@ -602,9 +747,10 @@ typedef struct rx_msg {
 struct rx_ext {
     int64_t next_id;
     rx_msg *queue, *queue_tail;     /* messages that came while a request waited */
-    char features[256];
+    char features[512];
     char error[512];
     int gone;
+    rx_apply_error apply_error;     /* the last rx_apply's refusal */
 };
 
 void rx_buf_add(rx_buf *b, const void *data, size_t len) {
@@ -727,10 +873,12 @@ static void rx_gone(rx_ext *ext, const char *why) {
 
 static const char rx_bad_len[] = "a body's length that is not a decimal of at most 10 digits within its cap";
 
-/* the messages followed by a body, LEN their last field: the events edits (6a), action (12f) and
- * retained views' (1.1), and the requests below */
+/* the messages followed by a body, LEN their last field: the events edits (6a), action (12f),
+ * selections and retained views' (1.1), and the requests below */
 static int rx_has_body(const char *line) {
-    if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
+    if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
+        strncmp(line, "0 selections ", 13) == 0)
+        return 1;
     if (line[0] >= '1' && line[0] <= '9') {
         /* requests: ID commit-message ... LEN; vkids, vmore (the node id follows); tool and
          * agent-prompt (their input) */
@@ -1399,10 +1547,50 @@ int rx_unview(rx_ext *ext, int64_t view) {
     return rx_request(ext, line, NULL, 0, NULL, NULL);
 }
 
+static int rx_wedit_finish_caps(rx_wedit *e, rx_buf *out, int ws, int ops);
+static int rx_positive_num(const char *s, int64_t max, int64_t *out);
+
+/* the workspace edit grammar rhun agreed: 1 workspace-edits, 2 file-operations */
+static int rx_edit_caps(rx_ext *ext) {
+    return (rx_has(ext, "workspace-edits") ? 1 : 0) | (rx_has(ext, "file-operations") ? 2 : 0);
+}
+
+const rx_apply_error *rx_last_apply_error(rx_ext *ext) { return &ext->apply_error; }
+
+/* keeps a refusal as rx_last_apply_error: "CODE TEXT", with the feature "CODE ENTRY TEXT" */
+static void rx_keep_apply_error(rx_ext *ext, const char *reply, int entries) {
+    rx_apply_error *a = &ext->apply_error;
+    const char *sp = strchr(reply, ' ');
+    size_t cl = sp ? (size_t)(sp - reply) : strlen(reply);
+    if (cl >= sizeof a->code) cl = sizeof a->code - 1;
+    memcpy(a->code, reply, cl);
+    a->code[cl] = 0;
+    const char *text = sp ? sp + 1 : "";
+    a->entry = 0;
+    if (entries) {
+        int64_t n;
+        const char *sp2 = strchr(text, ' ');
+        char num[16];
+        size_t nl = sp2 ? (size_t)(sp2 - text) : strlen(text);
+        if (nl > 0 && nl < sizeof num) {
+            memcpy(num, text, nl);
+            num[nl] = 0;
+            if (rx_positive_num(num, 2147483647, &n)) {
+                a->entry = (int)n;
+                text = sp2 ? sp2 + 1 : "";
+            }
+        }
+    }
+    snprintf(a->text, sizeof a->text, "%s", text);
+}
+
 int rx_apply(rx_ext *ext, rx_wedit *edit) {
     rx_buf body = {NULL, 0, 0};
-    if (rx_wedit_finish(edit, &body) < 0) {
+    int caps = rx_edit_caps(ext);
+    memset(&ext->apply_error, 0, sizeof ext->apply_error);
+    if (rx_wedit_finish_caps(edit, &body, caps & 1, (caps & 2) != 0) < 0) {
         snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
+        rx_keep_apply_error(ext, ext->error, 0);
         rx_wedit_free(edit);
         return -1;
     }
@@ -1410,6 +1598,7 @@ int rx_apply(rx_ext *ext, rx_wedit *edit) {
     snprintf(line, sizeof line, "apply %zu", body.len);
     int r = rx_request(ext, line, body.data, body.len, NULL, NULL);
     rx_buf_free(&body);
+    if (r < 0) rx_keep_apply_error(ext, ext->error, caps & 1);
     return r;
 }
 
@@ -1438,7 +1627,7 @@ int64_t rx_save_apply(rx_ext *ext, int64_t request_id, rx_doc doc, int64_t versi
         rx_wedit_free(edit);
         return -1;
     }
-    if (rx_wedit_finish(edit, &body) < 0) {
+    if (rx_wedit_finish_caps(edit, &body, 0, 0) < 0) {       /* 12g's grammar: one open document */
         snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
         rx_wedit_free(edit);
     } else {
@@ -2409,7 +2598,12 @@ static void rx_wedit_drop(rx_wedit *e) {
     rx_buf_free(&e->body);
     rx_buf_free(&e->group);
     rx_buf_free(&e->target);
+    for (int i = 0; i < 3; i++) rx_buf_free(&e->ops[i]);
+    rx_buf_free(&e->hashes);
+    rx_buf_free(&e->label);
     e->files = e->edits = e->group_edits = e->open = 0;
+    e->nops = e->confirm = e->hashed = 0;
+    e->hash = 0;
 }
 
 void rx_wedit_free(rx_wedit *e) {
@@ -2441,30 +2635,38 @@ int rx_refuse(rx_wedit *e, const char *why) {
     return -1;
 }
 
-/* the open file's header and edits go after the files before it */
+/* the open file's header and edits go after the files before it; a hashed PRE's offset is kept,
+ * for a rhun without workspace-edits (it is then sent as "-") */
 static void rx_wedit_flush(rx_wedit *e) {
     if (!e->open) return;
     char v[32];
-    if (e->version < 0) snprintf(v, sizeof v, "-");
-    else snprintf(v, sizeof v, "%lld", (long long)e->version);
-    rx_buf_fmt(&e->body, "%zu %s %d\n", e->target.len, v, e->group_edits);
+    if (e->version >= 0) snprintf(v, sizeof v, "%lld", (long long)e->version);
+    else if (e->hashed) snprintf(v, sizeof v, "fnv1a64:%016llx", (unsigned long long)e->hash);
+    else snprintf(v, sizeof v, "-");
+    rx_buf_fmt(&e->body, "%zu ", e->target.len);
+    if (e->version < 0 && e->hashed) {
+        size_t at = e->body.len;
+        rx_buf_add(&e->hashes, &at, sizeof at);
+    }
+    rx_buf_fmt(&e->body, "%s %d\n", v, e->group_edits);
     rx_buf_add(&e->body, e->target.data, e->target.len);
     rx_buf_add(&e->body, e->group.data, e->group.len);
     rx_buf_clear(&e->target);
     rx_buf_clear(&e->group);
-    e->group_edits = e->open = 0;
+    e->group_edits = e->open = e->hashed = 0;
 }
 
 /* what the body holds already is past 4 MB: its headers would only add to it */
 static void rx_wedit_check(rx_wedit *e) {
-    if (e->body.len + e->target.len + e->group.len > RX_WEDIT_BODY) rx_wedit_fail(e, "toobig", "over 4194304 bytes");
+    size_t n = e->body.len + e->target.len + e->group.len + e->ops[0].len + e->ops[1].len + e->ops[2].len + e->label.len;
+    if (n > RX_WEDIT_BODY) rx_wedit_fail(e, "toobig", "over 4194304 bytes");
 }
 
 void rx_wedit_file(rx_wedit *e, const char *path, rx_doc doc, int64_t version) {
     if (e->fail) return;
     rx_wedit_flush(e);
-    if (e->files >= RX_WEDIT_FILES) {
-        rx_wedit_fail(e, "toobig", "more than 1000 files");
+    if (e->files + e->nops >= RX_WEDIT_FILES) {
+        rx_wedit_fail(e, "toobig", e->nops ? "more than 1000 entries" : "more than 1000 files");
         return;
     }
     char tmp[32];
@@ -2478,6 +2680,13 @@ void rx_wedit_file(rx_wedit *e, const char *path, rx_doc doc, int64_t version) {
     e->files++;
     e->open = 1;
     rx_wedit_check(e);
+}
+
+void rx_wedit_file_hashed(rx_wedit *e, const char *path, const void *data, size_t len) {
+    rx_wedit_file(e, path, 0, RX_ON_DISK);
+    if (e->fail) return;
+    e->hashed = 1;
+    e->hash = rx_fnv1a64(data, len);
 }
 
 void rx_wedit_edit(rx_wedit *e, rx_range r, const char *text, size_t len) {
@@ -2502,25 +2711,109 @@ void rx_wedit_edit(rx_wedit *e, rx_range r, const char *text, size_t len) {
     rx_wedit_check(e);
 }
 
-int rx_wedit_finish(rx_wedit *e, rx_buf *out) {
+/* a file operation: phase 0 creates, 1 renames, 2 deletes */
+static void rx_wedit_op(rx_wedit *e, int phase, const char *word, const char *path, const char *to, int flags, int allowed) {
+    if (e->fail) return;
+    rx_wedit_flush(e);
+    if (e->files + e->nops >= RX_WEDIT_FILES) {
+        rx_wedit_fail(e, "toobig", "more than 1000 entries");
+        return;
+    }
+    if (flags & ~allowed) {
+        rx_wedit_fail(e, "syntax", "a flag this file operation does not take");
+        return;
+    }
+    size_t pl = path ? strlen(path) : 0, tl = to ? strlen(to) : 0;
+    if (!pl || pl > RX_PATH_MAX || (phase == 1 && (!tl || tl > RX_PATH_MAX))) {
+        rx_wedit_fail(e, "toobig", "a path of 1 to 4096 bytes");
+        return;
+    }
+    static const char *names[4] = {"overwrite", "ignore-existing", "recursive", "ignore-missing"};
+    char f[64] = "";
+    for (int i = 0; i < 4; i++)
+        if (flags & (1 << i)) {
+            if (*f) strcat(f, ",");
+            strcat(f, names[i]);
+        }
+    rx_buf *b = &e->ops[phase];
+    if (phase == 1) rx_buf_fmt(b, "%s %zu %zu %s\n", word, pl, tl, *f ? f : "-");
+    else rx_buf_fmt(b, "%s %zu %s\n", word, pl, *f ? f : "-");
+    rx_buf_add(b, path, pl);
+    if (phase == 1) rx_buf_add(b, to, tl);
+    e->nops++;
+    rx_wedit_check(e);
+}
+
+void rx_wedit_create(rx_wedit *e, const char *path, int flags) {
+    rx_wedit_op(e, 0, "create", path, NULL, flags, RX_OVERWRITE | RX_IGNORE_EXISTING);
+}
+
+void rx_wedit_rename(rx_wedit *e, const char *from, const char *to, int flags) {
+    rx_wedit_op(e, 1, "rename", from, to, flags, RX_OVERWRITE | RX_IGNORE_EXISTING);
+}
+
+void rx_wedit_delete(rx_wedit *e, const char *path, int flags) {
+    rx_wedit_op(e, 2, "delete", path, NULL, flags, RX_RECURSIVE | RX_IGNORE_MISSING);
+}
+
+void rx_wedit_label(rx_wedit *e, const char *label) {
+    if (e->fail) return;
+    rx_buf_clear(&e->label);
+    if (!label) return;
+    rx_add_line(&e->label, label, rx_cut(label, strlen(label), 200));
+}
+
+void rx_wedit_confirm(rx_wedit *e) {
+    if (!e->fail) e->confirm = 1;
+}
+
+/* the body for a rhun that agreed workspace-edits (ws) and file-operations (ops) */
+static int rx_wedit_finish_caps(rx_wedit *e, rx_buf *out, int ws, int ops) {
+    if (!e->fail && e->nops && !(ws && ops))
+        rx_wedit_fail(e, "unknown", "file operations need the workspace-edits and file-operations features");
     if (!e->fail) {
         rx_wedit_flush(e);
-        char head[32];
-        int hl = snprintf(head, sizeof head, "%d\n", e->files);
-        if ((size_t)hl + e->body.len > RX_WEDIT_BODY) {
+        char head[32], lh[32] = "";
+        int hl = snprintf(head, sizeof head, "%d\n", e->files + e->nops);
+        size_t total = (size_t)hl + e->body.len + e->ops[0].len + e->ops[1].len + e->ops[2].len;
+        if (ws && e->label.len) total += (size_t)snprintf(lh, sizeof lh, "label %zu\n", e->label.len) + e->label.len;
+        if (ws && e->confirm) total += 10;
+        if (!ws) total -= 23 * (e->hashes.len / sizeof(size_t));
+        if (total > RX_WEDIT_BODY) {
             rx_wedit_fail(e, "toobig", "over 4194304 bytes");
         } else {
             rx_buf_add(out, head, (size_t)hl);
-            rx_buf_add(out, e->body.data, e->body.len);
+            rx_buf_add(out, e->ops[0].data, e->ops[0].len);
+            /* without workspace-edits a hashed PRE "fnv1a64:" and 16 digits goes as "-" */
+            size_t from = 0, nh = ws ? 0 : e->hashes.len / sizeof(size_t);
+            for (size_t i = 0; i < nh; i++) {
+                size_t at;
+                memcpy(&at, e->hashes.data + i * sizeof at, sizeof at);
+                rx_buf_add(out, e->body.data + from, at - from);
+                rx_buf_add(out, "-", 1);
+                from = at + 24;
+            }
+            rx_buf_add(out, e->body.data + from, e->body.len - from);
+            rx_buf_add(out, e->ops[1].data, e->ops[1].len);
+            rx_buf_add(out, e->ops[2].data, e->ops[2].len);
+            if (ws && e->label.len) {
+                rx_buf_str(out, lh);
+                rx_buf_add(out, e->label.data, e->label.len);
+            }
+            if (ws && e->confirm) rx_buf_str(out, "confirm 0\n");
         }
     }
     rx_wedit_drop(e);
     return e->fail ? -1 : 0;
 }
 
+int rx_wedit_finish(rx_wedit *e, rx_buf *out) { return rx_wedit_finish_caps(e, out, 1, 1); }
+
 void rx_action(rx_actions *l, const char *kind, const char *title, rx_wedit *edit, const void *data, size_t len) {
     rx_buf eb = {NULL, 0, 0};
-    int bad = edit && rx_wedit_finish(edit, &eb) < 0;
+    /* caps 0: the whole grammar; set by rx_run: 1, and 2 for workspace-edits, 4 file-operations */
+    int ws = !l->caps || (l->caps & 2), ops = !l->caps || (l->caps & 4);
+    int bad = edit && rx_wedit_finish_caps(edit, &eb, ws, ops) < 0;
     if (edit) rx_wedit_free(edit);
     if (!title) title = "";
     size_t tl = rx_cut(title, strlen(title), RX_TEXT_MAX), mark = l->recs.len;
@@ -2565,6 +2858,534 @@ const char *rx_event_tail(const rx_event *ev, int n) {
     return p ? p : "";
 }
 
+/* ---- protocol 1.1: the editor model */
+
+static int rx_need(rx_ext *ext, const char *feature) {
+    if (rx_has(ext, feature)) return 1;
+    snprintf(ext->error, sizeof ext->error, "unknown %s was not agreed", feature);
+    return 0;
+}
+
+int rx_select_many(rx_ext *ext, rx_doc doc, const rx_selection *sels, int n) {
+    if (!rx_need(ext, "selections")) return -1;
+    if (n < 1 || n > 512 || !sels) {
+        snprintf(ext->error, sizeof ext->error, "toobig %d selections: 1 to 512", n);
+        return -1;
+    }
+    rx_buf body = {NULL, 0, 0};
+    for (int i = 0; i < n; i++)
+        rx_buf_fmt(&body, "%d %d %d %d\n", sels[i].anchor.line, sels[i].anchor.col, sels[i].cursor.line, sels[i].cursor.col);
+    char line[96];
+    snprintf(line, sizeof line, "select-many %lld %d %zu", (long long)doc, n, body.len);
+    int r = rx_request(ext, line, body.data, body.len, NULL, NULL);
+    rx_buf_free(&body);
+    return r;
+}
+
+/* reads a decimal int field: 1 when it is one */
+static int rx_int_field(const char *s, int *out) {
+    int64_t v;
+    if (!rx_positive_num(s, 2147483647, &v)) return 0;
+    *out = (int)v;
+    return 1;
+}
+
+int rx_parse_selections(const rx_event *ev, rx_doc *doc, rx_selection *sels, int max) {
+    int64_t d;
+    int n;
+    if (!ev || strcmp(ev->name, "selections") || ev->argc != 3 || !rx_positive_num(ev->argv[0], INT64_MAX, &d) ||
+        !rx_int_field(ev->argv[1], &n) || n < 1 || n > 512 || !ev->body)
+        return -1;
+    const char *p = (const char *)ev->body, *end = p + ev->body_len;
+    for (int i = 0; i < n; i++) {
+        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        char l[64], *f[RX_MAXF];
+        int v[4];
+        if (ll >= sizeof l) return -1;
+        memcpy(l, p, ll);
+        l[ll] = 0;
+        if (rx_split(l, f) != 4) return -1;
+        for (int k = 0; k < 4; k++)
+            if (!rx_int_field(f[k], &v[k])) return -1;
+        if (i < max && sels) {
+            sels[i].anchor.line = v[0], sels[i].anchor.col = v[1];
+            sels[i].cursor.line = v[2], sels[i].cursor.col = v[3];
+        }
+        p = nl ? nl + 1 : end;
+        if (!nl && i + 1 < n) return -1;
+    }
+    if (p != end) return -1;
+    if (doc) *doc = d;
+    return n < max ? n : max;
+}
+
+int rx_reveal(rx_ext *ext, rx_doc doc, rx_pos at, const char *where) {
+    if (!rx_need(ext, "reveal")) return -1;
+    if (!where || (strcmp(where, "top") && strcmp(where, "center") && strcmp(where, "nearest") &&
+                   strcmp(where, "center-if-outside"))) {
+        snprintf(ext->error, sizeof ext->error, "syntax where is top, center, nearest or center-if-outside");
+        return -1;
+    }
+    char line[128];
+    snprintf(line, sizeof line, "reveal %lld %d %d %s", (long long)doc, at.line, at.col, where);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+/* a title: one line of at most 200 bytes, cut at a character */
+static void rx_title(rx_buf *b, const char *t) {
+    if (!t) t = "";
+    rx_add_line(b, t, rx_cut(t, strlen(t), 200));
+}
+
+int rx_show_locations(rx_ext *ext, const char *title, rx_locations *locs) {
+    rx_buf body = {NULL, 0, 0};
+    if (!rx_need(ext, "reveal")) {
+        if (locs) rx_buf_free(&locs->recs);
+        return -1;
+    }
+    rx_title(&body, title);
+    rx_buf_add(&body, "\n", 1);
+    rx_locations none;
+    memset(&none, 0, sizeof none);
+    rx_locations_finish(locs ? locs : &none, &body);
+    char line[64];
+    snprintf(line, sizeof line, "show-locations %zu", body.len);
+    int r = rx_request(ext, line, body.data, body.len, NULL, NULL);
+    rx_buf_free(&body);
+    return r;
+}
+
+static int64_t rx_diff_sides(rx_ext *ext, const char *left, const char *right, const char *title, int background) {
+    if (!rx_need(ext, "diff")) return -1;
+    rx_buf t = {NULL, 0, 0}, f = {NULL, 0, 0}, line = {NULL, 0, 0};
+    rx_title(&t, title);
+    rx_buf_fmt(&line, "diff %s %s %s %zu", left, right, background ? "background" : "show", t.len);
+    int64_t tab = -1;
+    if (rx_request(ext, line.data, t.data ? t.data : "", t.len, &f, NULL) == 0 &&
+        (!rx_positive_num(f.data, INT64_MAX, &tab) || tab <= 0)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid diff reply");
+        tab = -1;
+    }
+    rx_buf_free(&t);
+    rx_buf_free(&f);
+    rx_buf_free(&line);
+    return tab;
+}
+
+int64_t rx_diff(rx_ext *ext, rx_doc left, rx_doc right, const char *title, int background) {
+    char l[24], r[24];
+    snprintf(l, sizeof l, "%lld", (long long)left);
+    snprintf(r, sizeof r, "%lld", (long long)right);
+    return rx_diff_sides(ext, l, r, title, background);
+}
+
+/* a URI where rhun takes a document: one field */
+static int rx_uri_field(rx_ext *ext, const char *uri) {
+    size_t n = uri ? strlen(uri) : 0;
+    if (!n || n > 4128 || strpbrk(uri, " \n\r")) {
+        snprintf(ext->error, sizeof ext->error, "syntax a URI field is 1 to 4128 bytes without spaces or line breaks");
+        return 0;
+    }
+    return 1;
+}
+
+int64_t rx_diff_uris(rx_ext *ext, const char *left, const char *right, const char *title, int background) {
+    if (!rx_need(ext, "diff") || !rx_uri_field(ext, left) || !rx_uri_field(ext, right)) return -1;
+    return rx_diff_sides(ext, left, right, title, background);
+}
+
+int rx_reveal_uri(rx_ext *ext, const char *uri, rx_pos at, const char *where) {
+    if (!rx_need(ext, "reveal") || !rx_uri_field(ext, uri)) return -1;
+    if (!where || (strcmp(where, "top") && strcmp(where, "center") && strcmp(where, "nearest") &&
+                   strcmp(where, "center-if-outside"))) {
+        snprintf(ext->error, sizeof ext->error, "syntax where is top, center, nearest or center-if-outside");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "reveal %s %d %d %s", uri, at.line, at.col, where);
+    int r = rx_request(ext, line.data, NULL, 0, NULL, NULL);
+    rx_buf_free(&line);
+    return r;
+}
+
+int rx_diff_close(rx_ext *ext, int64_t tab) {
+    if (!rx_need(ext, "diff")) return -1;
+    char line[64];
+    snprintf(line, sizeof line, "diff-close %lld", (long long)tab);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+void rx_linked_range(rx_linked *l, rx_range r) {
+    if (l->n <= 64) rx_buf_fmt(&l->ranges, "%d %d %d %d\n", rx_nn(r.start.line), rx_nn(r.start.col), rx_nn(r.end.line), rx_nn(r.end.col));
+    l->n++;
+}
+
+void rx_linked_word(rx_linked *l, const char *chars) {
+    size_t k = 0;
+    for (; chars && *chars; chars++) {
+        char c = *chars;
+        if (c >= ' ' && c <= '~' && !memchr(l->word, c, k) && k < sizeof l->word - 1) l->word[k++] = c;
+    }
+    l->word[k] = 0;
+    l->has_word = 1;
+}
+
+void rx_linked_finish(rx_linked *l, rx_buf *out) {
+    if (l->n < 2 || l->n > 64) {
+        rx_buf_str(out, "0\n");
+    } else {
+        rx_buf_fmt(out, "%d\n", l->n);
+        rx_buf_add(out, l->ranges.data, l->ranges.len);
+        if (l->has_word) {
+            rx_buf_fmt(out, "word %zu\n", strlen(l->word));
+            rx_buf_str(out, l->word);
+        }
+    }
+    rx_buf_free(&l->ranges);
+    l->n = l->has_word = 0;
+}
+
+/* ---- ordered changes onto rhun's phases */
+
+static int rx_is_sep(char c) {
+#ifdef _WIN32
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+/* the length of p without separators at its end (a lone "/" stays) */
+static size_t rx_trimmed(const char *p) {
+    size_t n = strlen(p);
+    while (n > 1 && rx_is_sep(p[n - 1])) n--;
+    return n;
+}
+
+static int rx_same_path(const char *a, const char *b) {
+    size_t n = rx_trimmed(a);
+    return n == rx_trimmed(b) && strncmp(a, b, n) == 0;
+}
+
+/* the rest of path after the folder dir (from its separator), or NULL when it is not inside */
+static const char *rx_under(const char *path, const char *dir) {
+    size_t d = rx_trimmed(dir);
+    if (strlen(path) > d && strncmp(path, dir, d) == 0 && rx_is_sep(path[d])) return path + d;
+    return NULL;
+}
+
+int rx_locate(const rx_change *before, int n, const char *path, char *src, size_t cap, int *created) {
+    rx_buf p = {NULL, 0, 0};
+    rx_buf_str(&p, path);
+    int r = 0;
+    if (created) *created = 0;
+    for (int i = n - 1; i >= 0 && r == 0; i--) {
+        const rx_change *c = &before[i];
+        const char *rest;
+        if (c->kind == RX_CHANGE_RENAME) {
+            if (rx_same_path(p.data, c->to)) {
+                rx_buf_clear(&p);
+                rx_buf_str(&p, c->path);
+            } else if ((rest = rx_under(p.data, c->to)) != NULL) {
+                rx_buf q = {NULL, 0, 0};
+                rx_buf_add(&q, c->path, rx_trimmed(c->path));
+                rx_buf_str(&q, rest);
+                rx_buf_free(&p);
+                p = q;
+            } else if (rx_same_path(p.data, c->path) || rx_under(p.data, c->path)) {
+                r = -1;
+            }
+        } else if (c->kind == RX_CHANGE_DELETE) {
+            if (rx_same_path(p.data, c->path) || rx_under(p.data, c->path)) r = -1;
+        } else if (c->kind == RX_CHANGE_CREATE && rx_same_path(p.data, c->path)) {
+            if (created) *created = 1;
+            break;
+        }
+    }
+    if (r == 0 && src) snprintf(src, cap, "%s", p.data);
+    rx_buf_free(&p);
+    return r;
+}
+
+static int rx_pos_cmp(rx_pos a, rx_pos b) {
+    if (a.line != b.line) return a.line < b.line ? -1 : 1;
+    return a.col < b.col ? -1 : a.col > b.col;
+}
+
+/* one edit of a composed group: its range, its text (borrowed) and how it sorts */
+typedef struct {
+    rx_range r;
+    const char *t;
+    size_t n;
+    rx_pos rank;
+    int grp, idx;
+} rx_cedit;
+
+static int rx_cedit_cmp(const void *x, const void *y) {
+    const rx_cedit *a = (const rx_cedit *)x, *b = (const rx_cedit *)y;
+    int c = rx_pos_cmp(a->r.start, b->r.start);
+    if (!c) c = rx_pos_cmp(a->r.end, b->r.end);
+    if (!c) c = rx_pos_cmp(a->rank, b->rank);
+    if (!c) c = a->grp - b->grp;
+    if (!c) c = a->idx - b->idx;
+    return c;
+}
+
+static rx_pos rx_advance(rx_pos p, const char *t, size_t n) {
+    const char *last = NULL;
+    int lines = 0;
+    for (size_t i = 0; i < n; i++)
+        if (t[i] == '\n') lines++, last = t + i;
+    if (!last) p.col += (int)n;
+    else p.line += lines, p.col = (int)(t + n - last);
+    return p;
+}
+
+static rx_pos rx_forward(rx_pos p, rx_pos oe, rx_pos pe) {
+    rx_pos q;
+    if (p.line == oe.line) q.line = pe.line, q.col = pe.col + p.col - oe.col;
+    else q.line = p.line - oe.line + pe.line, q.col = p.col;
+    return q;
+}
+
+static rx_pos rx_back(rx_pos p, rx_pos oe, rx_pos pe) {
+    rx_pos q;
+    if (p.line == pe.line) q.line = oe.line, q.col = oe.col + p.col - pe.col;
+    else q.line = p.line - pe.line + oe.line, q.col = p.col;
+    return q;
+}
+
+/* a position of the text after base (sorted, with post[k] where each edit is there) in the text
+ * before: a start where base removed text and put none in goes after it, an end before it; -1 in
+ * text base put in */
+static int rx_inv(const rx_cedit *b, const rx_range *post, int nb, rx_pos p, int start, rx_pos *out) {
+    rx_pos oe = {1, 1}, pe = {1, 1};
+    for (int k = 0; k < nb; k++) {
+        rx_pos ps = post[k].start, pend = post[k].end;
+        if (rx_pos_cmp(p, ps) < 0) break;
+        if (!rx_pos_cmp(p, ps) && !(start && !rx_pos_cmp(ps, pend))) {
+            *out = b[k].r.start;
+            return 0;
+        }
+        if (rx_pos_cmp(p, pend) < 0) return -1;
+        oe = b[k].r.end, pe = pend;
+    }
+    *out = rx_back(p, oe, pe);
+    return 0;
+}
+
+/* base (*nb edits, owned array) then next (against the text base left): *base becomes the edits
+ * of both against the first text, in an order rhun's stable sort keeps; why on failure */
+static int rx_compose(rx_cedit **base, int *nb, const rx_change *next, char *why, size_t cap) {
+    int n0 = *nb, nn = next->nedits;
+    rx_cedit *b = *base;
+    for (int k = 0; k < n0; k++) b[k].idx = k, b[k].rank = b[k].r.start, b[k].grp = 1;
+    qsort(b, (size_t)n0, sizeof *b, rx_cedit_cmp);
+    for (int k = 1; k < n0; k++)
+        if (rx_pos_cmp(b[k].r.start, b[k - 1].r.end) < 0) {
+            snprintf(why, cap, "two edits overlap");
+            return -1;
+        }
+    rx_range *post = (rx_range *)malloc(sizeof *post * (size_t)(n0 ? n0 : 1));
+    rx_cedit *all = (rx_cedit *)malloc(sizeof *all * (size_t)(n0 + nn ? n0 + nn : 1));
+    if (!post || !all) abort();
+    rx_pos oe = {1, 1}, pe = {1, 1};
+    for (int k = 0; k < n0; k++) {
+        post[k].start = rx_forward(b[k].r.start, oe, pe);
+        post[k].end = rx_advance(post[k].start, b[k].t, b[k].n);
+        oe = b[k].r.end, pe = post[k].end;
+        all[k] = b[k];
+        all[k].rank = post[k].start;
+        all[k].idx = k;
+    }
+    int bad = 0;
+    for (int k = 0; k < nn && !bad; k++) {
+        rx_range r = next->ranges[k];
+        if (rx_pos_cmp(r.end, r.start) < 0 || r.start.line < 1 || r.start.col < 1) {
+            snprintf(why, cap, "an edit's range ends before it starts");
+            bad = 1;
+            break;
+        }
+        for (int j = 0; j < n0; j++) {
+            rx_pos ps = post[j].start, pend = post[j].end;
+            if ((rx_pos_cmp(r.start, pend) < 0 && rx_pos_cmp(ps, r.end) < 0) ||
+                (!rx_pos_cmp(ps, pend) && rx_pos_cmp(r.start, ps) < 0 && rx_pos_cmp(ps, r.end) < 0)) {
+                snprintf(why, cap, "an edit from %d:%d to %d:%d overlaps an earlier edit of the file", r.start.line,
+                         r.start.col, r.end.line, r.end.col);
+                bad = 1;
+                break;
+            }
+        }
+        if (bad) break;
+        rx_cedit *c = &all[n0 + k];
+        int same = !rx_pos_cmp(r.start, r.end);
+        if (rx_inv(b, post, n0, r.start, 1, &c->r.start) < 0 ||
+            (!same && rx_inv(b, post, n0, r.end, 0, &c->r.end) < 0)) {
+            snprintf(why, cap, "an edit at %d:%d lands in text an earlier edit of the file put in", r.start.line, r.start.col);
+            bad = 1;
+            break;
+        }
+        if (same) c->r.end = c->r.start;
+        c->t = next->texts[k];
+        c->n = next->lens ? next->lens[k] : strlen(next->texts[k]);
+        c->rank = r.start;
+        c->grp = 0;
+        c->idx = k;
+    }
+    free(post);
+    if (bad) {
+        free(all);
+        return -1;
+    }
+    qsort(all, (size_t)(n0 + nn), sizeof *all, rx_cedit_cmp);
+    free(b);
+    *base = all;
+    *nb = n0 + nn;
+    return 0;
+}
+
+int rx_wedit_from_ordered(rx_wedit *out, const rx_change *changes, int n, int *origins, int *bad, char *why, size_t cap) {
+    typedef struct {
+        char *path;
+        int64_t version;
+        int hashed, first, nedits;
+        uint64_t hash;
+        rx_cedit *edits;
+    } group;
+    group *gs = (group *)calloc((size_t)(n ? n : 1), sizeof *gs);
+    int ng = 0, r = 0, at = 0;
+    char tmp[256];
+    if (!gs) abort();
+    if (!why || !cap) why = tmp, cap = sizeof tmp;
+    why[0] = 0;
+    for (int i = 0; i < n && !r; i++) {
+        const rx_change *c = &changes[i];
+        const char *mine[2] = {c->path, c->kind == RX_CHANGE_RENAME ? c->to : NULL};
+        int holds = c->kind == RX_CHANGE_RENAME || c->kind == RX_CHANGE_DELETE;
+        at = i;
+        if (c->kind < RX_CHANGE_EDIT || c->kind > RX_CHANGE_DELETE) {
+            snprintf(why, cap, "an unknown kind of change");
+            r = -1;
+            break;
+        }
+        for (int m = 0; c->kind != RX_CHANGE_EDIT && m < 2 && !r; m++) {
+            const char *p = mine[m];
+            if (m == 1 && c->kind != RX_CHANGE_RENAME) break;
+            if (!p || !*p) {
+                snprintf(why, cap, "a file operation without a path");
+                r = -1;
+                break;
+            }
+            for (int j = 0; j < i && !r; j++) {
+                const rx_change *o = &changes[j];
+                if (o->kind == RX_CHANGE_EDIT) continue;
+                const char *theirs[2] = {o->path, o->kind == RX_CHANGE_RENAME ? o->to : NULL};
+                for (int t = 0; t < 2 && theirs[t] && !r; t++) {
+                    if (rx_same_path(p, theirs[t])) {
+                        snprintf(why, cap, "%s is the path of two file operations", p);
+                        r = -1;
+                    } else if ((holds && rx_under(theirs[t], p)) || (o->kind != RX_CHANGE_CREATE && rx_under(p, theirs[t]))) {
+                        snprintf(why, cap, "%s and a folder another file operation renames or deletes", p);
+                        r = -1;
+                    }
+                }
+            }
+        }
+        if (r) break;
+        if (c->kind == RX_CHANGE_EDIT) {
+            char src[4200];
+            int created;
+            if (rx_locate(changes, i, c->path, src, sizeof src, &created) < 0) {
+                snprintf(why, cap, "an edit to %s after it was renamed away or deleted", c->path);
+                r = -1;
+                break;
+            }
+            int g = -1;
+            for (int k = 0; k < ng; k++)
+                if (rx_same_path(gs[k].path, src)) g = k;
+            if (g >= 0) {
+                char w2[200];
+                if (rx_compose(&gs[g].edits, &gs[g].nedits, c, w2, sizeof w2) < 0) {
+                    snprintf(why, cap, "%s: %s", src, w2);
+                    r = -1;
+                }
+                continue;
+            }
+            group *ng_ = &gs[ng++];
+            ng_->path = (char *)malloc(strlen(src) + 1);
+            if (!ng_->path) abort();
+            strcpy(ng_->path, src);
+            ng_->version = created ? RX_ON_DISK : c->version;
+            ng_->hashed = created ? 0 : c->hashed;
+            ng_->hash = c->hash;
+            ng_->first = i;
+            ng_->nedits = c->nedits;
+            ng_->edits = (rx_cedit *)calloc((size_t)(c->nedits ? c->nedits : 1), sizeof(rx_cedit));
+            if (!ng_->edits) abort();
+            for (int k = 0; k < c->nedits; k++) {
+                ng_->edits[k].r = c->ranges[k];
+                ng_->edits[k].t = c->texts[k];
+                ng_->edits[k].n = c->lens ? c->lens[k] : strlen(c->texts[k]);
+            }
+        } else if (c->kind == RX_CHANGE_CREATE || c->kind == RX_CHANGE_RENAME) {
+            const char *p = c->kind == RX_CHANGE_CREATE ? c->path : c->to;
+            for (int k = 0; k < ng && !r; k++)
+                if (rx_same_path(gs[k].path, p)) {
+                    snprintf(why, cap, "%s is %s after an edit of it", p, c->kind == RX_CHANGE_CREATE ? "created" : "renamed onto");
+                    r = -1;
+                }
+        }
+    }
+    if (!r) {
+        /* creates, the groups (those of a path deleted afterwards left out), renames, deletes */
+        int entry = 0;
+        for (int phase = 0; phase < 4; phase++) {
+            if (phase == 1) {
+                for (int k = 0; k < ng; k++) {
+                    int gone = 0;
+                    for (int j = 0; j < n; j++)
+                        if (changes[j].kind == RX_CHANGE_DELETE && rx_same_path(changes[j].path, gs[k].path)) gone = 1;
+                    if (gone) continue;
+                    if (gs[k].hashed && gs[k].version < 0) {
+                        rx_wedit_file(out, gs[k].path, 0, RX_ON_DISK);
+                        out->hashed = !out->fail;
+                        out->hash = gs[k].hash;
+                    } else {
+                        rx_wedit_file(out, gs[k].path, 0, gs[k].version);
+                    }
+                    for (int m = 0; m < gs[k].nedits; m++) rx_wedit_edit(out, gs[k].edits[m].r, gs[k].edits[m].t, gs[k].edits[m].n);
+                    if (origins) origins[entry] = gs[k].first;
+                    entry++;
+                }
+                continue;
+            }
+            int kind = phase == 0 ? RX_CHANGE_CREATE : phase == 2 ? RX_CHANGE_RENAME : RX_CHANGE_DELETE;
+            for (int j = 0; j < n; j++) {
+                const rx_change *c = &changes[j];
+                if (c->kind != kind) continue;
+                if (kind == RX_CHANGE_CREATE) rx_wedit_create(out, c->path, c->flags);
+                else if (kind == RX_CHANGE_RENAME) rx_wedit_rename(out, c->path, c->to, c->flags);
+                else rx_wedit_delete(out, c->path, c->flags);
+                if (origins) origins[entry] = j;
+                entry++;
+            }
+        }
+        if (out->fail) {
+            snprintf(why, cap, "%s", out->why);
+            at = -1;
+            r = -1;
+        }
+    }
+    for (int k = 0; k < ng; k++) {
+        free(gs[k].path);
+        free(gs[k].edits);
+    }
+    free(gs);
+    if (r && bad) *bad = at;
+    return r;
+}
+
 /* ---- the loop */
 
 /* fields f[from] to f[to - 1] are numbers: digits only */
@@ -2590,6 +3411,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
     rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
     rx_wedit e;
     memset(&e, 0, sizeof e);
+    int caps = rx_edit_caps(ext);
     int is_pos = strcmp(verb, "definition") == 0 || strcmp(verb, "references") == 0 || strcmp(verb, "symbols") == 0;
     if ((strcmp(verb, "complete") == 0 || strcmp(verb, "signature") == 0) && n >= 8) {
         rx_ask req;
@@ -2634,6 +3456,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.range.end.col = atoi(f[7]);
         rx_actions l;
         memset(&l, 0, sizeof l);
+        l.caps = 1 | (caps & 1 ? 2 : 0) | (caps & 2 ? 4 : 0);
         if ((ok = h->actions(ext, &req, &l, user)) != 0) rx_actions_finish(&l, &body);
         rx_buf_free(&l.recs);
     } else if (strcmp(verb, "rename") == 0 && n >= 8 && rx_nums(f, 2, 6) && h->rename) {
@@ -2644,7 +3467,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.at.line = atoi(f[4]);
         req.at.col = atoi(f[5]);
         req.name = f[7];
-        if ((ok = h->rename(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+        if ((ok = h->rename(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, caps & 1, (caps & 2) != 0);
     } else if (strcmp(verb, "format") == 0 && n >= 6 && rx_nums(f, 2, 5) && h->format &&
                (strcmp(f[5], "yes") == 0 || strcmp(f[5], "no") == 0)) {
         rx_format_ask req;
@@ -2652,8 +3475,8 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.doc = atoll(f[2]);
         req.version = atoll(f[3]);
         req.tab_width = atoi(f[4]);
-        req.spaces = strcmp(f[5], "yes") == 0;
-        if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+        req.spaces = strcmp(f[5], "yes") == 0;     /* format keeps 12g's grammar */
+        if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
     } else if (strcmp(verb, "content") == 0 && n >= 3 && h->content && rx_has(ext, "uris")) {
         rx_buf uri = {NULL, 0, 0};
         for (int i = 2; i < n; i++) {
@@ -2686,7 +3509,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
             rx_positive_num(f[3], INT64_MAX, &req.version) && rx_source_kind(f[4])) {
             req.kind = f[4];
-            if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+            if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
         }
     } else if (strcmp(verb, "quickdiff") == 0 && n == 4 && h->quickdiff && rx_has(ext, "quickdiff")) {
         rx_quickdiff_ask req;
@@ -2716,6 +3539,17 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             }
             rx_buf_free(&msg);
         }
+    } else if (strcmp(verb, "linked") == 0 && n == 6 && rx_nums(f, 2, 6) && h->linked && rx_has(ext, "linked-editing")) {
+        rx_linked_ask req;
+        req.id = atoll(f[0]);
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        rx_linked l;
+        memset(&l, 0, sizeof l);
+        if (req.at.line >= 1 && req.at.col >= 1 && (ok = h->linked(ext, &req, &l, user)) != 0) rx_linked_finish(&l, &body);
+        rx_buf_free(&l.ranges);
     } else {
         rx_answer_ai(ext, h, user, f, n, rbody, rbody_len, &ok, &body);
     }
@@ -2966,7 +3800,7 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
     static rx_ext ext_s;
     rx_ext *ext = &ext_s;
     memset(ext, 0, sizeof *ext);
-    char hello[300];
+    char hello[600];
     snprintf(hello, sizeof hello, "hello 1%s%s", features && *features ? " " : "", features ? features : "");
     rx_write(hello, NULL, 0);
     for (;;) {

@@ -34,12 +34,22 @@
 //! `run.wasm32-wasip1` in the spec), the crate needs no threads: a request reads rhun's input
 //! itself until its reply comes, and keeps the events it reads meanwhile for later, so the
 //! behaviour is the same.
+//!
+//! Protocol 1.1 adds workspace edits as transactions ([`Feature::WorkspaceEdits`],
+//! [`Feature::FileOperations`]: [`WorkspaceEdit::file_hashed`], [`WorkspaceEdit::create`],
+//! [`WorkspaceEdit::rename`], [`WorkspaceEdit::delete`], [`edits::from_ordered`] for LSP's ordered
+//! changes, [`ApplyError`]), several selections ([`Feature::Selections`]: [`Ext::select_many`],
+//! [`Handler::selections`]), [`Ext::reveal`] and [`Ext::show_locations`]
+//! ([`Feature::Reveal`]), diff tabs ([`Feature::Diff`]: [`Ext::diff`]) and linked editing
+//! ([`Feature::LinkedEditing`]: [`Handler::linked`]).
 
 #![allow(clippy::needless_doctest_main)]
 
 pub mod ai;
 pub mod chart;
 pub mod complete;
+pub mod editor;
+pub mod edits;
 pub mod lang;
 pub mod picture;
 pub mod scm;
@@ -62,9 +72,12 @@ use std::thread;
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
 };
+pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show};
+pub use edits::{Change, Located, OrderError};
 pub use lang::{
-    ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest,
-    SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
+    fnv1a64, ActionsRequest, CodeAction, Create, Delete, Entry, FileEdit, FileOp, FormatRequest,
+    Location, PosRequest, Rename, RenameRequest, SaveActionsRequest, Symbol, SymbolKind, Target,
+    TextEdit, WorkspaceEdit,
 };
 pub use picture::{Color, Picture};
 pub use scm::{
@@ -81,6 +94,21 @@ pub use testing::{
     expected_actual, unquote, CoverageRange, FileCoverage, TestCommand, TestItem, TestKind,
     TestMessage, TestProcess, TestReporter, TestResult, TestRun, TestState, TestStream,
 };
+
+/// A URI where rhun takes a document (feature `uris`): one field, without spaces or line breaks
+/// (write a space as `%20`).
+fn uri_field(uri: &str) -> Result<(), Error> {
+    if uri.is_empty()
+        || uri.len() > 4128
+        || uri.bytes().any(|b| matches!(b, b' ' | b'\n' | b'\r' | 0))
+    {
+        return Err(Error {
+            code: "syntax".into(),
+            text: "a URI field is 1 to 4128 bytes without spaces or line breaks".into(),
+        });
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -192,6 +220,19 @@ pub enum Feature {
     Tools,
     /// Prompts, Stop and cards for its sessions: [`Handler::agent_prompt`], [`Ext::agent_ask`].
     AgentPrompts,
+    /// Workspace edits as transactions: files that are not open edited on disk (with an
+    /// `fnv1a64` precondition), a label, `confirm`, one undo, [`ApplyError`] (protocol 1.1).
+    WorkspaceEdits,
+    /// Creating, renaming and deleting files in workspace edits (with [`Feature::WorkspaceEdits`]).
+    FileOperations,
+    /// Every selection ([`Handler::selections`]) and [`Ext::select_many`].
+    Selections,
+    /// [`Ext::reveal`] and [`Ext::show_locations`].
+    Reveal,
+    /// Diff tabs between two open documents: [`Ext::diff`], [`Ext::diff_close`].
+    Diff,
+    /// Linked editing ranges: [`Handler::linked`].
+    LinkedEditing,
 }
 
 impl Feature {
@@ -224,6 +265,12 @@ impl Feature {
             Feature::EditReview => "edit-review",
             Feature::Tools => "tools",
             Feature::AgentPrompts => "agent-prompts",
+            Feature::WorkspaceEdits => "workspace-edits",
+            Feature::FileOperations => "file-operations",
+            Feature::Selections => "selections",
+            Feature::Reveal => "reveal",
+            Feature::Diff => "diff",
+            Feature::LinkedEditing => "linked-editing",
         }
     }
 }
@@ -535,6 +582,71 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A refused workspace edit: `error ID CODE ENTRY TEXT` with feature `workspace-edits` agreed,
+/// where ENTRY is the 1-based number of the body's entry at fault ([`WorkspaceEdit::entry`]), or
+/// 0; without the feature `entry` is 0 and `text` the whole sentence. Codes: `syntax`, `needs`,
+/// `nofile`, `nodoc`, `stale`, `readonly`, `badpos`, `toobig`, `refused`, `cancelled`, `busy`,
+/// `io` (the disk refused a write and rhun put everything back: the edit may be sent again), and
+/// `unknown` for an edit that needs a feature rhun did not agree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplyError {
+    pub code: String,
+    pub entry: u32,
+    pub text: String,
+}
+
+impl fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.entry > 0 {
+            write!(
+                f,
+                "rhun: {}: entry {}: {}",
+                self.code, self.entry, self.text
+            )
+        } else {
+            write!(f, "rhun: {}: {}", self.code, self.text)
+        }
+    }
+}
+
+impl std::error::Error for ApplyError {}
+
+impl From<ApplyError> for Error {
+    fn from(e: ApplyError) -> Error {
+        Error {
+            code: e.code,
+            text: if e.entry > 0 {
+                format!("{} {}", e.entry, e.text)
+            } else {
+                e.text
+            },
+        }
+    }
+}
+
+impl ApplyError {
+    /// An error reply's `ENTRY TEXT` split when the feature is agreed.
+    fn from_reply(e: Error, entries: bool) -> ApplyError {
+        if entries {
+            let (n, rest) = e.text.split_once(' ').unwrap_or((e.text.as_str(), ""));
+            if !n.is_empty() && n.len() <= 10 && n.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(entry) = n.parse() {
+                    return ApplyError {
+                        code: e.code,
+                        entry,
+                        text: rest.to_string(),
+                    };
+                }
+            }
+        }
+        ApplyError {
+            code: e.code,
+            entry: 0,
+            text: e.text,
+        }
+    }
+}
+
 /// A successful reply: the fields after `ok ID`, and the body when the request has one.
 #[derive(Clone, Debug, Default)]
 pub struct Reply {
@@ -605,6 +717,14 @@ pub trait Handler: Send {
     /// an empty one changes nothing.
     fn format(&mut self, _ext: &Ext, _req: &FormatRequest) -> WorkspaceEdit {
         WorkspaceEdit::default()
+    }
+    /// Every selection of a document changed (feature `selections`, `[subscribe] selection`):
+    /// the primary first. A caret that only moved comes as `cursor` instead.
+    fn selections(&mut self, _ext: &Ext, _sels: &Selections) {}
+    /// rhun asks for the ranges that change together with the word at the cursor (feature
+    /// `linked-editing`, `[provides] linked`); none says there are none.
+    fn linked(&mut self, _ext: &Ext, _req: &LinkedRequest) -> Linked {
+        Linked::default()
     }
     /// Source actions before saving. Intermediate command edits use [`Ext::save_apply`].
     /// A `cancel` event names `req.id`. Handlers run serially, so long work must be bounded;
@@ -916,13 +1036,129 @@ impl Ext {
     /// Applies a workspace edit (section 12g) across documents and files, as the language
     /// features' answers do: rhun checks it whole and changes nothing on any error (`stale`,
     /// `badpos`, `nodoc`, `nofile`, …). Needs `documents = write`. For a language server's
-    /// `workspace/applyEdit`.
-    pub fn apply(&self, edit: &WorkspaceEdit) -> Result<(), Error> {
-        let body = edit.encode().map_err(|text| Error {
+    /// `workspace/applyEdit`. With [`Feature::WorkspaceEdits`] the edit is a transaction (files
+    /// that are not open edited on disk, one undo) and the error names the entry at fault; file
+    /// operations need [`Feature::FileOperations`] too (`unknown` without, nothing sent).
+    pub fn apply(&self, edit: &WorkspaceEdit) -> Result<(), ApplyError> {
+        let body = edit
+            .encode_with(self.edit_caps())
+            .map_err(|(code, text)| ApplyError {
+                code: code.into(),
+                entry: 0,
+                text,
+            })?;
+        self.request("apply", Some(&body))
+            .map(|_| ())
+            .map_err(|e| ApplyError::from_reply(e, self.has(Feature::WorkspaceEdits)))
+    }
+
+    /// The parts of the workspace edit grammar rhun agreed to.
+    fn edit_caps(&self) -> lang::EditCaps {
+        lang::EditCaps {
+            ws: self.has(Feature::WorkspaceEdits),
+            ops: self.has(Feature::FileOperations),
+        }
+    }
+
+    fn need(&self, f: Feature) -> Result<(), Error> {
+        if self.has(f) {
+            Ok(())
+        } else {
+            Err(Error {
+                code: "unknown".into(),
+                text: format!("{} feature was not agreed", f.name()),
+            })
+        }
+    }
+
+    // ---- the editor model (protocol 1.1) ----
+
+    /// Sets a document's selections, the first becoming primary; overlapping ones merge
+    /// (feature `selections`). 1 to 512 (`toobig` without asking otherwise).
+    pub fn select_many(&self, doc: Doc, sels: &[Selection]) -> Result<(), Error> {
+        self.need(Feature::Selections)?;
+        let body = editor::encode_selections(sels).map_err(|text| Error {
             code: "toobig".into(),
             text,
         })?;
-        self.request("apply", Some(&body)).map(|_| ())
+        self.request(&format!("select-many {doc} {}", sels.len()), Some(&body))
+            .map(|_| ())
+    }
+
+    /// Scrolls a document's view so the position shows, without moving the cursor or
+    /// activating its tab (feature `reveal`).
+    pub fn reveal(&self, doc: Doc, at: Pos, how: Reveal) -> Result<(), Error> {
+        self.need(Feature::Reveal)?;
+        self.request(
+            &format!("reveal {doc} {} {} {}", at.line, at.col, how.word()),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// [`Ext::reveal`] for the open document with that URI (features `reveal` and `uris`): a
+    /// virtual document's URI, or a `file:` URI of an open file.
+    pub fn reveal_uri(&self, uri: &str, at: Pos, how: Reveal) -> Result<(), Error> {
+        self.need(Feature::Reveal)?;
+        uri_field(uri)?;
+        self.request(
+            &format!("reveal {uri} {} {} {}", at.line, at.col, how.word()),
+            None,
+        )
+        .map(|_| ())
+    }
+
+    /// Lists locations in the palette as Find All References does, under a title (feature
+    /// `reveal`); `busy` while a prompt or the palette is open.
+    pub fn show_locations(&self, title: &str, locs: &[Location]) -> Result<(), Error> {
+        self.need(Feature::Reveal)?;
+        let body = editor::encode_show_locations(title, locs);
+        self.request("show-locations", Some(&body)).map(|_| ())
+    }
+
+    /// Opens (or reuses, for the same pair and title) a read-only tab with a unified diff from
+    /// document `left` to document `right` (feature `diff`); the tab's id, which is not a
+    /// document.
+    pub fn diff(&self, left: Doc, right: Doc, title: &str, show: Show) -> Result<Doc, Error> {
+        self.diff_sides(&left.to_string(), &right.to_string(), title, show)
+    }
+
+    /// [`Ext::diff`] with sides named by URI (features `diff` and `uris`): a virtual document's
+    /// URI (opened without a tab when it is not open, and closed with the last diff tab showing
+    /// it unless the user opened it meanwhile), a `file:` URI of an open file, or a document id.
+    pub fn diff_uris(
+        &self,
+        left: &str,
+        right: &str,
+        title: &str,
+        show: Show,
+    ) -> Result<Doc, Error> {
+        self.need(Feature::Diff)?;
+        uri_field(left)?;
+        uri_field(right)?;
+        self.diff_sides(left, right, title, show)
+    }
+
+    fn diff_sides(&self, left: &str, right: &str, title: &str, show: Show) -> Result<Doc, Error> {
+        self.need(Feature::Diff)?;
+        let t = editor::title(title, editor::MAX_TITLE);
+        let rep = self.request(
+            &format!("diff {left} {right} {}", show.word()),
+            Some(t.as_bytes()),
+        )?;
+        rep.fields
+            .first()
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| Error {
+                code: "syntax".into(),
+                text: "invalid diff reply".into(),
+            })
+    }
+
+    /// Closes one of this extension's diff tabs (feature `diff`).
+    pub fn diff_close(&self, tab: Doc) -> Result<(), Error> {
+        self.need(Feature::Diff)?;
+        self.request(&format!("diff-close {tab}"), None).map(|_| ())
     }
 
     /// Selects a range (the cursor at its end).
@@ -1054,10 +1290,12 @@ impl Ext {
                 text: "invalid save-action identity".into(),
             });
         }
-        let body = edit.encode().map_err(|text| Error {
-            code: "toobig".into(),
-            text,
-        })?;
+        let body = edit
+            .encode_with(lang::EditCaps::V1)
+            .map_err(|(code, text)| Error {
+                code: code.into(),
+                text,
+            })?;
         let reply = self.request(
             &format!("save-apply {request_id} {doc} {version}"),
             Some(&body),
@@ -1387,7 +1625,8 @@ impl Ext {
                     }
                     let view_body = ev.name == "view"
                         && ev.fields.get(1).is_some_and(|w| views::has_body(w));
-                    if ev.name == "edits" || ev.name == "action" || view_body {
+                    if ev.name == "edits" || ev.name == "action" || ev.name == "selections" || view_body
+                    {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1545,6 +1784,11 @@ impl Ext {
                                 h.agent_stop(self, sid);
                             }
                         }
+                        "selections" if self.has(Feature::Selections) => {
+                            if let Some(s) = Selections::parse(&ev) {
+                                h.selections(self, &s);
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             return false;
@@ -1573,16 +1817,21 @@ impl Ext {
                             .map(|r| Ok(lang::encode_locations(&h.references(self, &r)))),
                         "symbols" => PosRequest::parse(&fields)
                             .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
-                        "actions" => ActionsRequest::parse(&fields)
-                            .map(|r| Ok(lang::encode_actions(&h.actions(self, &r)))),
+                        "actions" => ActionsRequest::parse(&fields).map(|r| {
+                            Ok(lang::encode_actions_with(
+                                &h.actions(self, &r),
+                                self.edit_caps(),
+                            ))
+                        }),
                         "rename" => {
                             RenameRequest::parse(&fields).map(|r| match h.rename(self, &r) {
-                                Ok(e) => e.encode().map_err(|why| ("toobig", why)),
+                                Ok(e) => e.encode_with(self.edit_caps()),
                                 Err(why) => Err(("refused", why)),
                             })
                         }
+                        // format and save actions keep 12g's grammar (one open document)
                         "format" => FormatRequest::parse(&fields)
-                            .map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why))),
+                            .map(|r| h.format(self, &r).encode_with(lang::EditCaps::V1)),
                         "vkids" | "vmore" if self.has(Feature::ViewTree) => {
                             views::ChildrenRequest::parse(id, &verb, &fields, &req_body).map(|r| {
                                 let res = if r.have.is_some() {
@@ -1604,7 +1853,7 @@ impl Ext {
                         "save-actions" if self.has(Feature::SaveActions) => {
                             SaveActionsRequest::parse(id, &fields).map(|r| {
                                 match h.save_actions(self, &r) {
-                                    Ok(e) => e.encode().map_err(|why| ("toobig", why)),
+                                    Ok(e) => e.encode_with(lang::EditCaps::V1),
                                     Err(why) => Err(("refused", why)),
                                 }
                             })
@@ -1671,6 +1920,9 @@ impl Ext {
                                     .map(|s| s.into_bytes())
                                     .map_err(|r| (refusal_code(&r.code), r.text)),
                             )
+                        }
+                        "linked" if self.has(Feature::LinkedEditing) => {
+                            LinkedRequest::parse(&fields).map(|r| Ok(h.linked(self, &r).encode()))
                         }
                         _ => None,
                     };

@@ -225,6 +225,10 @@ type host struct {
 	rviews      map[int64]*rview  // retained views it was given (views.go)
 	patches     int               // vpatch requests that passed
 	secrets     map[string][]byte // secret-set values (resources.go)
+
+	warnedConsent bool               // said once that a disk change needs the user's consent
+	diffs         map[int64]string   // the diff tabs it opened: "LEFT RIGHT TITLE"
+	selectionsSet map[int64][]string // select-many's selections per document
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -420,7 +424,8 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
 	"vpatch": true, "vreveal": true, // retained views: views.go
 	"secret-set":     true,                                                        // resources: resources.go
-	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true} // ai: ai.go
+	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
+	"select-many": true, "show-locations": true, "diff": true} // workspace edits and the editor: editor.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -546,7 +551,11 @@ func (h *host) handle(msg message) {
 	rerr := func(code, text string) { reply(fmt.Sprintf("error %d %s %s", id, code, text)) }
 	if h.errOnce > 0 {
 		h.errOnce--
-		rerr("refused", "conformance: an error reply the extension must survive")
+		why := "conformance: an error reply the extension must survive"
+		if verb == "apply" && h.features["workspace-edits"] {
+			why = "0 " + why // error ID CODE ENTRY TEXT
+		}
+		rerr("refused", why)
 		return
 	}
 	need := func(level string) bool {
@@ -1128,6 +1137,8 @@ func (h *host) handle(msg message) {
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
 	case "vpatch", "vshow", "vreveal":
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
+	case "select-many", "reveal", "show-locations", "diff", "diff-close":
+		h.editorRequest(id, verb, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1258,6 +1269,7 @@ func (h *host) catchUp() {
 	if h.m.subscribe["cursor"] != "" && h.m.subscribe["cursor"] != "no" {
 		h.write(fmt.Sprintf("0 cursor %d 1 1\n", h.active))
 	}
+	h.sendEditorEvents(h.docs[h.active])
 }
 
 // sendSettings sends each of the manifest's settings with its default, as rhun does after ready.
@@ -1445,7 +1457,11 @@ func main() {
 		if k == "quickdiff" {
 			continue
 		}
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" && k != "schemes" {
+		known := k == "complete.triggers" || k == "signature.triggers" || k == "schemes"
+		for _, f := range providerFeatures {
+			known = known || k == provideKey(f)
+		}
+		if !known {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
 	}
@@ -1542,6 +1558,9 @@ func main() {
 	// 2. each command once, on each document
 	for _, c := range m.commands {
 		for _, d := range []int64{1, 2, 3, 4} {
+			if h.docs[d] == nil {
+				continue // a workspace edit renamed or deleted it
+			}
 			before := len(h.requests)
 			h.activate(d)
 			h.write(fmt.Sprintf("0 run %s.%s %d\n", m.name, c, d))
@@ -1568,8 +1587,7 @@ func main() {
 
 	// 2b. the user types into main.go and saves it: the edits stream (and saved) for subscribers;
 	// then the pointer rests
-	if h.sub("edits") || h.sub("hover") {
-		d := h.docs[2]
+	if d := h.docs[2]; d != nil && (h.sub("edits") || h.sub("hover")) {
 		h.activate(d.id)
 		h.serve(200 * time.Millisecond)
 		typed := []byte("\n// typed\n")
@@ -1600,6 +1618,18 @@ func main() {
 			h.hoverAt = ""
 			h.ok("takes the hover event")
 		}
+	}
+
+	// 2b'. protocol 1.1: every selection, for an extension that agreed selections and subscribes
+	// to selection
+	if h.features["selections"] && h.sub("selection") {
+		h.sendEditorEvents(h.docs[2])
+		h.serve(500 * time.Millisecond)
+		if h.cmdExited() {
+			h.fail("selections", "the program exited on a selections event")
+			report(h)
+		}
+		h.ok("takes the selections event")
 	}
 
 	// 2c. section 12: the requests rhun sends (completion, signature help, definition, references,

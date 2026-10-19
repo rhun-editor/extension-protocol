@@ -210,7 +210,7 @@
     },
     "provides": {
       "type": "object",
-      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1. Protocol 1.1 adds save_actions patterns.",
+      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1. Protocol 1.1 adds save_actions patterns; linked patterns (feature linked-editing).",
       "properties": {
         "complete": {
           "$ref": "#/$defs/patterns"
@@ -283,6 +283,10 @@
           "type": "string",
           "maxLength": 80,
           "description": "the source's name on its rows and in Settings > Agents; the default is the extension's title"
+        },
+        "linked": {
+          "$ref": "#/$defs/patterns",
+          "description": "protocol 1.1, feature linked-editing: the files the linked request is asked for"
         }
       },
       "additionalProperties": false

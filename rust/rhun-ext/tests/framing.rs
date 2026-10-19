@@ -773,3 +773,260 @@ fn compiled_transform_negotiation_and_framing() {
         assert!(done.join().unwrap().is_ok());
     }
 }
+
+#[test]
+fn workspace_edit_transactions_and_the_editor_model() {
+    use rhun_ext::{
+        Create, Linked, LinkedRequest, Location, Rename, Reveal, Selection, Selections, Show,
+        Target, TextEdit, WorkspaceEdit,
+    };
+    struct Model(Sender<String>);
+    impl Handler for Model {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            let r = |e: Result<(), rhun_ext::Error>| match e {
+                Ok(()) => "ok".to_string(),
+                Err(e) => e.code,
+            };
+            let at = Pos::new(2, 3);
+            let sels = [
+                Selection::new(Pos::new(1, 1), Pos::new(1, 4)),
+                Selection::caret(at),
+            ];
+            self.0.send(r(ext.select_many(4, &sels))).unwrap();
+            self.0.send(r(ext.select_many(4, &[]))).unwrap();
+            self.0
+                .send(r(ext.reveal(4, at, Reveal::CenterIfOutside)))
+                .unwrap();
+            let loc = Location::new(Target::Doc(4), Range::new(at, at));
+            self.0
+                .send(r(ext.show_locations("Callers", &[loc])))
+                .unwrap();
+            let tab = ext.diff(4, 5, "HEAD\nwork", Show::Background).unwrap();
+            self.0.send(format!("diff {tab}")).unwrap();
+            self.0.send(r(ext.diff_close(tab))).unwrap();
+            let edit = WorkspaceEdit::new()
+                .label("Move")
+                .rename("/p/a.rs", "/p/b.rs", Rename::default())
+                .create("/p/c.rs", Create::default())
+                .file_hashed(
+                    "/p/a.rs",
+                    b"x",
+                    vec![TextEdit::new(Range::new(at, at), "y")],
+                );
+            let e = ext.apply(&edit).unwrap_err();
+            self.0
+                .send(format!(
+                    "{} {} {} {:?}",
+                    e.code,
+                    e.entry,
+                    e.text,
+                    edit.entry(e.entry)
+                ))
+                .unwrap();
+        }
+        fn selections(&mut self, _ext: &Ext, s: &Selections) {
+            self.0
+                .send(format!("selections {} {:?}", s.doc, s.sels))
+                .unwrap();
+        }
+        fn linked(&mut self, _ext: &Ext, req: &LinkedRequest) -> Linked {
+            let l = req.at.line;
+            Linked::new(vec![
+                Range::new(Pos::new(l, 2), Pos::new(l, 5)),
+                Range::new(Pos::new(l + 1, 3), Pos::new(l + 1, 6)),
+            ])
+            .word("-")
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, got) = channel();
+    let feats = [
+        Feature::WorkspaceEdits,
+        Feature::FileOperations,
+        Feature::Selections,
+        Feature::Reveal,
+        Feature::Diff,
+        Feature::LinkedEditing,
+    ];
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &feats,
+            Model(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    let next = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        host.line(),
+        "hello 1 workspace-edits file-operations selections reveal diff linked-editing"
+    );
+    host.send("0 features workspace-edits file-operations selections reveal diff linked-editing\n0 ready -\n");
+    assert_eq!(host.line(), "1 select-many 4 2 16");
+    assert_eq!(host.body(16), "1 1 1 4\n2 3 2 3\n");
+    host.send("ok 1\n");
+    assert_eq!(next(&got), "ok");
+    assert_eq!(next(&got), "toobig");
+    assert_eq!(host.line(), "2 reveal 4 2 3 center-if-outside");
+    host.send("ok 2\n");
+    assert_eq!(next(&got), "ok");
+    let body = "Callers\n1\n2 3 2 3 2 0\n#4";
+    assert_eq!(host.line(), format!("3 show-locations {}", body.len()));
+    assert_eq!(host.body(body.len()), body);
+    host.send("error 3 busy the palette is open\n");
+    assert_eq!(next(&got), "busy");
+    assert_eq!(host.line(), "4 diff 4 5 background 9");
+    assert_eq!(host.body(9), "HEAD work");
+    host.send("ok 4 77\n");
+    assert_eq!(next(&got), "diff 77");
+    assert_eq!(host.line(), "5 diff-close 77");
+    host.send("ok 5\n");
+    assert_eq!(next(&got), "ok");
+    let edit = format!(
+        "3\ncreate 7 -\n/p/c.rs7 fnv1a64:{:016x} 1\n/p/a.rs2 3 2 3 1\nyrename 7 7 -\n/p/a.rs/p/b.rslabel 4\nMove",
+        rhun_ext::fnv1a64(b"x")
+    );
+    assert_eq!(host.line(), format!("6 apply {}", edit.len()));
+    assert_eq!(host.body(edit.len()), edit);
+    host.send("error 6 stale 2 /p/a.rs changed on disk\n");
+    assert_eq!(next(&got), "stale 2 /p/a.rs changed on disk Some(File(0))");
+    // events with and without a body, then a linked request
+    host.send("0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n9 linked 4 7 3 2\n");
+    assert_eq!(
+        next(&got),
+        "selections 4 [Selection { anchor: Pos { line: 3, col: 1 }, cursor: Pos { line: 3, col: 5 } }, Selection { anchor: Pos { line: 1, col: 2 }, cursor: Pos { line: 1, col: 2 } }]"
+    );
+    let linked = "2\n3 2 3 5\n4 3 4 6\nword 1\n-";
+    assert_eq!(host.line(), format!("ok 9 {}", linked.len()));
+    assert_eq!(host.body(linked.len()), linked);
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn without_the_features_requests_fail_and_edits_stay_v1() {
+    use rhun_ext::{Create, Selection, TextEdit, WorkspaceEdit};
+    struct Old(Sender<String>);
+    impl Handler for Old {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            let code = |e: rhun_ext::Error| e.code;
+            self.0
+                .send(code(
+                    ext.select_many(1, &[Selection::default()]).unwrap_err(),
+                ))
+                .unwrap();
+            let ops = WorkspaceEdit::new().create("/p/x", Create::default());
+            self.0.send(ext.apply(&ops).unwrap_err().code).unwrap();
+            let e = WorkspaceEdit::new().label("L").file_hashed(
+                "/p/a",
+                b"x",
+                vec![TextEdit::default()],
+            );
+            let err = ext.apply(&e).unwrap_err();
+            self.0
+                .send(format!("{} {} {}", err.code, err.entry, err.text))
+                .unwrap();
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, got) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[],
+            Old(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1");
+    host.send("0 ready -\n");
+    let next = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(next(&got), "unknown");
+    assert_eq!(next(&got), "unknown");
+    let body = "1\n4 - 1\n/p/a0 0 0 0 0\n";
+    assert_eq!(host.line(), format!("1 apply {}", body.len()));
+    assert_eq!(host.body(body.len()), body);
+    host.send("error 1 stale 2 documents changed\n");
+    assert_eq!(next(&got), "stale 0 2 documents changed");
+    // a selections event the extension did not agree is not delivered (and its body is read)
+    host.send("0 selections 4 1 8\n1 1 1 1\n0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn diff_and_reveal_take_uris() {
+    use rhun_ext::{Reveal, Show};
+    struct Uris(Sender<String>);
+    impl Handler for Uris {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            let tab = ext.diff_uris("res-x:/a.txt", "file:///p/a.rs", "t", Show::Front);
+            self.0
+                .send(format!("diff {:?}", tab.map_err(|e| e.code)))
+                .unwrap();
+            let bad = ext.diff_uris("res-x:/a b", "5", "t", Show::Front);
+            self.0
+                .send(format!("{:?}", bad.map_err(|e| e.code)))
+                .unwrap();
+            let r = ext.reveal_uri("res-x:/a.txt", Pos::new(2, 3), Reveal::Top);
+            self.0.send(format!("{:?}", r.map_err(|e| e.code))).unwrap();
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, got) = channel();
+    let feats = [Feature::Reveal, Feature::Diff];
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &feats,
+            Uris(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    let next = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(host.line(), "hello 1 reveal diff");
+    host.send("0 features reveal diff\n0 ready -\n");
+    assert_eq!(host.line(), "1 diff res-x:/a.txt file:///p/a.rs show 1");
+    assert_eq!(host.body(1), "t");
+    host.send("ok 1 78\n");
+    assert_eq!(next(&got), "diff Ok(78)");
+    assert_eq!(next(&got), "Err(\"syntax\")");
+    assert_eq!(host.line(), "2 reveal res-x:/a.txt 2 3 top");
+    host.send("ok 2\n");
+    assert_eq!(next(&got), "Ok(())");
+    host.send("0 bye\n");
+    drop(host);
+    assert!(done.join().unwrap().is_ok());
+}
