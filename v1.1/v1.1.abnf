@@ -52,3 +52,24 @@ feature      =/ "snippet-transforms"
 c-extra      =/ "transforms" SP "0" SP len LF
               ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
               ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.
+
+; Source control. git-data requires [needs] git = read; replies are length-framed (v1.1.md).
+feature      =/ "git-data"
+request      =/ id SP r-git
+r-git        = "git-repo" / "git-status" / "git-blame" SP doc
+             / "git-log" SP num SP num SP num SP len      ; MAX 1..1000, L1 L2 (0 0: the whole file), path body
+             / "git-show" SP rev SP len                   ; path body
+             / "git-diff-open" SP rev SP ( rev / "-" ) SP len   ; path body; "-" the work tree
+rev          = ( ALPHA / DIGIT / "_" / "." / "/" / "~" / "^" / "@" / "{" / "}" / "+" ) *199( ALPHA / DIGIT / "_" / "." / "/" / "~" / "^" / "@" / "{" / "}" / "+" / "-" )
+event        =/ "0" SP "git" SP "changed"
+git-repo-head = len SP len SP len SP ( "branch" / "detached" / "unborn" ) SP num SP num SP ( "clean" / "dirty" / "merging" / "rebasing" ) LF
+git-status-entry = 2( %x21-7E ) SP len LF                  ; XY ("." an unchanged side), then the path's bytes
+blame-head   = num SP num LF                               ; NC NR
+blame-commit = sha SP num SP len SP len SP len LF          ; then AUTHOR MAIL SUMMARY bytes
+blame-run    = sha SP num SP num SP num LF                 ; L1 L2 ORIG_L1
+log-entry    = sha SP ( sha *( "," sha ) / "-" ) SP num SP len SP len LF   ; then AUTHOR SUBJECT bytes
+sha          = 40HEXDIG / 64HEXDIG
+
+; commit-message: rhun asks; body BRANCH_LEN DIFF_LEN LF <BRANCH><DIFF>; the answer is the message
+feature      =/ "commit-message"
+host-request =/ id SP "commit-message" SP len

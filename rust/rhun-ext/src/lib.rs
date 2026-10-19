@@ -36,6 +36,7 @@ pub mod chart;
 pub mod complete;
 pub mod lang;
 pub mod picture;
+pub mod scm;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
@@ -56,12 +57,16 @@ pub use lang::{
     SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
 };
 pub use picture::{Color, Picture};
-pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
+pub use scm::{
+    Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
+    LogEntry, LogOf,
+};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
 };
+pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 
 #[cfg(test)]
 mod tests {
@@ -145,6 +150,11 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Git data through rhun: [`Ext::git_repo`], [`Ext::git_status`], [`Ext::git_blame`],
+    /// [`Ext::git_log`], [`Ext::git_show`], [`Ext::git_diff_open`]; needs `[needs] git = read`.
+    GitData,
+    /// Commit messages for Generate: [`Handler::commit_message`]; `[provides] commit_message = yes`.
+    CommitMessage,
 }
 
 impl Feature {
@@ -165,6 +175,8 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::GitData => "git-data",
+            Feature::CommitMessage => "commit-message",
         }
     }
 }
@@ -545,6 +557,16 @@ pub trait Handler: Send {
     ) -> Result<WorkspaceEdit, String> {
         Ok(WorkspaceEdit::default())
     }
+    /// rhun asks for a commit message (feature `commit-message`): the message, or why not (shown
+    /// to the user). rhun trims it and refuses one over 8192 bytes or with control characters
+    /// ([`scm::check_commit_message`]). A `cancel` event names `req.id`.
+    fn commit_message(
+        &mut self,
+        _ext: &Ext,
+        _req: &CommitMessageRequest,
+    ) -> Result<String, String> {
+        Err("no commit messages here".to_string())
+    }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
 }
@@ -555,6 +577,8 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
+        /// The body of a request that has one (`commit-message`).
+        body: Vec<u8>,
     },
     End,
 }
@@ -1047,7 +1071,18 @@ impl Ext {
                     let verb = waiter.as_ref().map(|w| w.0.as_str()).unwrap_or("");
                     let mut body = Vec::new();
                     if fields[0] == "ok"
-                        && matches!(verb, "text" | "range" | "ask" | "snippet-context")
+                        && matches!(
+                            verb,
+                            "text"
+                                | "range"
+                                | "ask"
+                                | "snippet-context"
+                                | "git-repo"
+                                | "git-status"
+                                | "git-blame"
+                                | "git-log"
+                                | "git-show"
+                        )
                     {
                         let len: usize = if verb == "snippet-context" {
                             match fields
@@ -1114,11 +1149,24 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
+                        let mut body = Vec::new();
+                        if verb == "commit-message" {
+                            // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
+                            let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
+                                Some(n) if n <= 4 << 20 => n,
+                                _ => break,
+                            };
+                            body = vec![0; len];
+                            if input.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                        }
                         if tx
                             .send(Msg::HostRequest {
                                 id,
                                 verb,
                                 fields: rest,
+                                body,
                             })
                             .is_err()
                         {
@@ -1184,7 +1232,12 @@ impl Ext {
                         _ => {}
                     }
                 }
-                Msg::HostRequest { id, verb, fields } => {
+                Msg::HostRequest {
+                    id,
+                    verb,
+                    fields,
+                    body: req_body,
+                } => {
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
                             .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
@@ -1214,6 +1267,17 @@ impl Ext {
                             SaveActionsRequest::parse(id, &fields).map(|r| {
                                 match h.save_actions(self, &r) {
                                     Ok(e) => e.encode().map_err(|why| ("toobig", why)),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
+                        "commit-message" if self.has(Feature::CommitMessage) => {
+                            CommitMessageRequest::parse(id, &req_body).map(|r| {
+                                match h.commit_message(self, &r) {
+                                    Ok(m) => match scm::check_commit_message(&m) {
+                                        Ok(m) => Ok(m.as_bytes().to_vec()),
+                                        Err(why) => Err(("refused", why)),
+                                    },
                                     Err(why) => Err(("refused", why)),
                                 }
                             })

@@ -475,7 +475,7 @@ type SignatureHelper interface {
 // answer replies to a request from rhun: "ok ID LEN" and the body; "error ID CODE TEXT" when
 // the handler refuses a rename or its edit cannot be encoded; "error ID unknown" for a verb the
 // handler does not answer or a request that does not parse.
-func (e *Ext) answer(h Handler, f []string) {
+func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 	if len(f) < 2 {
 		return
 	}
@@ -504,6 +504,31 @@ func (e *Ext) answer(h Handler, f []string) {
 						rerr = &Error{Code: "refused", Text: err.Error()}
 					} else {
 						body, rerr, known = encodeEdit(edit)
+					}
+				}
+			}
+		}
+	case FeatureCommitMessage:
+		id, _ := strconv.ParseInt(f[0], 10, 64)
+		source := e.sourceFor(id)
+		if source != nil {
+			defer e.finishSource(source)
+		}
+		p, is := h.(CommitMessageProvider)
+		if is && source != nil && e.Has(FeatureCommitMessage) {
+			if req, ok := ParseCommitMessageRequest(id, reqBody, source.ctx); ok {
+				known = true
+				m, err := p.CommitMessage(e, req)
+				switch {
+				case req.Context.Err() != nil:
+					rerr = &Error{Code: "cancelled", Text: "generation was cancelled"}
+				case err != nil:
+					rerr = &Error{Code: "refused", Text: err.Error()}
+				default:
+					if m, err = CheckCommitMessage(m); err != nil {
+						rerr = &Error{Code: "refused", Text: err.Error()}
+					} else {
+						body = []byte(m)
 					}
 				}
 			}
