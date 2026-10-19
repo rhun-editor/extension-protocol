@@ -667,31 +667,6 @@ func (h *host) stopPrograms(r *testRun) {
 
 // ---- rhun's requests
 
-// askBody is ask for a request with a body: ID LINE LEN, then the body
-func (h *host) askBody(line string, body []byte, wait time.Duration) (message, bool) {
-	h.hostSeq++
-	id := h.hostSeq
-	h.hostReqs[id] = line
-	h.write(fmt.Sprintf("%d %s %d\n%s", id, line, len(body), body))
-	deadline := time.Now().Add(wait)
-	for time.Now().Before(deadline) {
-		if m, ok := h.hostAnswers[id]; ok {
-			delete(h.hostAnswers, id)
-			return m, true
-		}
-		msg, err := h.readMessage(100 * time.Millisecond)
-		if err == nil && msg.line != "" {
-			h.handle(msg)
-		}
-		if h.cmdExited() {
-			break
-		}
-	}
-	delete(h.hostReqs, id)
-	h.write(fmt.Sprintf("0 cancel %d\n", id))
-	return message{}, false
-}
-
 // serveUntil serves the extension until done says so or the time is up
 func (h *host) serveUntil(done func() bool, wait time.Duration) bool {
 	deadline := time.Now().Add(wait)
