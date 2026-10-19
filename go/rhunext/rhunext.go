@@ -498,8 +498,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 				return nil, nil
 			}
 		}
-		// edits (DOC VERSION LEN), selections (DOC N LEN), action (LEN) and, with command-args, run
-		// (NAME DOC FROM LEN) are followed by a body
+		// edits (DOC VERSION LEN), selections (DOC N LEN), action (LEN), link (ID LEN) and, with
+		// command-args, run (NAME DOC FROM LEN) are followed by a body
 		lenAt := -1
 		if (ev.Name == "edits" || ev.Name == "selections") && len(ev.Args) >= 3 {
 			lenAt = 2
@@ -511,6 +511,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 4 // a cell's source, at most 4 MB
 		} else if ev.Name == "run" && len(ev.Args) == 4 {
 			lenAt = 3
+		} else if ev.Name == "link" && len(ev.Args) == 2 {
+			lenAt = 1
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the

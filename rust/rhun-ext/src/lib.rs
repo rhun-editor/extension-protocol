@@ -70,6 +70,8 @@ pub mod views;
 pub mod testing;
 pub mod watch;
 pub mod resources;
+pub mod auth;
+pub use resources::{parse_link, Content, UrlOpened};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -297,6 +299,9 @@ pub enum Feature {
     ContextKeys,
     /// Status bar items: [`Ext::set_status_item`], [`Ext::remove_status_item`].
     StatusItems,
+    /// Opening URLs and link callbacks: [`Ext::open_url`], [`Ext::external_uri`], [`Ext::link`]
+    /// and [`parse_link`]; sign-in helpers in [`auth`].
+    Urls,
 }
 
 impl Feature {
@@ -357,6 +362,7 @@ impl Feature {
             Feature::CommandArgs => "command-args",
             Feature::ContextKeys => "context-keys",
             Feature::StatusItems => "status-items",
+            Feature::Urls => "urls",
         }
     }
 }
@@ -1857,6 +1863,8 @@ impl Ext {
                                 | "tool-call"
                                 | "run-command"
                                 | "scm-input"
+                                | "external-uri"
+                                | "link"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1948,6 +1956,7 @@ impl Ext {
                         || ev.name == "selections"
                         || view_body
                         || run_body
+                        || ev.name == "link"
                     {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it

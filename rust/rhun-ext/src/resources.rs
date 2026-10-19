@@ -1,7 +1,26 @@
 //! The resources group of protocol 1.1: staying alive while busy (feature `idle`), passwords
 //! and tokens in the system keychain (feature `secrets`, with `[needs] secrets = yes`), and
 //! URIs with virtual documents (feature `uris`, with `[provides] schemes`).
-use crate::{Doc, Error, Ext, Feature, Pos};
+use crate::{Doc, Error, Event, Ext, Feature, Pos};
+
+/// What became of an [`Ext::open_url`] the user answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UrlOpened {
+    /// Opened in the default browser (also without asking, once the user chose Always).
+    Opened,
+    /// The user copied the link instead.
+    Copied,
+}
+
+/// `0 link ID LEN` + the link: the id of the [`Ext::link`] request that made the token, and the
+/// whole link as it reached rhun (with the path and query the browser added).
+pub fn parse_link(event: &Event) -> Option<(u64, String)> {
+    if event.name != "link" || event.fields.len() != 2 {
+        return None;
+    }
+    let id = event.fields[0].parse().ok()?;
+    Some((id, String::from_utf8(event.body.clone()).ok()?))
+}
 
 /// A URI rhun takes for a resource: `SCHEME:REST`, SCHEME `[a-z][a-z0-9+.-]` of 2 to 32 bytes,
 /// REST 1 to 4095 bytes without LF, CR or NUL.
@@ -64,6 +83,45 @@ fn syntax(text: &str) -> Error {
 }
 
 impl Ext {
+    /// Asks rhun to open an http(s) URL in the user's browser (feature `urls`). The user sees the
+    /// extension and the host and chooses Open, Copy Link or Cancel (`Err` with code `cancelled`).
+    pub fn open_url(&self, url: &str) -> Result<UrlOpened, Error> {
+        if !self.has(Feature::Urls) {
+            return Err(not_agreed("urls"));
+        }
+        let ok = (url.starts_with("https://") || url.starts_with("http://"))
+            && url.len() <= 8192
+            && !url.bytes().any(|c| c <= b' ' || c == 0x7f);
+        if !ok {
+            return Err(syntax("not an http or https URL"));
+        }
+        let reply = self.request("open-url", Some(url.as_bytes()))?;
+        match reply.fields.first().map(String::as_str) {
+            Some("copied") => Ok(UrlOpened::Copied),
+            _ => Ok(UrlOpened::Opened),
+        }
+    }
+
+    /// The URI the user's browser can use for `uri` (a loopback URL, a rhun: link): pass every
+    /// loopback URL you hand to a browser through it (a remote window forwards the port).
+    pub fn external_uri(&self, uri: &str) -> Result<String, Error> {
+        if !self.has(Feature::Urls) {
+            return Err(not_agreed("urls"));
+        }
+        let reply = self.request("external-uri", Some(uri.as_bytes()))?;
+        String::from_utf8(reply.body).map_err(|_| syntax("not UTF-8"))
+    }
+
+    /// A one-shot `rhun://ext/OWNER/NAME/TOKEN` link (ten minutes); append a path and query.
+    /// When it reaches rhun, the event `link` (see [`parse_link`]) brings it back.
+    pub fn link(&self) -> Result<String, Error> {
+        if !self.has(Feature::Urls) {
+            return Err(not_agreed("urls"));
+        }
+        let reply = self.request("link", None)?;
+        String::from_utf8(reply.body).map_err(|_| syntax("not UTF-8"))
+    }
+
     /// Opens a virtual document (feature `uris`): rhun asks the scheme's provider for its text.
     /// A `file:` URI opens that file. [`Ext::open`] takes a URI as well.
     pub fn open_uri(&self, uri: &str, at: Pos) -> Result<Doc, Error> {

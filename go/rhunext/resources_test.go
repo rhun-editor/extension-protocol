@@ -1,8 +1,11 @@
 package rhunext
 
 import (
+	"context"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidSecretKey(t *testing.T) {
@@ -32,5 +35,37 @@ func TestURIsAndContent(t *testing.T) {
 	b, err := Content{Lang: "Visual Basic", Title: "t", Text: "hi\n"}.Encode()
 	if err != nil || string(b) != "12 1 3\nVisual_Basicthi\n" {
 		t.Errorf("%q %v", b, err)
+	}
+}
+
+func TestPKCEAndLoopback(t *testing.T) {
+	if c := PKCEChallenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"); c != "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM" {
+		t.Errorf("challenge %q", c)
+	}
+	if p := NewPKCE(); len(p.Verifier) != 43 || PKCEChallenge(p.Verifier) != p.Challenge {
+		t.Errorf("pkce %+v", p)
+	}
+	lb, err := ListenLoopback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		resp, err := http.Get(lb.RedirectURI() + "?code=c%2B1&state=xyz")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	q, err := lb.Wait(ctx, "xyz")
+	if err != nil || q.Get("code") != "c+1" {
+		t.Errorf("%v %v", q, err)
+	}
+}
+
+func TestParseLink(t *testing.T) {
+	id, link, ok := ParseLink(Event{Name: "link", Args: []string{"7", "5"}, Body: []byte("rhun:")})
+	if !ok || id != 7 || link != "rhun:" {
+		t.Errorf("%d %q %v", id, link, ok)
 	}
 }
