@@ -773,3 +773,67 @@ fn compiled_transform_negotiation_and_framing() {
         assert!(done.join().unwrap().is_ok());
     }
 }
+
+#[test]
+fn debug_start_and_ended() {
+    struct Dbg(Sender<String>);
+    impl Handler for Dbg {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            let mut c = rhun_ext::DebugConfig::new();
+            c.set("type", rhun_ext::DebugValue::Str("go".into()));
+            let r = ext.debug_start("Test", &c);
+            self.0.send(format!("{r:?}")).unwrap();
+            let r = ext.debug_start("Again", &c);
+            self.0.send(format!("{:?}", r.map_err(|e| e.code))).unwrap();
+        }
+        fn event(&mut self, _ext: &Ext, ev: &rhun_ext::Event) {
+            if let Some(d) = rhun_ext::DebugEnded::parse(ev) {
+                self.0.send(format!("{d:?}")).unwrap();
+            }
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, results) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Debug],
+            Dbg(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 debug");
+    host.send("0 features debug\n0 ready -\n");
+    assert_eq!(host.line(), "1 debug-start 4 18");
+    assert_eq!(host.body(18), "Test1\ns 4 2\ntypego");
+    host.send("ok 1 7\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "Ok(7)"
+    );
+    assert_eq!(host.line(), "2 debug-start 5 19");
+    host.body(19);
+    host.send("error 2 refused not within 10 s of one of your commands\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "Err(\"refused\")"
+    );
+    host.send("0 debug-ended 7 3\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "DebugEnded { session: 7, code: Some(3) }"
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}

@@ -34,6 +34,7 @@
 
 pub mod chart;
 pub mod complete;
+pub mod debug;
 pub mod lang;
 pub mod picture;
 pub mod scm;
@@ -52,6 +53,7 @@ use std::thread;
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
 };
+pub use debug::{DebugConfig, DebugEnded, DebugValue};
 pub use lang::{
     ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest,
     SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
@@ -158,6 +160,8 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Debuggers: [`Ext::debug_start`] and the [`DebugEnded`] event; `[needs] debug = yes`.
+    Debug,
 }
 
 impl Feature {
@@ -181,6 +185,7 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::Debug => "debug",
         }
     }
 }

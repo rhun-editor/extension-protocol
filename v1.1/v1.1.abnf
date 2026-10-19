@@ -78,3 +78,9 @@ host-request =/ id SP "commit-message" SP len
 feature      =/ "quickdiff"
 host-request =/ id SP "quickdiff" SP doc SP version
 request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"
+
+; debug: debuggers ([debugger.TYPE], [needs] debug = yes); a configuration body is
+; N LF, then N leaves KIND SP PATH_LEN SP VALUE_LEN LF PATH VALUE, then extra records
+feature      =/ "debug"
+request      =/ id SP "debug-start" SP len SP len           ; NAME_LEN LEN: NAME + a configuration body
+event        =/ "0" SP "debug-ended" SP 1*DIGIT SP ( 1*DIGIT / "-" )

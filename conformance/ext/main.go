@@ -49,6 +49,8 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
+	debuggers                   []string                     // [debugger.TYPE] types, in manifest order
+	debugger                    map[string]map[string]string // type -> key -> value
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -127,6 +129,17 @@ func readManifest(dir string) (*manifest, error) {
 			m.subscribe[k] = v
 		case "provides":
 			m.provides[k] = v
+		default:
+			if t, ok := strings.CutPrefix(section, "debugger."); ok {
+				if m.debugger == nil {
+					m.debugger = map[string]map[string]string{}
+				}
+				if m.debugger[t] == nil {
+					m.debugger[t] = map[string]string{}
+					m.debuggers = append(m.debuggers, t)
+				}
+				m.debugger[t][k] = v
+			}
 		}
 	}
 	return m, nil
@@ -1301,7 +1314,7 @@ func main() {
 	if m.protocol != 1 {
 		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
 	}
-	if len(m.commands) == 0 {
+	if len(m.commands) == 0 && len(m.debuggers) == 0 {
 		h.fail("manifest", "no [commands]: the extension can never be started on a command")
 	}
 	// the rules of v1/v1.json
@@ -1323,8 +1336,11 @@ func main() {
 			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64)", t))
 		}
 	}
-	if len(m.run) == 0 && (m.runtime == "" || m.script == "") {
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && len(m.debuggers) == 0 {
 		bad("no run.TARGET entry and no runtime with run")
+	}
+	for _, why := range debuggerProblems(dir, m) {
+		bad(why)
 	}
 	for _, w := range strings.Fields(m.on) {
 		if w != "startup" && w != "command" && w != "project" && !strings.HasPrefix(w, "lang:") && !strings.HasPrefix(w, "open:") {
@@ -1373,6 +1389,8 @@ func main() {
 			ok = true
 		case "git": // source control: the project's Git data through rhun
 			ok = v == "none" || v == "read"
+		case "debug": // debuggers: adapters run as the user after one approval
+			ok = v == "no" || v == "yes"
 		}
 		if !ok {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
@@ -1429,6 +1447,11 @@ func main() {
 	}
 	h.active = 1
 
+	// an extension that only declares debuggers has no program to start
+	if len(m.run) == 0 && m.runtime == "" && len(m.debuggers) > 0 {
+		h.ok(fmt.Sprintf("declares %d debuggers and no program: nothing to start", len(m.debuggers)))
+		report(h)
+	}
 	// 1. start, hello, ready and catch-up; the extension must not speak before ready
 	if err := h.start(); err != nil {
 		h.fail("start", err.Error())
