@@ -383,13 +383,13 @@ func (e *Ext) answerActions(h Handler, id int64, verb string, f []string, body [
 	case "range-format":
 		if r, is := h.(RangeFormatter); is && e.Has(FeaturePartialFormat) {
 			if req, ok := parseRangeFormat(f); ok {
-				return encodeEdit(r.RangeFormat(e, req))
+				return encodeEditV1(r.RangeFormat(e, req))
 			}
 		}
 	case "type-format":
 		if t, is := h.(TypeFormatter); is && e.Has(FeaturePartialFormat) {
 			if req, ok := parseTypeFormat(f); ok {
-				return encodeEdit(t.TypeFormat(e, req))
+				return encodeEditV1(t.TypeFormat(e, req))
 			}
 		}
 	case "code-actions":

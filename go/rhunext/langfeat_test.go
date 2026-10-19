@@ -3,20 +3,9 @@ package rhunext
 import (
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 )
-
-// body reads n bytes rhun's side was sent after a line.
-func (s *host) body(n int) string {
-	s.t.Helper()
-	b := make([]byte, n)
-	if _, err := io.ReadFull(s.br, b); err != nil {
-		s.t.Fatal(err)
-	}
-	return string(b)
-}
 
 func diagRec(rng, sev, msg, extra string) string {
 	return fmt.Sprintf("%s %s %d %d\n%s%s", rng, sev, len(msg), len(extra), msg, extra)

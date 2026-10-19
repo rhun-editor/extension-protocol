@@ -1887,6 +1887,7 @@ impl Ext {
                                 return Msg::End;
                             }
                         }
+                        self.begin_query(id);
                         return Msg::HostRequest {
                             id,
                             verb,
@@ -2050,7 +2051,7 @@ impl Ext {
                         "complete" => CompleteRequest::parse(&fields)
                             .map(|r| Ok(h.complete_stream(self, &r, &out).encode_bytes())),
                         "complete-resolve" if self.has(Feature::CompleteItems) => {
-                            ResolveRequest::parse(id, &fields, &data)
+                            ResolveRequest::parse(id, &fields, &req_body)
                                 .map(|r| Ok(h.complete_resolve(self, &r).encode().into_bytes()))
                         }
                         "signature" => SignatureRequest::parse(&fields).map(|r| {
@@ -2125,7 +2126,7 @@ impl Ext {
                             })
                         }
                         "code-action-resolve" if self.has(Feature::CodeActions) => {
-                            ActionResolveRequest::parse(id, &fields, &data).map(|r| {
+                            ActionResolveRequest::parse(id, &fields, &req_body).map(|r| {
                                 match h.code_action_resolve(self, &r) {
                                     Ok(res) => res.encode().map_err(|why| ("toobig", why)),
                                     Err(why) => Err(("refused", why)),
