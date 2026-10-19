@@ -53,6 +53,27 @@ type manifest struct {
 	views                       map[string]string // [views] KEY.FIELD -> value (views.go)
 	top                         map[string]string // top-level keys of later features (idle, runs)
 	tools                       []string          // [tools] names (protocol 1.1)
+	pack                        string            // a pack's members: OWNER/NAME, space separated
+}
+
+// packProblem says what is wrong with a manifest's pack list, or "": at most 16 names, each
+// OWNER/NAME of [A-Za-z0-9._-] (neither part starting with a dot), none of them the pack itself.
+func packProblem(m *manifest) string {
+	names := strings.Fields(m.pack)
+	if len(names) > 16 {
+		return fmt.Sprintf("pack lists %d extensions (16 at most)", len(names))
+	}
+	part := regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+	for _, n := range names {
+		owner, name, ok := strings.Cut(n, "/")
+		if !ok || !part.MatchString(owner) || !part.MatchString(name) {
+			return fmt.Sprintf("pack: %q is not OWNER/NAME", n)
+		}
+		if owner == m.owner && name == m.name {
+			return "pack lists the pack itself"
+		}
+	}
+	return ""
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -107,6 +128,8 @@ func readManifest(dir string) (*manifest, error) {
 				m.color = v
 			case k == "idle" || k == "idle.after" || k == "runs":
 				m.top[k] = v
+			case k == "pack":
+				m.pack = v
 			}
 		case "settings":
 			key, field, ok := strings.Cut(k, ".")
@@ -1357,7 +1380,16 @@ func main() {
 	if m.protocol != 1 {
 		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
 	}
-	if len(m.commands) == 0 {
+	// a pack without a program: its members are installed with it and it never starts
+	programless := len(m.run) == 0 && m.runtime == "" && m.script == ""
+	if m.pack != "" {
+		if why := packProblem(m); why != "" {
+			h.fail("manifest", why)
+		} else {
+			h.ok(fmt.Sprintf("pack lists %d extensions", len(strings.Fields(m.pack))))
+		}
+	}
+	if len(m.commands) == 0 && !(m.pack != "" && programless) {
 		h.fail("manifest", "no [commands]: the extension can never be started on a command")
 	}
 	// the rules of v1/v1.json
@@ -1380,7 +1412,7 @@ func main() {
 			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64, wasm32-wasip1)", t))
 		}
 	}
-	if len(m.run) == 0 && (m.runtime == "" || m.script == "") {
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) {
 		bad("no run.TARGET entry and no runtime with run")
 	}
 	for _, w := range strings.Fields(m.on) {
@@ -1469,6 +1501,10 @@ func main() {
 	}
 	if schemaFails == 0 {
 		h.ok("manifest follows v1.json")
+	}
+	if m.pack != "" && programless {
+		h.ok("a pack without a program: nothing to start")
+		report(h)
 	}
 	work, _ := os.MkdirTemp("", "rhun-ext-check-")
 	defer os.RemoveAll(work)
