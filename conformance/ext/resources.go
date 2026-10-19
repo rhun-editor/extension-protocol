@@ -205,6 +205,17 @@ func (h *host) resourcesRequest(verb string, id int64, args []string, body func(
 			h.write(fmt.Sprintf("0 link %d %d\n%s", id, len(back), back))
 			h.ok("asks for a rhun:// link (the checker delivers it at once)")
 		}
+	case "find-files", "search-text":
+		if len(args) != 4 {
+			h.fail("request grammar", verb+" takes FOLDER MAX FLAGS LEN")
+			rerr("syntax", "cannot parse the line")
+			return true
+		}
+		b, ok := body(args[3])
+		if !ok {
+			return true
+		}
+		h.filesRequest(verb, id, args, b, reply, rerr)
 	case "busy":
 		if !h.features["idle"] {
 			h.fail("features", "busy without idle agreed after hello")

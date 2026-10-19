@@ -24,7 +24,7 @@ import (
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
 	"git-data", "commit-message", "quickdiff", "scm", // source control: scm.go, scmpanel.go
 	"view-tree", "view-log", "notify", "progress", "view-keys", "view-images", // retained views, notifications, progress: views.go, notify.go
-	"idle", "secrets", "uris", "urls", // resources: resources.go
+	"idle", "secrets", "uris", "urls", "files", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
 	"notebooks",                                                                                                                            // notebooks: notebook.go

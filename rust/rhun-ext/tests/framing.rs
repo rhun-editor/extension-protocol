@@ -2067,3 +2067,101 @@ fn hover_selection_hierarchy_symbols_links_and_file_diagnostics() {
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+struct FilesProbe(Arc<Mutex<Seen>>);
+
+impl Handler for FilesProbe {
+    fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+        use rhun_ext::files::{FileQuery, Pattern};
+        let mut got = Vec::new();
+        let q = FileQuery {
+            max: 10,
+            include: vec!["*.rs".into()],
+            ..Default::default()
+        };
+        let fin = ext
+            .find_files(&q, |b| {
+                got.extend(b.iter().map(|p| format!("{}:{}", p.folder, p.path)));
+                true
+            })
+            .unwrap();
+        self.0
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("find {got:?} {} {}", fin.count, fin.status));
+        let mut files = Vec::new();
+        let err = ext
+            .search_text(
+                &Pattern::Literal("TODO".into()),
+                &FileQuery {
+                    max: 5,
+                    flags: rhun_ext::files::IGNORE_CASE,
+                    ..Default::default()
+                },
+                |b| {
+                    files.extend(b.iter().map(|f| format!("{} {:?}", f.path, f.matches[0])));
+                    false
+                },
+            )
+            .unwrap_err();
+        self.0
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("search {files:?} {}", err.code));
+    }
+}
+
+#[test]
+fn find_files_and_search_text_take_batches() {
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let probe = FilesProbe(seen.clone());
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Files],
+            probe,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 files");
+    host.send("0 features files\n0 ready /p\n");
+    assert_eq!(host.line(), "1 find-files 0 10 0 6");
+    assert_eq!(host.body(6), "+*.rs\n");
+    let b1 = "2\n1 7\nmain.rs1 4\nsrc/";
+    let b2 = "1\n2 4\na.rs";
+    host.send(&format!(
+        "0 found 1 {}\n{b1}0 found 1 {}\n{b2}ok 1 3 complete\n",
+        b1.len(),
+        b2.len()
+    ));
+    assert_eq!(host.line(), "2 search-text 0 5 16 8");
+    assert_eq!(host.body(8), "4 0\nTODO");
+    let g = "1\n1 3 7 7 1\nmain.rs2 4 8 1 7\n//TODO!";
+    host.send(&format!("0 found 2 {}\n{g}", g.len()));
+    assert_eq!(host.line(), "3 cancel 2");
+    host.send("ok 3\nerror 2 cancelled\n0 bye\n");
+    done.join().unwrap().unwrap();
+    let ev = &seen.lock().unwrap().events;
+    assert_eq!(
+        ev[0],
+        "find [\"1:main.rs\", \"1:src/\", \"2:a.rs\"] 3 complete"
+    );
+    assert_eq!(
+        ev[1],
+        "search [\"main.rs SearchMatch { line: 2, col: 4, end: 8, pre: 1, text: \\\"//TODO!\\\" }\"] cancelled"
+    );
+}

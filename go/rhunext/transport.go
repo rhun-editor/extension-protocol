@@ -181,14 +181,24 @@ func (e *Ext) closeConnection(err error) {
 // RequestContext sends one request and waits for its reply. Cancellation releases the caller;
 // a reply body already on the wire is still consumed to preserve framing for later requests.
 func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args ...string) (Reply, error) {
-	if err := ctx.Err(); err != nil {
+	id, ch, err := e.startRequest(ctx, verb, body, nil, args...)
+	if err != nil {
 		return Reply{}, err
+	}
+	return e.waitReply(ctx, id, ch)
+}
+
+// startRequest sends a request; stream, when not nil, receives the bodies of its "0 found ID"
+// batches until the reply comes.
+func (e *Ext) startRequest(ctx context.Context, verb string, body []byte, stream chan []byte, args ...string) (int64, chan result, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
 	}
 	e.pmu.Lock()
 	if e.closed != nil {
 		err := e.closed
 		e.pmu.Unlock()
-		return Reply{}, err
+		return 0, nil, err
 	}
 	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output" ||
 		verb == "secret-get" || verb == "secret-keys" || verb == "external-uri" || verb == "link" ||
@@ -196,7 +206,7 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		verb == "tools" || verb == "tool-call" || verb == "run-command"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()
-		return Reply{}, &Error{Code: "busy", Text: "too many pending requests"}
+		return 0, nil, &Error{Code: "busy", Text: "too many pending requests"}
 	}
 	var id int64
 	for {
@@ -233,6 +243,12 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		}
 		e.replyBodyCaps[id] = MaxCallResult
 	}
+	if stream != nil {
+		if e.streams == nil {
+			e.streams = make(map[int64]chan []byte)
+		}
+		e.streams[id] = stream
+	}
 	e.pmu.Unlock()
 	line := itoa(id) + " " + verb
 	for _, arg := range args {
@@ -241,8 +257,12 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 	started, err := e.writeContext(ctx, line+"\n", body)
 	if err != nil {
 		e.cancelPending(id, ch, !started)
-		return Reply{}, err
+		return 0, nil, err
 	}
+	return id, ch, nil
+}
+
+func (e *Ext) waitReply(ctx context.Context, id int64, ch chan result) (Reply, error) {
 	select {
 	case res := <-ch:
 		return res.reply, res.err

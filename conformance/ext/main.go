@@ -457,7 +457,7 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
 	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
 	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, "vimage": true, // retained views, notifications, progress: views.go, notify.go
-	"secret-set": true, "open-url": true, "external-uri": true, // resources: resources.go
+	"secret-set": true, "open-url": true, "external-uri": true, "find-files": true, "search-text": true, // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
 	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go

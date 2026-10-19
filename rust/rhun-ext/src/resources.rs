@@ -25,11 +25,15 @@ pub fn parse_link(event: &Event) -> Option<(u64, String)> {
 /// A URI rhun takes for a resource: `SCHEME:REST`, SCHEME `[a-z][a-z0-9+.-]` of 2 to 32 bytes,
 /// REST 1 to 4095 bytes without LF, CR or NUL.
 pub fn valid_uri(uri: &str) -> bool {
-    let Some((scheme, rest)) = uri.split_once(':') else { return false };
+    let Some((scheme, rest)) = uri.split_once(':') else {
+        return false;
+    };
     let b = scheme.as_bytes();
     (2..=32).contains(&b.len())
         && b[0].is_ascii_lowercase()
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'.' | b'-'))
+        && b.iter().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'.' | b'-')
+        })
         && (1..=4095).contains(&rest.len())
         && !rest.bytes().any(|c| matches!(c, b'\n' | b'\r' | 0))
 }
@@ -54,7 +58,8 @@ impl Content {
         if self.text.len() > 4 << 20 {
             return Err("the text is over 4 MiB".into());
         }
-        let mut out = format!("{} {} {}\n", lang.len(), self.title.len(), self.text.len()).into_bytes();
+        let mut out =
+            format!("{} {} {}\n", lang.len(), self.title.len(), self.text.len()).into_bytes();
         out.extend_from_slice(lang.as_bytes());
         out.extend_from_slice(self.title.as_bytes());
         out.extend_from_slice(self.text.as_bytes());
@@ -66,20 +71,26 @@ impl Content {
 pub fn valid_secret_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 64
-        && key
-            .bytes()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'.' | b'-'))
+        && key.bytes().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'.' | b'-')
+        })
 }
 
 /// A value holds at most this many bytes.
 pub const SECRET_VALUE_MAX: usize = 8192;
 
 fn not_agreed(feature: &str) -> Error {
-    Error { code: "unknown".into(), text: format!("{feature} was not negotiated") }
+    Error {
+        code: "unknown".into(),
+        text: format!("{feature} was not negotiated"),
+    }
 }
 
 fn syntax(text: &str) -> Error {
-    Error { code: "syntax".into(), text: text.into() }
+    Error {
+        code: "syntax".into(),
+        text: text.into(),
+    }
 }
 
 impl Ext {
@@ -181,7 +192,10 @@ impl Ext {
             return Err(syntax("invalid secret key"));
         }
         if value.len() > SECRET_VALUE_MAX {
-            return Err(Error { code: "toobig".into(), text: "a value is at most 8192 bytes".into() });
+            return Err(Error {
+                code: "toobig".into(),
+                text: "a value is at most 8192 bytes".into(),
+            });
         }
         self.request(&format!("secret-set {key}"), Some(value))?;
         Ok(())
@@ -206,7 +220,11 @@ impl Ext {
         }
         let reply = self.request("secret-keys", None)?;
         let text = String::from_utf8(reply.body).map_err(|_| syntax("keys are not UTF-8"))?;
-        Ok(text.split('\n').filter(|k| !k.is_empty()).map(str::to_string).collect())
+        Ok(text
+            .split('\n')
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+            .collect())
     }
 }
 
@@ -216,8 +234,18 @@ mod tests {
     #[test]
     fn uris_and_content() {
         assert!(valid_uri("lsp-expand:/a/main.rs") && valid_uri("git+show:x"));
-        assert!(!valid_uri("C:x") && !valid_uri("x") && !valid_uri("Ab:x") && !valid_uri("ab:") && !valid_uri("ab:a\nb"));
-        let c = Content { lang: "Visual Basic".into(), title: "t".into(), text: "hi\n".into() };
+        assert!(
+            !valid_uri("C:x")
+                && !valid_uri("x")
+                && !valid_uri("Ab:x")
+                && !valid_uri("ab:")
+                && !valid_uri("ab:a\nb")
+        );
+        let c = Content {
+            lang: "Visual Basic".into(),
+            title: "t".into(),
+            text: "hi\n".into(),
+        };
         assert_eq!(c.encode().unwrap(), b"12 1 3\nVisual_Basicthi\n");
     }
     #[test]

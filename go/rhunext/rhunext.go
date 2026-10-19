@@ -178,7 +178,8 @@ type Ext struct {
 	agreed         map[string]bool // the features rhun agreed to (section 12), from the features event
 	closed         error           // set (under pmu) once rhun's end of the pipe is gone: requests fail at once
 	tmu            sync.Mutex
-	tprocs         map[int64]*testProc // test-exec processes by EXEC (tests.go)
+	tprocs         map[int64]*testProc   // test-exec processes by EXEC (tests.go)
+	streams        map[int64]chan []byte // find-files and search-text: their "0 found ID" batches (files.go)
 }
 
 type result struct {
@@ -511,7 +512,7 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 4 // a cell's source, at most 4 MB
 		} else if ev.Name == "run" && len(ev.Args) == 4 {
 			lenAt = 3
-		} else if ev.Name == "link" && len(ev.Args) == 2 {
+		} else if (ev.Name == "link" || ev.Name == "found") && len(ev.Args) == 2 {
 			lenAt = 1
 		}
 		if lenAt >= 0 {
@@ -524,6 +525,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {
 				return nil, err
+			}
+		}
+		// a batch of a find or search goes to the request waiting for it, not to the handler
+		if ev.Name == "found" && len(ev.Args) == 2 {
+			id, _ := strconv.ParseInt(ev.Args[0], 10, 64)
+			e.pmu.Lock()
+			s := e.streams[id]
+			e.pmu.Unlock()
+			if s != nil {
+				s <- ev.Body
+				return nil, nil
 			}
 		}
 		// the last field of opened and project may contain spaces: fields are rejoined there
