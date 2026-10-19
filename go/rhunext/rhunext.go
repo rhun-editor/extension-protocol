@@ -164,6 +164,8 @@ type Ext struct {
 	fmu            sync.Mutex
 	agreed         map[string]bool // the features rhun agreed to (section 12), from the features event
 	closed         error           // set (under pmu) once rhun's end of the pipe is gone: requests fail at once
+	tmu            sync.Mutex
+	tprocs         map[int64]*testProc // test-exec processes by EXEC (tests.go)
 }
 
 type result struct {
@@ -275,7 +277,19 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
+			if len(ev.Args) > 1 && (ev.Args[1] == "tests-resolve" || ev.Args[1] == "test-run") {
+				ext.answerTests(h, ev.Args, ev.Body)
+				continue
+			}
 			ext.answer(h, ev.Args)
+		case "test-cancel":
+			if c, ok := h.(TestController); ok {
+				if run, ok := ParseTestCancel(ev); ok {
+					c.CancelTests(ext, run)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		case "view":
 			if v, ok := h.(Viewer); ok {
 				if view, vev, ok := parseViewEvent(ev); ok {
@@ -390,6 +404,26 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "bye" {
 			e.cancelSources(false)
 		}
+		// tests: a process's output and end go to its streams here, never through the handler
+		if ev.Name == "test-out" && len(ev.Args) == 3 {
+			n, ok := bodyLen(ev.Args[2], MaxEventBody)
+			ex, err := strconv.ParseInt(ev.Args[0], 10, 64)
+			if !ok || err != nil {
+				return nil, fmt.Errorf("a test-out length %q", ev.Args[2])
+			}
+			body := make([]byte, n)
+			if _, err := io.ReadFull(br, body); err != nil {
+				return nil, err
+			}
+			e.testOut(ex, ev.Args[1], body)
+			return nil, nil
+		}
+		if ev.Name == "test-exit" && len(ev.Args) >= 2 {
+			if ex, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil {
+				e.testExit(ex, strings.Join(ev.Args[1:], " "))
+				return nil, nil
+			}
+		}
 		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
 		lenAt := -1
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
@@ -432,6 +466,16 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 	// a request from rhun (section 12): answered on the handler's goroutine, in order with events
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
 		ev := &Event{Name: hostRequest, Args: fields}
+		if len(fields) > 2 && (fields[1] == "tests-resolve" || fields[1] == "test-run") {
+			n, ok := bodyLen(fields[len(fields)-1], MaxEventBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
 		if len(fields) > 1 && fields[1] == "save-actions" {
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err
@@ -503,6 +547,7 @@ func (e *Ext) failPending(err error) {
 	clear(e.outstanding)
 	e.pmu.Unlock()
 	e.cancelSources(false)
+	e.testsGone()
 }
 
 func (e *Ext) write(line string, body []byte) error {
