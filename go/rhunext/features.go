@@ -63,6 +63,42 @@ type ViewEvent struct {
 	X, Y, DY      float64 // the pointer; DY for wheel
 	Width, Height float64 // size
 	Metrics       Metrics // metrics
+	// With FeatureViewKeys: Mods ("-" or ctrl+shift+alt+super) on down, up, click, drag, wheel,
+	// dblclick and key; Key the key's name (key: "Return", "Left", "F5", "a"); Text the typed
+	// text (text) or the clipboard's (paste); On for focus. Kinds key, text, paste, selectall,
+	// dblclick and focus come with it.
+	Mods string
+	Key  string
+	Text string
+	On   bool
+}
+
+// FeatureViewKeys is pictures with the keyboard: ViewEvent key, text, paste, selectall, dblclick,
+// focus and Mods; ViewCopier.
+const FeatureViewKeys = "view-keys"
+
+// FeatureViewImages is decoded images by handle: Image, Unimage, Picture.Image.
+const FeatureViewImages = "view-images"
+
+// ViewCopier answers copy and cut in a picture with the keyboard (vcopy): the clipboard's text,
+// or false to leave it.
+type ViewCopier interface {
+	ViewCopy(ext *Ext, view View, cut bool) (string, bool)
+}
+
+// Image decodes a PNG, JPEG or GIF once (feature view-images): its handle for Picture.Image.
+func (e *Ext) Image(data []byte) (int64, error) {
+	r, err := e.Request("vimage", data, itoa(int64(len(data))))
+	if err != nil {
+		return 0, err
+	}
+	return argInt(r, 0), nil
+}
+
+// Unimage lets an image go.
+func (e *Ext) Unimage(img int64) error {
+	_, err := e.Request("unimage", nil, itoa(img))
+	return err
 }
 
 // Viewer receives its views' events.
@@ -105,10 +141,24 @@ func parseViewEvent(ev Event) (View, ViewEvent, bool) {
 			}
 		}
 		vev.Metrics = m
-	case "hover", "down", "drag", "up", "click":
+	case "hover", "down", "drag", "up", "click", "dblclick":
 		vev.X, vev.Y = f(2), f(3)
+		if len(ev.Args) > 4 {
+			vev.Mods = ev.Args[4]
+		}
 	case "wheel":
 		vev.X, vev.Y, vev.DY = f(2), f(3), f(4)
+		if len(ev.Args) > 5 {
+			vev.Mods = ev.Args[5]
+		}
+	case "key":
+		if len(ev.Args) > 3 {
+			vev.Mods, vev.Key = ev.Args[2], ev.Args[3]
+		}
+	case "text", "paste":
+		vev.Text = string(ev.Body)
+	case "focus":
+		vev.On = f(2) == 1
 	}
 	return View(id), vev, true
 }
@@ -208,6 +258,11 @@ func (p *Picture) Bytes() []byte { return p.b.Bytes() }
 
 // Len is the number of shapes.
 func (p *Picture) Len() int { return p.n }
+
+// Image is one of the extension's decoded images (Ext.Image) scaled into the box.
+func (p *Picture) Image(x, y, w, h float64, img int64) *Picture {
+	return p.shape("image", Num(x), Num(y), nn(w), nn(h), itoa(img))
+}
 
 // Rect is a filled rectangle.
 func (p *Picture) Rect(x, y, w, h float64, c Color) *Picture {
@@ -349,6 +404,24 @@ type CompletionItem struct {
 	Detail string
 	Doc    string
 	Edits  []TextEdit
+	// complete-items (protocol 1.1; sent only when rhun agreed it): Resolve is data rhun hands
+	// back in a complete-resolve request when the item is selected (at most 16 KB), ResolveEdits
+	// says the resolution may add edits (accepting then waits for it); Replace is the range that
+	// replaces the rest of the word (it starts where Range does); typing one of Commit's characters
+	// accepts the item; Filter is matched instead of Label; Suffix is drawn after Label; Adjust
+	// indents Insert's later lines like the insertion line; AfterSignature and AfterComplete ask
+	// for signature help or a new list after accepting
+	Resolve        []byte
+	ResolveEdits   bool
+	Replace        *Range
+	Commit         string
+	Filter         string
+	Suffix         string
+	Preselect      bool
+	Deprecated     bool
+	Adjust         bool
+	AfterSignature bool
+	AfterComplete  bool
 	// where the cursor goes (WithCursor); without it, after Insert
 	cursor          int
 	hasCursor       bool
@@ -406,6 +479,7 @@ func (l CompletionList) Encode() []byte {
 			(it.cursor == len(insert) || utf8.RuneStart(insert[it.cursor])) {
 			fmt.Fprintf(&extra, "cursor %d 0\n", it.cursor)
 		}
+		extra.Write(itemExtra(it))
 		kind := it.Kind
 		if kind == "" {
 			kind = KindText
@@ -483,7 +557,25 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 	var body []byte
 	var rerr *Error
 	known := false
-	switch f[1] {
+	nid, _ := strconv.ParseInt(id, 10, 64)
+	defer e.finishLang(nid)
+	verb := f[1]
+	if b, re, ok := e.answerQuery(h, nid, f[1], f[2:], reqBody); ok {
+		body, rerr, known = b, re, true
+		verb = "" // answered
+	}
+	switch verb {
+	case "":
+	case "content":
+		if c, is := h.(ContentProvider); is && e.Has(FeatureURIs) && len(f) >= 3 {
+			known = true
+			content, err := c.Content(e, strings.Join(f[2:], " "))
+			if err != nil {
+				rerr = &Error{Code: "nofile", Text: err.Error()}
+			} else if body, err = content.Encode(); err != nil {
+				rerr = &Error{Code: "toobig", Text: err.Error()}
+			}
+		}
 	case "save-actions":
 		id, _ := strconv.ParseInt(f[0], 10, 64)
 		source := e.sourceFor(id)
@@ -503,10 +595,22 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 					} else if err != nil {
 						rerr = &Error{Code: "refused", Text: err.Error()}
 					} else {
-						body, rerr, known = encodeEdit(edit)
+						body, rerr, known = encodeEditV1(edit)
 					}
 				}
 			}
+		}
+	case "call":
+		id, _ := strconv.ParseInt(f[0], 10, 64)
+		if len(f) == 7 && f[6] == "\x00busy" {
+			// more calls waiting than an extension keeps: answered at once
+			known, rerr = true, &Error{Code: "busy", Text: "too many calls"}
+			break
+		}
+		source := e.sourceFor(id)
+		if source != nil {
+			defer e.finishSource(source)
+			body, rerr, known = e.answerCall(h, id, f[2:], reqBody, source.ctx)
 		}
 	case FeatureQuickDiff:
 		q, is := h.(QuickDiffProvider)
@@ -559,6 +663,17 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 				}
 			}
 		}
+	case "vcopy":
+		c, is := h.(ViewCopier)
+		if is && e.Has(FeatureViewKeys) && len(f) >= 4 {
+			v, err := strconv.ParseInt(f[2], 10, 64)
+			if err == nil {
+				known = true
+				if t, ok := c.ViewCopy(e, View(v), f[3] == "cut"); ok {
+					body = []byte(t)
+				}
+			}
+		}
 	case "complete":
 		c, is := h.(Completer)
 		if req, ok := parseRequest(f[2:]); is && ok {
@@ -572,6 +687,8 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 			}
 			known = true
 		}
+	case "agent-transcript", "tool", "agent-prompt":
+		body, rerr, known = e.answerAI(h, f, reqBody)
 	default:
 		body, rerr, known = e.answerLang(h, f[1], f[2:])
 	}

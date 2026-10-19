@@ -39,12 +39,13 @@
     },
     "run": {
       "type": "object",
-      "description": "the program per target, relative to the extension folder (from the dotted keys run.TARGET); or, with 'runtime', the single key 'run' at the top level is the script",
+      "description": "the program per target, relative to the extension folder (from the dotted keys run.TARGET; wasm32-wasip1 is a WebAssembly module rhun runs itself where no other target applies); or, with 'runtime', the single key 'run' at the top level is the script",
       "propertyNames": {
         "enum": [
           "linux-x86_64",
           "macos-arm64",
-          "windows-x64"
+          "windows-x64",
+          "wasm32-wasip1"
         ]
       },
       "additionalProperties": {
@@ -163,6 +164,23 @@
           "default": "none",
           "description": "read the project's Git data through rhun (feature git-data); shown as 'read the project's Git history'"
         },
+        "secrets": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "store passwords and tokens in the system keychain (feature secrets)"
+        },
+        "kernels": {
+          "type": "string",
+          "description": "notebooks: programs rhun may start as the user for this extension's notebooks (nb-exec), names space separated"
+        },
+        "tests": {
+          "type": "string",
+          "description": "Protocol 1.1: programs rhun may start for this extension as the user during a test run (test-exec): bare names, space separated, at most 16 of 64 bytes",
+          "pattern": "^[A-Za-z0-9._+-]{1,64}( [A-Za-z0-9._+-]{1,64}){0,15}$"
+        },
         "debug": {
           "enum": [
             "no",
@@ -192,6 +210,21 @@
       "pattern": "^#[0-9a-fA-F]{6}$",
       "description": "the badge's background"
     },
+    "pack": {
+      "type": "string",
+      "pattern": "^\\s*[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*(\\s+[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*){0,15}\\s*$",
+      "description": "a pack: other extensions installed with this one (at most 16, OWNER/NAME, space separated, not the pack itself). A pack needs no program: without run entries it never starts, and its themes and grammars load"
+    },
+    "views": {
+      "type": "object",
+      "description": "[views] (protocol 1.1, feature view-tree): retained views as KEY.FIELD = VALUE, at most 16; place sidebar, panel or side; kind tree, or log with view-log; open yes expands it (sidebar) or chooses its tab the first time",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(title|place|kind|icon|when|open)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "settings": {
       "type": "object",
       "description": "[settings]: the extension's own settings as KEY.FIELD = VALUE; shown on its page, sent as setting events (section 6d)",
@@ -204,7 +237,7 @@
     },
     "provides": {
       "type": "object",
-      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1. Protocol 1.1 adds save_actions patterns.",
+      "description": "[provides] (sections 12b to 12h): the files the extension serves each language feature in, name patterns as in [subscribe]; the provider hears opened and edits for them and is started by the first that opens. It must also say the feature after hello 1. Protocol 1.1 adds save_actions patterns; linked patterns (feature linked-editing); and the language features' keys (v1.1.md, Manifest keys), each read only when the feature named in its description was agreed.",
       "properties": {
         "complete": {
           "$ref": "#/$defs/patterns"
@@ -232,10 +265,12 @@
           "$ref": "#/$defs/patterns"
         },
         "actions": {
-          "$ref": "#/$defs/patterns"
+          "$ref": "#/$defs/patterns",
+          "description": "Code actions; requires negotiated actions, or code-actions (protocol 1.1: code-actions and code-action-resolve in place of actions)"
         },
         "rename": {
-          "$ref": "#/$defs/patterns"
+          "$ref": "#/$defs/patterns",
+          "description": "Rename Symbol; requires negotiated rename. With prepare-rename also agreed (protocol 1.1), F2 asks prepare-rename first"
         },
         "format": {
           "$ref": "#/$defs/patterns"
@@ -243,6 +278,46 @@
         "save_actions": {
           "$ref": "#/$defs/patterns",
           "description": "Source code actions before saving; requires negotiated save-actions and documents=write."
+        },
+        "notebook": {
+          "$ref": "#/$defs/patterns",
+          "description": "Notebooks this extension reads and writes (feature notebooks): a matching file opens in a notebook tab."
+        },
+        "notebook.title": {
+          "type": "string",
+          "description": "The notebook format's name, as the user sees it."
+        },
+        "editor": {
+          "$ref": "#/$defs/patterns",
+          "description": "Files this extension edits in its own view (feature custom-editors)."
+        },
+        "editor.title": {
+          "type": "string",
+          "description": "The editor's name, as Reopen With shows it."
+        },
+        "editor.model": {
+          "enum": [
+            "text",
+            "owned"
+          ],
+          "default": "text",
+          "description": "text: rhun keeps the file as a document; owned: the extension keeps it and saves it in parts."
+        },
+        "editor.priority": {
+          "enum": [
+            "default",
+            "option"
+          ],
+          "default": "default",
+          "description": "default: matching files open in it; option: only through Reopen With."
+        },
+        "notebook.kernel": {
+          "type": "string",
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "description": "yes: it runs cells (the default); no: a viewer or converter only."
         },
         "commit_message": {
           "enum": [
@@ -263,9 +338,177 @@
           ],
           "default": "no",
           "description": "a version control provider (feature scm): it registers Source Control tabs at run time"
+        },
+        "schemes": {
+          "type": "string",
+          "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
+        },
+        "agents": {
+          "type": "string",
+          "enum": ["yes", "no"],
+          "description": "yes: the extension lists agent sessions in the agents panel (feature agents)."
+        },
+        "agents.title": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "the source's name on its rows and in Settings > Agents; the default is the extension's title"
+        },
+        "linked": {
+          "$ref": "#/$defs/patterns",
+          "description": "protocol 1.1, feature linked-editing: the files the linked request is asked for"
+        },
+        "hover": {
+          "$ref": "#/$defs/patterns",
+          "description": "the hover card; requires negotiated hover-query (rhun then asks hover-query in place of sending the v1 hover event)"
+        },
+        "declaration": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Declaration; requires negotiated navigation"
+        },
+        "type_definition": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Type Definition; requires negotiated navigation"
+        },
+        "implementation": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Implementation; requires negotiated navigation"
+        },
+        "selection_ranges": {
+          "$ref": "#/$defs/patterns",
+          "description": "Expand and Shrink Selection; requires negotiated selection-ranges"
+        },
+        "call_hierarchy": {
+          "$ref": "#/$defs/patterns",
+          "description": "the call hierarchy (call-hierarchy, then calls-in and calls-out about an item); requires negotiated hierarchy"
+        },
+        "type_hierarchy": {
+          "$ref": "#/$defs/patterns",
+          "description": "the type hierarchy (type-hierarchy, then supertypes and subtypes about an item); requires negotiated hierarchy"
+        },
+        "workspace_symbols": {
+          "$ref": "#/$defs/patterns",
+          "description": "Go to Symbol in Project, while a matching document is open; requires negotiated workspace-symbols"
+        },
+        "range_format": {
+          "$ref": "#/$defs/patterns",
+          "description": "Format Selection; requires negotiated partial-format"
+        },
+        "type_format": {
+          "$ref": "#/$defs/patterns",
+          "description": "formatting as you type; requires negotiated partial-format"
+        },
+        "type_format.triggers": {
+          "type": "string",
+          "description": "characters that ask for on-type formatting, space separated; the word newline stands for Enter: '; } newline'; requires negotiated partial-format",
+          "pattern": "^(\\S|newline)( (\\S|newline))*$"
+        },
+        "document_links": {
+          "$ref": "#/$defs/patterns",
+          "description": "links under ctrl+hover; requires negotiated document-links"
+        },
+        "tests": {
+          "$ref": "#/$defs/patterns",
+          "description": "Protocol 1.1: the files this test controller has tests in (feature tests)."
+        },
+        "tests.profiles": {
+          "type": "string",
+          "description": "run kinds the controller offers besides run, space separated",
+          "pattern": "^(debug|coverage)( (debug|coverage))*$|^run( (debug|coverage))*$"
         }
       },
       "additionalProperties": false
+    },
+    "tools": {
+      "type": "object",
+      "description": "[tools] (feature tools): NAME = Title | description, with NAME.input (what the input holds) and NAME.readonly = yes (no confirmation before a call). NAME is 1 to 40 of [a-z0-9_]; at most 64 tools; texts are cut to 1000 bytes.",
+      "patternProperties": {
+        "^[a-z0-9_]{1,40}$": {
+          "type": "string",
+          "pattern": "^[^|]+(\\|.*)?$"
+        },
+        "^[a-z0-9_]{1,40}\\.input$": {
+          "type": "string"
+        },
+        "^[a-z0-9_]{1,40}\\.readonly$": {
+          "type": "string",
+          "enum": ["yes", "no"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "idle": {
+      "enum": [
+        "keep",
+        "stop"
+      ],
+      "default": "keep",
+      "description": "stop: rhun stops the extension after idle.after seconds without work"
+    },
+    "idle.after": {
+      "type": "integer",
+      "minimum": 10,
+      "maximum": 86400,
+      "default": 300,
+      "description": "seconds without work before an idle = stop extension is stopped"
+    },
+    "runs": {
+      "enum": [
+        "workspace",
+        "local"
+      ],
+      "default": "workspace",
+      "description": "where it runs; both mean this computer in 0.18.0"
+    },
+    "command-options": {
+      "type": "object",
+      "description": "[command-options] (protocol 1.1): per manifest command, NAME.icon (a built-in icon or ext:NAME from [icons]), NAME.when (enablement: a when clause), NAME.palette (no: not listed in the palette), NAME.callable (yes: other extensions may run-command it; needs command-args). A bad entry is dropped and listed on the extension's page.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(icon|when|palette|callable)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "keys": {
+      "type": "object",
+      "description": "[keys] (protocol 1.1): KEYS = COMMAND [ARGS] [when CLAUSE]; KEYS one stroke or two separated by a space (ctrl+k ctrl+c), optionally prefixed linux:, mac: or windows:; COMMAND NAME (own), rhun.NAME or EXT.NAME / OWNER/EXT.NAME; ARGS (at most 4096 bytes) are the body of 0 run ... key LEN.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "context": {
+      "type": "object",
+      "description": "[context] (feature context-keys): defaults of the extension's keys for when clauses (OWNER/NAME.KEY), valid before the program starts and after it stops; at most 64 keys.",
+      "propertyNames": {
+        "pattern": "^[a-z][A-Za-z0-9_]{0,39}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "status": {
+      "type": "object",
+      "description": "[status] (protocol 1.1): status bar items, ITEM.FIELD with FIELD text, tooltip, command (own command, run with FROM ref), args, align (left|right), priority (-1000..1000), color (fg muted accent error warning success), background (error|warning), when; at most 8 items with the runtime ones.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(text|tooltip|command|args|align|priority|color|background|when)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "icons": {
+      "type": "object",
+      "description": "[icons] (protocol 1.1): NAME = a PNG in the extension's folder (at most 65536 bytes, 256 pixels a side), used as ext:NAME in status items, menus and buttons; at most 32.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_-]{1,40}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "\\.png$"
+      }
     }
   },
   "$defs": {
@@ -276,6 +519,16 @@
     }
   },
   "patternProperties": {
+    "^(menu\\.(editor|explorer|tab|terminal|extension|editor_title|view_title|view_item|view_item_inline|history_commit|history_file|scm_resource|scm_group)|submenu\\.[a-z0-9_]{1,40})$": {
+      "type": "object",
+      "description": "[menu.LOCATION] and [submenu.NAME] (protocol 1.1): ITEM.command (a command as [keys] names it), ITEM.submenu (a [submenu.NAME]), ITEM.group, ITEM.order, ITEM.when, ITEM.args; [submenu.NAME] also has title. At most 16 items per extension per location.",
+      "propertyNames": {
+        "pattern": "^(title|[a-z0-9_]{1,40}\\.(command|submenu|group|order|when|args))$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "^debugger\\.[a-z0-9-]{1,32}$": {
       "type": "object",
       "description": "[debugger.TYPE]: a debug adapter rhun starts and speaks DAP to (feature debug); needs [needs] debug = yes",

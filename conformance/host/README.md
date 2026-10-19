@@ -32,7 +32,7 @@ directory; leaked extension processes are found by pid, reported and killed (nev
   `pat` (name patterns), `startup`/`onlang`/`onopen`/`onmake`/`onproj` (activation), `args`,
   `wrapper` (per-target `run.*` and an executable shell wrapper), `keyed` (a default key),
   `badinterp`, `noexec`, `missing`, `noruntime`, `norun`, `miss-*`, `badname`, `badowner`,
-  `badparse` (bad manifests), `slot01`..`slot17`.
+  `badparse` (bad manifests), `slot01`..`slot17`, `tests` (a test controller, protocol 1.1).
 - `run.py` prepares the project (`a.txt`, `main.go`, `utf.txt` with a two-byte character,
   `data.json`, `crlf.txt`, `with space.txt`, `Makefile`, `pic.png`), writes the control script,
   runs `rhun PROJECT --headless 1000x600 --scale 1 --extensions DIR --script FILE`, then checks
@@ -60,6 +60,7 @@ directory; leaked extension processes are found by pid, reported and killed (nev
 | `choose.*`, `ask.*`, `term.*` | the prompt and items are shown, typing filters and `ok ID N` counts in the original list, Enter/arrows/Esc, a second prompt (`choose`, `ask`, `term`) or the open palette is `busy`, opening the palette or `cancel ID` answers `cancelled`, an open prompt goes when the extension stops; `ask` returns the text as `ok ID LEN` + body (spaces, multibyte, empty); `term` without `terminal = yes` is `needs terminal=yes`, control characters (tab, LF, CR, ESC, NUL, BEL, DEL, trailing LF) are `syntax`, the line is shown, can be edited, runs only on Enter (output and a file prove it) and not on Esc or an empty line | 3, 5, 7, 8, 8a |
 | `cmd.*` | commands from the list run as the user would (`duplicate_line`, `select_all`, `undo`, `redo`) and every name of 8a is `ok` (no capability needed); `quit`, `save`, `close_tab`, an unknown name, an upper-case name, an extension command are `refused` and do nothing, no name is `syntax` | 8, 8a |
 | `lim.*` | `choose` 1001 items `toobig` (1000 accepted), prompt and item text cut at 200 bytes on a character boundary, `term` 4097 bytes `toobig` (4096 accepted), the 65th `register` `toobig` | 7 |
+| `tests.requests` | protocol 1.1 `tests`: rhun asks for the roots and sends `test-run`; `test-items` replace/add, unknown parent `refused unknown parent`, bad kind `syntax`, bad range or a range without a path `badpos`, 10,001 items `toobig`; `test-remove` with an unknown id; `test-update`/`test-end`/`test-coverage` for an unknown or ended run `stale run over`; `test-exec` of a program `[needs] tests` does not name (`needs tests=ls`), not a bare name, a NUL | v1.1 tests |
 | `sub.*`, `ev.*` | `opened` names gate every other event, default is no, patterns (`*.json`, exact `Makefile`), `saved`/`changed` versions, `closed` and a new id on reopen, user typing gives `changed`, a reload keeps the id and gets a new version | 2, 6, 8 |
 
 ## Not covered

@@ -1434,6 +1434,47 @@ def chk_cancel(r):
 
 plain('err.cancel-always-ok', ['conf/full'], ops=split_steps(CANCEL_STEPS)[0], script=std(wait=700), check=chk_cancel)
 
+# ================================================================ protocol 1.1: tests
+
+ITEM_G = "0 1\ngroup 0 0 0 0 - 1 1 0 0\ngG"
+TESTS_STEPS = [
+    ('items-replace', ["req", "test-items", "replace {LEN}", ITEM_G], ('ok',)),
+    ('items-unknown-parent', ["req", "test-items", "add {LEN}", "4 1\nnopetest 0 0 0 0 - 1 0 0 0\nx"], ('errx', 'error %(id)d refused unknown parent')),
+    ('items-bad-kind', ["req", "test-items", "add {LEN}", "0 1\nfunc 0 0 0 0 - 1 0 0 0\nx"], ('err', 'syntax')),
+    ('items-bad-range', ["req", "test-items", "add {LEN}", "0 1\ntest 3 5 3 4 - 1 0 2 0\nx/a"], ('err', 'badpos')),
+    ('items-range-without-path', ["req", "test-items", "add {LEN}", "0 1\ntest 1 1 1 1 - 1 0 0 0\nx"], ('err', 'badpos')),
+    ('items-10001', ["req", "test-items", "add {LEN}", {'pre': '0 10001\n', 'rep': 'test 0 0 0 0 - 1 0 0 0\nx', 'n': 10001}], ('err', 'toobig')),
+    ('items-add-under-g', ["req", "test-items", "add {LEN}", "1 1\ngtest 0 0 0 0 - 3 1 0 0\ng/aA"], ('ok',)),
+    ('remove', ["req", "test-remove", "2 {LEN}", "g/a\nghost\n"], ('ok',)),
+    ('update-unknown-run', ["req", "test-update", "999 {LEN}", "0\n"], ('errx', 'error %(id)d stale run over')),
+    ('end-unknown-run', ["req", "test-end", "999"], ('errx', 'error %(id)d stale run over')),
+    ('coverage-unknown-run', ["req", "test-coverage", "999 {LEN}", "0\n"], ('errx', 'error %(id)d stale run over')),
+    ["waitfor", " test-run 1 ", 15],
+    ('exec-not-needed', ["req", "test-exec", "1 {LEN}", "2 0 0 0\nls"], ('errx', 'error %(id)d needs tests=ls')),
+    ('exec-not-bare', ["req", "test-exec", "1 {LEN}", "4 0 0 0\n../x"], ('errx', 'error %(id)d refused the program must be a bare name')),
+    ('exec-nul', ["req", "test-exec", "1 {LEN}", "3 0 0 0\ngo\x00"], ('err', 'syntax')),
+    ('update', ["req", "test-update", "1 {LEN}", "1\npassed 4 1 0\ng"], ('ok',)),
+    ('update-bad-state', ["req", "test-update", "1 {LEN}", "1\nbroken - 1 0\ng"], ('err', 'syntax')),
+    ('end', ["req", "test-end", "1"], ('ok',)),
+    ('update-after-end', ["req", "test-update", "1 {LEN}", "0\n"], ('errx', 'error %(id)d stale run over')),
+    DONE,
+]
+TESTS_OPS, TESTS_CASES = split_steps(TESTS_STEPS)
+
+
+def chk_tests_requests(r):
+    r.finished()
+    check_steps(r, TESTS_STEPS)
+    r.ok('tests-resolve-for-the-roots', any(' tests-resolve 0' in l for l in r.lines()), 'rhun never asked for the roots')
+    r.ok('test-run-sent', any(' test-run 1 run 0 0' in l for l in r.lines()), 'no test-run 1 run 0 0')
+    e = r.ext('e', 'conf/tests')
+    r.ok('still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('tests.requests', ['conf/tests'], ops=TESTS_OPS, env={'CONF_HELLO': 'hello 1 tests\\n'},
+      script=['cmd testing', 'wait-ext tests running', 'wait 1200', 'cmd test_run_all', 'wait 2500'] + pe('e') + ['quit'],
+      check=chk_tests_requests)
+
 # ================================================================ section 7: status and toast
 
 

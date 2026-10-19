@@ -53,6 +53,43 @@ c-extra      =/ "transforms" SP "0" SP len LF
               ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
               ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.
 
+; Notebooks (v1.1.md, "Feature: notebooks"). rhun's requests nb-open and nb-save are answered
+; "ok" SP id SP len LF + body; their answers may carry up to 64 MiB.
+feature      =/ "notebooks"
+host-request =/ id SP "nb-open" SP id SP len
+              ; PATH_LEN SP DATA_LEN LF, then PATH and DATA
+host-request =/ id SP "nb-save" SP id SP len
+              ; PATH_LEN LF, PATH, then a notebook body
+event        =/ "0" SP "nb-run" SP id SP id SP id SP nb-lang SP len
+              ; NB CELL RUN LANG, then the cell's source
+event        =/ "0" SP ( "nb-interrupt" / "nb-restart" / "nb-kernel" / "nb-closed" ) SP id
+request      =/ id SP "nb-state" SP id SP id SP id SP nb-state SP ( num / "-" )
+request      =/ id SP "nb-output" SP id SP id SP id SP nb-op SP ( num / nb-token / "-" ) SP len
+              ; an output body; clear and clear-wait carry none (LEN 0)
+request      =/ id SP "nb-stream" SP id SP id SP id SP ( "stdout" / "stderr" ) SP len
+request      =/ id SP "nb-kernel-label" SP id SP nb-kstate SP len
+request      =/ id SP "nb-exec" SP id SP len
+              ; NB, then a command body as test-exec's; answered "ok" SP id SP num (EXEC)
+request      =/ id SP "nb-exec-signal" SP num SP ( "interrupt" / "terminate" / "kill" )
+event        =/ "0" SP "nb-exec-exit" SP num SP ( num / "killed" )
+event        =/ "0" SP "cell" SP doc SP id SP id SP num     ; DOC NB CELL INDEX (A3)
+event        =/ "0" SP "cells" SP id *( SP doc )             ; NB, then the DOCs of the cells it knows, in order
+nb-state     = "queued" / "running" / "done" / "failed" / "cancelled"
+nb-kstate    = "idle" / "busy" / "starting" / "dead" / "none"
+nb-op        = "append" / "replace" / "clear" / "clear-wait"
+nb-lang      = 1*VCHAR                       ; a grammar name, spaces as "_", or "-"
+nb-token     = 1*64( %x61-7A / DIGIT / "_" / "." / "+" / "/" / "-" )
+nb-body      = num SP len LF nb-meta *nb-cell
+              ; N cells, the notebook's metadata
+nb-cell      = ( "code" / "markup" ) SP nb-lang SP ( num / "-" ) SP len SP len SP num LF
+              ; SOURCE_LEN META_LEN NOUT, then SOURCE, META and NOUT nb-output-body
+nb-output-body = ( "stdout" / "stderr" / "result" / "display" / "error" ) SP ( nb-token / "-" )
+                 SP len SP num LF
+              ; KEEP_LEN NITEM, then KEEP and NITEM items
+nb-item      = nb-token SP num SP num SP len LF
+              ; TYPE W H LEN, then LEN bytes
+nb-meta      = *OCTET                        ; META_LEN opaque bytes
+
 ; Source control. git-data requires [needs] git = read; replies are length-framed (v1.1.md).
 feature      =/ "git-data"
 request      =/ id SP r-git
@@ -78,6 +115,370 @@ host-request =/ id SP "commit-message" SP len
 feature      =/ "quickdiff"
 host-request =/ id SP "quickdiff" SP doc SP version
 request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"
+
+; Resources group. idle: an idle = stop extension stays while busy.
+feature      =/ "idle"
+request      =/ id SP r-busy
+r-busy       = "busy" SP ( "yes" / "no" )
+
+; secrets: needs [needs] secrets = yes. KEY is 1..64 of a-z 0-9 _ . -; values 0..8192 bytes.
+feature      =/ "secrets"
+request      =/ id SP ( r-secret-get / r-secret-set / r-secret-delete / r-secret-keys )
+secret-key   = 1*64( %x61-7A / DIGIT / "_" / "." / "-" )
+r-secret-get = "secret-get" SP secret-key
+              ; ok ID 1 LEN + the value, or ok ID 0 0
+r-secret-set = "secret-set" SP secret-key SP len
+r-secret-delete = "secret-delete" SP secret-key
+r-secret-keys = "secret-keys"
+              ; ok ID LEN + the keys, each followed by LF
+
+; uris: resources SCHEME:REST; a provider declares [provides] schemes.
+feature      =/ "uris"
+uri          = uri-scheme ":" 1*4095( %x01-09 / %x0B-0C / %x0E-FF )
+uri-scheme   = %x61-7A 1*31( %x61-7A / DIGIT / "+" / "." / "-" )
+request      =/ id SP "open" SP num SP num SP uri / id SP r-content-changed
+r-content-changed = "content-changed" SP uri
+host-request =/ id SP "content" SP uri
+content-head = len SP len SP len LF
+              ; LANG TITLE TEXT lengths, then exactly those bytes; TEXT UTF-8, at most 4 MiB
+event        =/ "0" SP "content-closed" SP uri
+
+; urls: open-url and external-uri carry the URL as a body; link's reply body is the link.
+feature      =/ "urls"
+request      =/ id SP ( "open-url" / "external-uri" ) SP len / id SP "link"
+              ; open-url: ok ID ( "opened" / "copied" ), or error ID cancelled
+              ; external-uri, link: ok ID LEN + the URI
+url          = ( "http://" / "https://" ) 1*8184( %x21-7E / %x80-FF )
+link-token   = 32( DIGIT / %x61-66 )
+link         = "rhun://ext/" 1*( ALPHA / DIGIT / "-" ) "/" 1*( %x61-7A / DIGIT / "-" ) "/" link-token
+               *( %x21-7E / %x80-FF )           ; OWNER / NAME / TOKEN, then the extension's path and query
+event        =/ "0" SP "link" SP id SP len         ; body: the link as it arrived
+
+; files: needs project = read. Bodies: globs ("+" / "-" GLOB LF, 64 lines); search-text's starts
+; with PATTERN_LEN SP GLOBS_LEN LF, then the pattern (a literal or an RNRX program), then the globs.
+feature      =/ "files"
+request      =/ id SP ( "find-files" / "search-text" ) SP num SP num SP num SP len
+              ; FOLDER MAX FLAGS; find-files: ok ID COUNT STATUS; search-text: ok ID MATCHES FILES SKIPPED STATUS
+files-status = "complete" / "limit" / "partial"
+event        =/ "0" SP "found" SP id SP len        ; body: N LF and N records (find: FOLDER SP PATH_LEN LF PATH;
+              ; search: FOLDER SP DOC SP VERSION SP PATH_LEN SP M LF PATH, M x LINE SP COL SP END SP PRE SP TEXT_LEN LF TEXT)
+
+; Agents, proposals and tools (v1.1.md). Strings are length-framed and follow without separators.
+; agents: [provides] agents = yes; agent-sessions replaces the extension's rows.
+feature      =/ "agents"
+request      =/ id SP "agent-sessions" SP len               ; body: sessions
+request      =/ id SP "agent-changed" SP sid SP num SP num  ; TOTAL FIRST
+host-request =/ id SP "agent-transcript" SP sid SP num      ; FROM; answered ok ID LEN + transcript
+sessions     = num LF *session                              ; N 0..1000, body <= 1 MiB
+session      = num SP agent-state SP len SP len SP len SP len LF   ; UPDATED, then SID TITLE MODEL CWD bytes
+agent-state  = "idle" / "working" / "waiting" / "error"
+sid          = 1*128( %x21-7E )
+transcript   = num SP num LF *message                       ; TOTAL N, N <= 2000, body <= 4 MiB
+message      = agent-role SP len SP len SP len LF           ; then NAME TEXT MODEL bytes
+agent-role   = "user" / "assistant" / "tool" / "result" / "error" / "info"
+
+; edit-review: needs documents=read; the body is LABEL_LEN SID_LEN LF <LABEL><SID> and a workspace edit.
+feature      =/ "edit-review"
+request      =/ id SP "propose" SP len                      ; answered ok ID PROPOSAL
+request      =/ id SP "unpropose" SP num
+event        =/ "0" SP "proposal" SP num SP num SP ( "accepted" / "rejected" / "stale" / "partial" SP num SP num )
+event        =/ "0" SP "proposal" SP num SP "done" SP num SP num
+
+; tools: [tools] in the manifest; rhun routes calls to the owner and confirms tools that change things.
+feature      =/ "tools"
+request      =/ id SP "tools"                               ; ok ID LEN + tool-list
+request      =/ id SP "tool-call" SP tool-id SP len         ; answered when done: ok ID LEN + output
+host-request =/ id SP "tool" SP tool-name SP name "/" name SP len   ; NAME CALLER, then the input
+tool-list    = num LF *tool-record
+tool-record  = tool-id SP ( "ro" / "rw" ) SP len SP len SP len LF   ; then TITLE DESC INPUT bytes
+tool-id      = "rhun." tool-name / name "/" name "." tool-name
+tool-name    = 1*40( %x61-7A / DIGIT / "_" )
+
+; agent-prompts (with agents): prompts, Stop and cards for the extension's sessions.
+feature      =/ "agent-prompts"
+host-request =/ id SP "agent-prompt" SP ( sid / "-" ) SP len  ; the text; answered ok ID LEN + SID
+event        =/ "0" SP "agent-stop" SP sid                     ; rhun to the extension
+request      =/ id SP "agent-ask" SP sid SP len                ; answered ok ID N (from 1) or error ID cancelled
+card         = 1*( %x01-09 / %x0B-FF ) 1*16( LF 1*( %x01-09 / %x0B-FF ) ) [ LF ]   ; <= 8192 bytes
+
+; ---- workspace edits and the editor model (features workspace-edits, file-operations,
+;      selections, reveal, diff, linked-editing)
+
+; With workspace-edits agreed, a workspace edit (apply, a rename answer, a code action's EDIT; not
+; format or save-actions answers) is "N" LF, N entries, then extra records to the end of the body.
+feature      =/ "workspace-edits" / "file-operations" / "selections" / "reveal" / "diff" / "linked-editing"
+w-entry       = w-group-11 / w-create / w-rename / w-delete   ; file operations need file-operations
+w-group-11    = len SP ( version / "-" / w-hash ) SP num LF  ; PATH_LEN PRE M, PATH, M edits (w-edit)
+w-hash        = "fnv1a64:" 16( DIGIT / %x61-66 )             ; FNV-1a 64 of the file's bytes on disk
+w-create      = "create" SP len SP w-flags LF                ; PATH follows; a PATH ending in "/" is a folder
+w-rename      = "rename" SP len SP len SP w-flags LF         ; FROM and TO follow
+w-delete      = "delete" SP len SP w-flags LF                ; PATH follows
+w-flags       = "-" / w-flag *( "," w-flag )
+w-flag        = "overwrite" / "ignore-existing" / "recursive" / "ignore-missing"
+              ; create and rename take overwrite, ignore-existing; delete recursive, ignore-missing
+w-record      = ( "label" SP len / "confirm" SP "0" / field *( SP field ) SP len ) LF
+              ; label: one line of at most 200 bytes follows; unknown records are skipped
+error-apply   = "error" SP id SP code SP num SP rest     ; with workspace-edits: CODE ENTRY TEXT
+code         =/ "io"
+
+; selections
+event        =/ "0" SP e-selections
+e-selections  = "selections" SP doc SP num SP len        ; N lines of sel-line follow, the primary first
+request      =/ id SP r-select-many
+r-select-many = "select-many" SP doc SP num SP len        ; N (1 to 512) lines of sel-line follow
+sel-line      = range LF                                  ; anchor, then cursor
+
+; reveal
+request      =/ id SP r-reveal / id SP r-show-locations
+r-reveal      = "reveal" SP doc-or-uri SP pos SP ( "top" / "center" / "nearest" / "center-if-outside" )
+r-show-locations = "show-locations" SP len                ; a title line (200 bytes), then a 12d locations body
+
+; diff: the reply is "ok ID DOC", DOC the tab's id
+request      =/ id SP r-diff / id SP r-diff-close
+r-diff        = "diff" SP doc-or-uri SP doc-or-uri SP ( "show" / "background" ) SP len   ; TITLE follows, one line
+; with feature uris a document may be named by a URI of one field (no SP; write %20)
+doc-or-uri    = doc / ( uri-scheme ":" 1*4095( %x21-7E / %x80-FF ) )
+uri-scheme    = %x61-7A 1*31( %x61-7A / DIGIT / "+" / "." / "-" )
+r-diff-close  = "diff-close" SP doc
+
+; linked-editing: answered "ok ID LEN" and "N" LF (0, or 2 to 64), N lines of range LF, and
+; optionally the record "word" SP len LF with that many printable ASCII bytes
+host-request =/ id SP "linked" SP doc SP version SP pos
+
+; Language features (v1.1.md "Language features"). Each kind's answer keeps v1's host-reply.
+feature      =/ "query-stream" / "provider-scope" / "complete-items" / "signature-list"
+feature      =/ "hover-query" / "navigation" / "selection-ranges" / "hierarchy"
+              / "workspace-symbols" / "prepare-rename" / "partial-format" / "code-actions"
+              / "file-diagnostics" / "document-links"
+
+; query-stream: parts and progress on one of rhun's pending requests, REQ (rhun's id).
+request      =/ id SP r-query-part / id SP r-query-progress
+r-query-part = "query-part" SP id SP len
+              ; LEN bytes in the grammar of REQ's answer: its count line and that many records;
+              ; only kinds that take parts (complete, definition, references, ...)
+r-query-progress = "query-progress" SP id SP percent SP len
+              ; LEN bytes: one line of at most 200 bytes, possibly empty
+percent      = "-" / num                             ; 0 .. 100
+
+; provider-scope: the values rhun uses for a [provides] KEY until the process stops.
+request      =/ id SP r-provides
+r-provides   = "provides" SP field SP ( "*" / "-" / field *( SP field ) )
+              ; "*" the manifest's values, "-" none, else a subset of the manifest's own values
+
+; complete-items: EXTRA records of a completion item, read with complete-items agreed.
+c-extra      =/ "resolve" SP ( "0" / "1" ) SP len LF   ; EDITS, then LEN (at most 16384) bytes of data
+c-extra      =/ "replace" SP range SP "0" LF          ; starts where the item's range starts
+c-extra      =/ "commit" SP len LF                     ; 1 to 16 printable ASCII characters follow
+c-extra      =/ ( "filter" / "suffix" ) SP len LF      ; one line follows
+c-extra      =/ ( "preselect" / "deprecated" / "adjust" ) SP "0" LF
+c-extra      =/ "after" SP ( "signature" / "complete" ) SP "0" LF
+host-request =/ id SP "complete-resolve" SP doc SP version SP len
+              ; followed by the item's LEN bytes of resolve data; VERSION is the list's
+r-extra      = ( "detail" SP len / "doc" SP len / "edit" SP range SP len
+              / "after" SP ( "signature" / "complete" ) SP "0" ) LF
+              ; the answer's body: r-extra records only, each followed by its LEN bytes
+
+; signature-list: rhun sends signatures in place of signature; the answer holds every overload.
+host-request =/ id SP "signatures" SP doc SP version SP pos SP h-kind SP h-char
+sl-head      = num SP num LF                         ; N 1 .. 32, ACTIVE zero-based
+sl-item      = ( num / "-1" ) SP ( num / "-1" ) SP len SP len LF
+              ; FROM TO (the active parameter, or -1 -1), SIG_LEN DOC_LEN; SIG (one line) and
+              ; DOC follow; an empty body hides the help
+
+; navigation: Go to Declaration, Type Definition and Implementation. The answer is a locations
+; body (l-head and l-item records, v1 12d); parts are allowed (query-stream).
+host-request =/ id SP ( "declaration" / "type-definition" / "implementation" ) SP doc SP version
+                SP pos SP "invoked" SP "-"
+
+; prepare-rename: F2 asks the document's rename provider first. The answer's body is empty (the
+; word at the cursor) or pr-head and PLEN bytes of placeholder (one line); error ID refused TEXT
+; refuses, and TEXT is shown.
+host-request =/ id SP "prepare-rename" SP doc SP version SP pos SP "invoked" SP "-"
+pr-head      = range SP len LF                       ; PLEN at most 200
+
+; partial-format: the answer is a workspace edit (v1 12g) for DOC only.
+host-request =/ id SP "range-format" SP doc SP version SP range SP num SP yes-no SP yes-no
+                SP yes-no                            ; TAB_WIDTH SPACES TRIM FINAL
+host-request =/ id SP "type-format" SP doc SP version SP pos SP field SP num SP yes-no SP yes-no
+                SP yes-no                            ; LINE COL after CHAR (or "newline"), then as above
+yes-no       = "yes" / "no"
+
+; code-actions: in place of actions for a provider that agreed it (the [provides] key stays
+; actions). KINDS is "-" or at most 32 kinds; DIAGS "-" or at most 64 comma-separated diagnostic ids.
+host-request =/ id SP "code-actions" SP doc SP version SP range SP ( "invoked" / "auto" )
+                SP ( "-" / hkind *( "," hkind ) ) SP ( "-" / field )
+hkind        = 1*( ALPHA / DIGIT / "_" / "-" ) *( "." 1*( ALPHA / DIGIT / "_" / "-" ) )
+              ; at most 128 bytes; an action matches a kind it equals or descends from
+ca-head      = num LF                                ; N, at most 1000
+ca-item      = hkind SP len SP len SP len LF         ; KIND TITLE_LEN EDIT_LEN EXTRA_LEN
+              ; TITLE (one line), EDIT (a workspace edit, or empty) and EXTRA follow; an action
+              ; with no edit, resolve data or command, and not disabled, is left out
+ca-extra     = ( "preferred" SP "0" / "disabled" SP len / "resolve" SP len / cmd-ref
+              / "fixes" SP len ) LF
+              ; each followed by its LEN bytes: the reason (one line, at most 1000), the resolve
+              ; data (at most 16384), space-separated diagnostic ids
+cmd-ref      = "command" SP name SP len
+              ; command-args' command reference: one of the extension's own commands, then
+              ; ARGS_LEN (at most 8192) bytes of ARGS, handed back as "0 run EXT.NAME DOC ref LEN"
+host-request =/ id SP "code-action-resolve" SP doc SP version SP len
+              ; followed by the chosen action's LEN bytes of resolve data
+car-head     = len SP len LF
+              ; EDIT_LEN EXTRA_LEN: the edit (a workspace edit, or empty), then cmd-ref records only
+
+; hover-query: KIND is pointer (the pointer rested on text) or invoked (Show Hover). The answer's
+; body is empty (nothing to say) or ho-head and the text (plain, or Markdown with markdown
+; agreed); at most 64 KiB in all.
+host-request =/ id SP "hover-query" SP doc SP version SP pos SP ( "pointer" / "invoked" ) SP "-"
+ho-head      = range LF                              ; the range described; 0 0 0 0 for the position
+
+; selection-ranges: N (1 .. 64) and LEN bytes of N sr-cursor lines, each selection's cursor. The
+; answer is at most N sr-group records, in the cursors' order; at most 64 KiB in all.
+host-request =/ id SP "selection-ranges" SP doc SP version SP num SP len
+sr-cursor    = pos LF
+sr-group     = num LF 1*( range LF )
+              ; M (1 .. 64) ranges, innermost first, each containing the one before (an equal one
+              ; is skipped; one that does not ends the group)
+
+; hierarchy: the roots at the cursor, then the calls or items about one of them, whose DATA rhun
+; hands back. Each answer is a count line and that many records; calls-in, calls-out, supertypes
+; and subtypes may come in parts (query-stream).
+host-request =/ id SP ( "call-hierarchy" / "type-hierarchy" ) SP doc SP version SP pos SP "invoked"
+                SP "-"                               ; answered with at most 64 hi-item records
+host-request =/ id SP ( "calls-in" / "calls-out" ) SP len
+              ; followed by the item's LEN bytes of DATA; answered with hi-call records
+host-request =/ id SP ( "supertypes" / "subtypes" ) SP len
+              ; followed by the item's LEN bytes of DATA; answered with hi-item records
+hi-head      = num LF                                ; N: at most 64 roots, else 1000 an answer or part
+hi-item      = y-kind SP range SP range SP len SP len SP len SP len LF
+              ; KIND, the whole symbol, its name (inside it), PATH_LEN NAME_LEN DETAIL_LEN
+              ; DATA_LEN; PATH (as l-item's), NAME (one line), DETAIL (one line or empty) and DATA
+              ; (at most 16384) follow
+hi-call      = y-kind SP range SP range SP len SP len SP len SP len SP num LF
+              ; as hi-item, then R (1 .. 1000): after the item's bytes, R hi-site lines, in the
+              ; caller's file for calls-in, in the asked item's file for calls-out
+hi-site      = range LF
+
+; workspace-symbols: MAX (a hint) and LEN bytes of query (one line, at most 256, maybe empty). The
+; answer is a count line and ws-item records; parts are allowed.
+host-request =/ id SP "workspace-symbols" SP num SP len
+ws-item      = range SP y-kind SP len SP len SP len LF
+              ; PATH_LEN NAME_LEN DETAIL_LEN: PATH (as l-item's), NAME (one line) and DETAIL (the
+              ; container, one line or empty) follow
+
+; document-links: the answer is a count line and dl-item records (at most 10000 and 1 MiB).
+host-request =/ id SP "document-links" SP doc SP version
+dl-item      = range SP len SP len LF
+              ; TARGET_LEN TIP_LEN: TARGET (an http or https URL, an absolute path optionally
+              ; followed by ":" LINE or ":" LINE ":" COL, or "#" DOC) and TIP (one line or empty)
+              ; follow
+
+; file-diagnostics (documents = read): a set for TARGET, "#" DOC at its VERSION or an absolute path
+; with VERSION "-", replacing the extension's there; rhun answers ok ID, or error ID stale V, needs,
+; syntax, toobig, nodoc, nofile.
+request      =/ id SP r-file-diagnostics / id SP r-file-diagnostics-reset
+r-file-diagnostics = "file-diagnostics" SP ( version / "-" ) SP num SP len SP len
+              ; N (at most 2000), TARGET_LEN, LEN: LEN bytes of TARGET then N fd-record
+r-file-diagnostics-reset = "file-diagnostics-reset"
+fd-record    = range SP severity SP len SP len LF
+              ; positions at least 1 1, the end not before the start; MSG_LEN (1 .. 4000)
+              ; EXTRA_LEN: MESSAGE (it may hold line feeds), then EXTRA_LEN bytes of fd-extra
+fd-extra     = ( "id" SP len / "code" SP len / "source" SP len / "href" SP len
+              / "tag" SP ( "unnecessary" / "deprecated" ) SP "0"
+              / "related" SP range SP len SP len ) LF
+              ; each followed by its bytes: an id of 1 to 64 of [A-Za-z0-9_.:-], unique in the set
+              ; (code-actions' DIAGS); a code and a source of at most 100; an http(s) URL of at
+              ; most 1000; related's PATH_LEN bytes of PATH (as TARGET) and MSG_LEN of message
+
+; scm: version control panels (v1.1.md "Feature: scm"); bodies are length-framed
+feature      =/ "scm"
+request      =/ id SP "scm-register" SP len                    ; body: ROOT_LEN SP LABEL_LEN LF <ROOT><LABEL>
+             / id SP "scm-update" SP num SP len                ; SCM, then an scm-body
+             / id SP "scm-input" SP num                        ; ok ID LEN + the message box's text
+             / id SP "scm-input-set" SP num SP len             ; body: the text (at most 65536 bytes)
+scm-body     = len SP len SP num SP num LF                     ; STATUS_LEN PLACEHOLDER_LEN NACT (0-4) NGROUP (0-64), then their bytes
+scm-action   = "action" SP ( scm-word / "-" ) SP scm-cmd SP len SP len LF   ; ICON NAME ARGS_LEN LABEL_LEN, then ARGS LABEL
+scm-group    = "group" SP scm-word SP len SP num SP num LF     ; ID LABEL_LEN NACT (0-8) NRES, then LABEL
+scm-res      = "res" SP %x21-7E SP scm-color SP len SP num LF  ; CODE COLOR PATH_LEN NREC (0-64), then PATH
+scm-record   = "command" SP scm-cmd SP len LF                 ; the click (before the actions), then ARGS
+             / scm-action
+             / "tip" SP len LF                                 ; then at most 1000 bytes
+             / 1*( %x21-7E ) *( SP 1*( %x21-7E ) ) SP len LF   ; any other record, skipped with its LEN bytes
+scm-color    = "added" / "modified" / "deleted" / "conflict" / "untracked" / "ignored" / "-"
+scm-word     = 1*64( %x21-7E )
+scm-cmd      = 1*40( %x61-7A / DIGIT / "_" )                ; a command of the extension, its local name
+; command-args: runs carry where they came from and a body; command references inside bodies;
+; run-command (extension to rhun) and call (rhun to a callable command's owner)
+feature      =/ "command-args"
+event        =/ "0" SP "run" SP full-command SP doc SP from SP len   ; then LEN body bytes
+from         = "palette" / "key" / "menu" / "ref"
+full-command = name "." name
+command-ref  = "command" SP name SP len LF                ; then ARGS_LEN bytes, at most 8192
+request      =/ id SP "run-command" SP command-id SP len  ; ARGS body, at most 65536 bytes
+command-id   = 1*( %x21-7E )                              ; NAME, rhun.NAME, EXT.NAME, OWNER/EXT.NAME
+host-request =/ id SP "call" SP full-command SP doc SP caller SP len   ; ARGS body
+caller       = 1*( ALPHA / DIGIT / "-" ) "/" name
+              ; the reply to run-command and to call is ok ID LEN + RESULT (at most 1 MiB) or an error
+
+; context-keys: the extension's own keys for when clauses
+feature      =/ "context-keys"
+request      =/ id SP "set-context" SP context-key SP context-value
+context-key  = %x61-7A *39( ALPHA / DIGIT / "_" )
+context-value = 1*( %x20-7E / %x80-FF )                   ; at most 256 bytes of UTF-8, no control characters; "-" removes
+
+; status-items: status bar items
+feature      =/ "status-items"
+request      =/ id SP "status-item" SP name SP len / id SP "status-remove" SP name
+status-head  = ( "left" / "right" ) SP [ "-" ] num SP len SP len SP len LF
+              ; PRIORITY -1000..1000, TEXT_LEN TOOLTIP_LEN EXTRA_LEN, then the three parts;
+              ; EXTRA records: command-ref, "color" SP color SP "0" LF, "background" SP
+              ; ( "error" / "warning" ) SP "0" LF, "when" SP len LF + the clause
+color        = "fg" / "muted" / "accent" / "error" / "warning" / "success"
+
+; Test controllers require agreed tests. Bodies follow LEN lines exactly; see v1.1.md.
+feature      =/ "tests"
+host-request =/ id SP "tests-resolve" SP len
+              ; followed by PARENT (an item id, empty for the roots); answered with an items body
+host-request =/ id SP "test-run" SP num SP t-profile SP num SP len
+              ; RUN PROFILE N, then N item ids each ending in LF; answered "ok" SP id SP "0"
+t-profile    = "run" / "debug" / "coverage"
+request      =/ id SP "test-items" SP ( "replace" / "add" ) SP len
+request      =/ id SP "test-remove" SP num SP len
+request      =/ id SP "test-update" SP num SP len
+request      =/ id SP "test-end" SP num
+request      =/ id SP "test-coverage" SP num SP len
+request      =/ id SP "test-exec" SP num SP len
+              ; answered "ok" SP id SP EXEC
+event        =/ "0" SP "test-cancel" SP num
+event        =/ "0" SP "test-out" SP num SP ( "out" / "err" ) SP len
+              ; followed by LEN bytes of the program's output, at most 64 KiB
+event        =/ "0" SP "test-exit" SP num SP ( num / "signal" SP num / "killed" )
+t-items      = len SP num LF *OCTET *t-item
+              ; PARENT_LEN N, PARENT, then N items
+t-item       = t-kind SP num SP num SP num SP num SP t-flags SP len SP len SP len SP len LF
+              ; L1 C1 L2 C2 (all 0: no range), then ID LABEL PATH EXTRA of those lengths
+t-kind       = "group" / "file" / "suite" / "test"
+t-flags      = "-" / t-flag *( "," t-flag )
+t-flag       = "lazy" / "nodebug"
+t-results    = num LF *t-record
+t-record     = t-state SP ( num / "-" ) SP len SP len LF
+              ; ITEM and EXTRA of those lengths; extra records: message, location, expected,
+              ; actual, output (NAME ARGS LEN LF and LEN bytes)
+t-state      = "queued" / "started" / "passed" / "failed" / "errored" / "skipped" / "-"
+t-coverage   = num LF *( len SP num LF *OCTET *( num SP num SP num LF ) )
+t-command    = len SP len SP num SP num LF
+              ; PROGRAM CWD, then ARGC arguments and ENVC NAME=VALUE variables, each LEN LF bytes
+
+; Custom editors (v1.1.md, "Feature: custom-editors"). Answers carry "ok" SP id SP len (LEN 0 for none).
+feature      =/ "custom-editors"
+host-request =/ id SP "editor-open" SP doc SP num SP ( "text" / "owned" ) SP "file" SP len
+              ; CDOC VIEW MODEL SOURCE, then the path
+host-request =/ id SP "editor-save" SP doc SP ( "save" / "saveas" ) SP num
+              ; answered with a body: ( "0" / "1" ) LF, then the part's bytes
+host-request =/ id SP ( "editor-undo" / "editor-redo" / "editor-revert" ) SP doc
+request      =/ id SP "editor-read" SP doc SP num SP num   ; CDOC OFFSET MAX
+request      =/ id SP "editor-dirty" SP doc SP ( "0" / "1" )
+event        =/ "0" SP ( "editor-changed" / "editor-closed" ) SP doc
+event        =/ "0" SP "editor-path" SP doc SP len            ; then the new path
 
 ; debug: debuggers ([debugger.TYPE], [needs] debug = yes); a configuration body is
 ; N LF, then N leaves KIND SP PATH_LEN SP VALUE_LEN LF PATH VALUE, then extra records

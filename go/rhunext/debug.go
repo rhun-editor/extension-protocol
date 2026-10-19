@@ -72,7 +72,7 @@ type DebugEntry struct {
 // extension's debugger types) and optionally `request` (launch or attach).
 type DebugConfig []DebugEntry
 
-func under(path, prefix string) bool {
+func debugUnder(path, prefix string) bool {
 	return path == prefix || strings.HasPrefix(path, prefix+".")
 }
 
@@ -105,7 +105,7 @@ func (c *DebugConfig) Set(path string, v DebugValue) {
 func (c *DebugConfig) Remove(path string) {
 	out := (*c)[:0]
 	for _, e := range *c {
-		if !under(e.Path, path) {
+		if !debugUnder(e.Path, path) {
 			out = append(out, e)
 		}
 	}
