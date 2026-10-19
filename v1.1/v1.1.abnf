@@ -116,3 +116,12 @@ link-token   = 32( DIGIT / %x61-66 )
 link         = "rhun://ext/" 1*( ALPHA / DIGIT / "-" ) "/" 1*( %x61-7A / DIGIT / "-" ) "/" link-token
                *( %x21-7E / %x80-FF )           ; OWNER / NAME / TOKEN, then the extension's path and query
 event        =/ "0" SP "link" SP id SP len         ; body: the link as it arrived
+
+; files: needs project = read. Bodies: globs ("+" / "-" GLOB LF, 64 lines); search-text's starts
+; with PATTERN_LEN SP GLOBS_LEN LF, then the pattern (a literal or an RNRX program), then the globs.
+feature      =/ "files"
+request      =/ id SP ( "find-files" / "search-text" ) SP num SP num SP num SP len
+              ; FOLDER MAX FLAGS; find-files: ok ID COUNT STATUS; search-text: ok ID MATCHES FILES SKIPPED STATUS
+files-status = "complete" / "limit" / "partial"
+event        =/ "0" SP "found" SP id SP len        ; body: N LF and N records (find: FOLDER SP PATH_LEN LF PATH;
+              ; search: FOLDER SP DOC SP VERSION SP PATH_LEN SP M LF PATH, M x LINE SP COL SP END SP PRE SP TEXT_LEN LF TEXT)

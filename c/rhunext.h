@@ -219,6 +219,44 @@ int rx_open_url(rx_ext *ext, const char *url);
 char *rx_external_uri(rx_ext *ext, const char *uri);
 char *rx_link(rx_ext *ext);
 int rx_parse_link(const rx_event *event, int64_t *id, const char **link, size_t *len);
+/* Feature files ([needs] project = read): rx_find_files lists the workspace's files by glob,
+ * rx_search_text searches their text (a literal, or with regex 1 an RNRX program), through rhun.
+ * The batch callback gets each batch as it comes (its strings live until it returns) and returns
+ * 1 to go on or 0 to stop: the run is then cancelled, the call returns -1 and rx_error says
+ * "cancelled". On success out (if not NULL) has the reply: count paths or matches, files with
+ * matches, skipped files, status complete, limit or partial. Folder 1 is the primary folder, 0
+ * every folder; max is 1 to 100000 paths or 1 to 20000 matches; globs are relative to the folder
+ * (* ** ? [..] {a,b}; without / they match the base name). */
+#define RX_FILES_IGNORED 1       /* ignored files too: no .gitignore, no exclude setting */
+#define RX_FILES_SKIP_HIDDEN 2
+#define RX_FILES_FOLLOW_LINKS 4
+#define RX_FILES_FOLDERS 8       /* find: folders too, with a trailing / */
+#define RX_SEARCH_IGNORE_CASE 16
+#define RX_SEARCH_WHOLE_WORD 32
+typedef struct {
+    int64_t folder;
+    int max, flags;
+    const char *const *include;
+    int ninclude;
+    const char *const *exclude;
+    int nexclude;
+} rx_file_query;
+typedef struct { int64_t folder; const char *path; size_t path_len; } rx_found_path;
+typedef struct { int line, col, end, pre; const char *text; size_t text_len; } rx_search_match;
+typedef struct {
+    int64_t folder;
+    rx_doc doc;                 /* the open document searched, or 0 for the file on disk */
+    int64_t version;
+    const char *path;
+    size_t path_len;
+    int nmatches;
+    const rx_search_match *matches;
+} rx_found_file;
+typedef struct { int64_t count, files, skipped; char status[16]; } rx_finished;
+int rx_find_files(rx_ext *ext, const rx_file_query *q, int (*batch)(const rx_found_path *paths, int n, void *user),
+                  void *user, rx_finished *out);
+int rx_search_text(rx_ext *ext, const void *pattern, size_t len, int regex, const rx_file_query *q,
+                   int (*batch)(const rx_found_file *files, int n, void *user), void *user, rx_finished *out);
 #ifdef RHUNEXT_AUTH
 /* Signing in (define RHUNEXT_AUTH before including; on Windows link ws2_32 and bcrypt; with
  * -std=c99 on Linux define _POSIX_C_SOURCE 200809L first): OAuth's authorization code flow with
@@ -1185,6 +1223,273 @@ int rx_loopback_wait(rx_loopback *lb, const char *state, int timeout_ms, char **
     }
 }
 #endif /* RHUNEXT_AUTH */
+
+/* ---- feature files ---- */
+
+typedef struct {
+    const char *p, *end;
+} rx_framed;
+
+static int rx_framed_nums(rx_framed *r, long long *v, int n) {
+    const char *nl = (const char *)memchr(r->p, '\n', (size_t)(r->end - r->p));
+    if (!nl) return -1;
+    int got = 0;
+    const char *s = r->p;
+    while (s < nl) {
+        if (got == n || *s < '0' || *s > '9') return -1;
+        long long x = 0;
+        int digits = 0;
+        while (s < nl && *s >= '0' && *s <= '9') {
+            if (++digits > 18) return -1;
+            x = x * 10 + (*s++ - '0');
+        }
+        v[got++] = x;
+        if (s < nl) {
+            if (*s != ' ' || s + 1 == nl) return -1;
+            s++;
+        }
+    }
+    r->p = nl + 1;
+    return got == n ? 0 : -1;
+}
+
+static const char *rx_framed_bytes(rx_framed *r, long long n) {
+    if (n < 0 || n > r->end - r->p) return NULL;
+    const char *s = r->p;
+    r->p += n;
+    return s;
+}
+
+/* a find-files batch to its callback: -1 when it does not parse */
+static int rx_found_paths(const unsigned char *b, size_t len, int (*cb)(const rx_found_path *, int, void *),
+                          void *user, int *more) {
+    rx_framed r = {(const char *)b, (const char *)b + len};
+    long long n;
+    if (rx_framed_nums(&r, &n, 1) || n > 100000) return -1;
+    rx_found_path *a = (rx_found_path *)calloc((size_t)n + 1, sizeof *a);
+    if (!a) abort();
+    for (long long i = 0; i < n; i++) {
+        long long f[2];
+        if (rx_framed_nums(&r, f, 2) || !(a[i].path = rx_framed_bytes(&r, f[1]))) {
+            free(a);
+            return -1;
+        }
+        a[i].folder = f[0];
+        a[i].path_len = (size_t)f[1];
+    }
+    if (r.p != r.end) {
+        free(a);
+        return -1;
+    }
+    *more = cb ? cb(a, (int)n, user) : 1;
+    free(a);
+    return 0;
+}
+
+/* a search-text batch to its callback */
+static int rx_found_files(const unsigned char *b, size_t len, int (*cb)(const rx_found_file *, int, void *),
+                          void *user, int *more) {
+    rx_framed r = {(const char *)b, (const char *)b + len};
+    long long n;
+    if (rx_framed_nums(&r, &n, 1) || n > 100000) return -1;
+    rx_found_file *a = (rx_found_file *)calloc((size_t)n + 1, sizeof *a);
+    if (!a) abort();
+    int ok = 1;
+    for (long long i = 0; ok && i < n; i++) {
+        long long f[5];
+        if (rx_framed_nums(&r, f, 5) || !(a[i].path = rx_framed_bytes(&r, f[3])) || f[4] > 20000) {
+            ok = 0;
+            break;
+        }
+        a[i].folder = f[0], a[i].doc = f[1], a[i].version = f[2], a[i].path_len = (size_t)f[3];
+        rx_search_match *m = (rx_search_match *)calloc((size_t)f[4] + 1, sizeof *m);
+        if (!m) abort();
+        a[i].matches = m;
+        a[i].nmatches = (int)f[4];
+        for (long long j = 0; j < f[4]; j++) {
+            long long v[5];
+            if (rx_framed_nums(&r, v, 5) || !(m[j].text = rx_framed_bytes(&r, v[4]))) {
+                ok = 0;
+                break;
+            }
+            m[j].line = (int)v[0], m[j].col = (int)v[1], m[j].end = (int)v[2], m[j].pre = (int)v[3];
+            m[j].text_len = (size_t)v[4];
+        }
+    }
+    if (ok && r.p != r.end) ok = 0;
+    if (ok) *more = cb ? cb(a, (int)n, user) : 1;
+    for (long long i = 0; i < n; i++) free((void *)a[i].matches);
+    free(a);
+    return ok ? 0 : -1;
+}
+
+/* sends a find or search and reads until its reply: its batches go to take, other messages wait in
+ * the queue as rx_request keeps them; returning 0 from take sends a cancel */
+static int rx_files_run(rx_ext *ext, const char *verb, const rx_file_query *q, int flags, const void *body,
+                        size_t len, int (*take)(rx_ext *, const unsigned char *, size_t, void *, int *), void *ctx,
+                        rx_finished *out) {
+    if (!rx_has(ext, "files")) {
+        snprintf(ext->error, sizeof ext->error, "unknown files feature was not agreed");
+        return -1;
+    }
+    if (ext->gone) {
+        snprintf(ext->error, sizeof ext->error, "closed rhun went away");
+        return -1;
+    }
+    if (ext->next_id >= 2147483646) ext->next_id = 0;
+    int64_t id = ++ext->next_id;
+    char line[160];
+    snprintf(line, sizeof line, "%lld %s %lld %d %d %zu", (long long)id, verb, (long long)q->folder, q->max, flags, len);
+    rx_write(line, body, len);
+    char want[32], found[48];
+    snprintf(want, sizeof want, "%lld", (long long)id);
+    snprintf(found, sizeof found, "0 found %lld ", (long long)id);
+    int cancelled = 0, failed = 0;
+    for (;;) {
+        char *l;
+        if (!rx_read_line(&l)) {
+            rx_gone(ext, "rhun went away");
+            return -1;
+        }
+        if (strncmp(l, found, strlen(found)) == 0) {
+            long long blen = rx_body_len(l, RX_EVENT_BODY_MAX);
+            unsigned char *b = blen >= 0 ? rx_read_body((size_t)blen) : NULL;
+            free(l);
+            if (!b) {
+                rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
+                return -1;
+            }
+            int more = 1;
+            if (!cancelled && !failed) {
+                if (take(ext, b, (size_t)blen, ctx, &more) < 0) failed = 1, more = 0;
+                if (!more) {
+                    cancelled = 1;
+                    char c[64];
+                    if (ext->next_id >= 2147483646) ext->next_id = 0;
+                    snprintf(c, sizeof c, "%lld cancel %lld", (long long)++ext->next_id, (long long)id);
+                    rx_write(c, NULL, 0);
+                }
+            }
+            free(b);
+            continue;
+        }
+        int is_ok = strncmp(l, "ok ", 3) == 0, is_err = strncmp(l, "error ", 6) == 0;
+        if (is_ok || is_err) {
+            const char *p = l + (is_ok ? 3 : 6);
+            size_t n = strlen(want);
+            if (strncmp(p, want, n) == 0 && (p[n] == ' ' || p[n] == 0)) {
+                const char *rest = p[n] == ' ' ? p + n + 1 : p + n;
+                int r = 0;
+                if (failed) {
+                    snprintf(ext->error, sizeof ext->error, "syntax a batch that does not parse");
+                    r = -1;
+                } else if (is_err) {
+                    snprintf(ext->error, sizeof ext->error, "%s", rest);
+                    r = -1;
+                } else if (out) {
+                    memset(out, 0, sizeof *out);
+                    char st[16] = "";
+                    long long a = 0, b = 0, c = 0;
+                    if (strcmp(verb, "find-files") == 0) sscanf(rest, "%lld %15s", &a, st);
+                    else sscanf(rest, "%lld %lld %lld %15s", &a, &b, &c, st);
+                    out->count = a, out->files = b, out->skipped = c;
+                    snprintf(out->status, sizeof out->status, "%s", st);
+                }
+                free(l);
+                return r;
+            }
+            free(l);        /* a cancel's reply, or a reply to nothing waiting */
+            continue;
+        }
+        rx_msg *m = (rx_msg *)calloc(1, sizeof *m);
+        if (!m) abort();
+        m->line = l;
+        if (rx_has_body(l)) {
+            long long blen = rx_body_len(l, RX_EVENT_BODY_MAX);
+            if (blen < 0 || !(m->body = rx_read_body((size_t)blen))) {
+                rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
+                rx_free_msg(m);
+                return -1;
+            }
+            m->body_len = (size_t)blen;
+        }
+        if (ext->queue_tail) ext->queue_tail->next = m;
+        else ext->queue = m;
+        ext->queue_tail = m;
+    }
+}
+
+static int rx_files_globs(const rx_file_query *q, rx_buf *b) {
+    for (int k = 0; k < 2; k++) {
+        const char *const *list = k ? q->exclude : q->include;
+        int n = k ? q->nexclude : q->ninclude;
+        for (int i = 0; i < n; i++) {
+            if (!list[i] || !*list[i] || strpbrk(list[i], "\r\n")) return -1;
+            rx_buf_add(b, k ? "-" : "+", 1);
+            rx_buf_str(b, list[i]);
+            rx_buf_add(b, "\n", 1);
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    int (*paths)(const rx_found_path *, int, void *);
+    int (*files)(const rx_found_file *, int, void *);
+    void *user;
+} rx_files_ctx;
+
+static int rx_take_paths(rx_ext *ext, const unsigned char *b, size_t len, void *ctx, int *more) {
+    (void)ext;
+    rx_files_ctx *c = (rx_files_ctx *)ctx;
+    return rx_found_paths(b, len, c->paths, c->user, more);
+}
+
+static int rx_take_files(rx_ext *ext, const unsigned char *b, size_t len, void *ctx, int *more) {
+    (void)ext;
+    rx_files_ctx *c = (rx_files_ctx *)ctx;
+    return rx_found_files(b, len, c->files, c->user, more);
+}
+
+int rx_find_files(rx_ext *ext, const rx_file_query *q, int (*batch)(const rx_found_path *paths, int n, void *user),
+                  void *user, rx_finished *out) {
+    rx_buf g = {NULL, 0, 0};
+    if (rx_files_globs(q, &g)) {
+        rx_buf_free(&g);
+        snprintf(ext->error, sizeof ext->error, "syntax an empty glob or one with a line break");
+        return -1;
+    }
+    rx_files_ctx c;
+    c.paths = batch, c.files = NULL, c.user = user;
+    int r = rx_files_run(ext, "find-files", q, q->flags, g.data, g.len, rx_take_paths, &c, out);
+    rx_buf_free(&g);
+    return r;
+}
+
+int rx_search_text(rx_ext *ext, const void *pattern, size_t len, int regex, const rx_file_query *q,
+                   int (*batch)(const rx_found_file *files, int n, void *user), void *user, rx_finished *out) {
+    if (!regex && (len == 0 || len > 4096 || memchr(pattern, '\n', len))) {
+        snprintf(ext->error, sizeof ext->error, "syntax a literal is 1 to 4096 bytes without LF");
+        return -1;
+    }
+    rx_buf g = {NULL, 0, 0};
+    if (rx_files_globs(q, &g)) {
+        rx_buf_free(&g);
+        snprintf(ext->error, sizeof ext->error, "syntax an empty glob or one with a line break");
+        return -1;
+    }
+    rx_buf b = {NULL, 0, 0};
+    rx_buf_fmt(&b, "%zu %zu\n", len, g.len);
+    rx_buf_add(&b, pattern, len);
+    if (g.len) rx_buf_add(&b, g.data, g.len);
+    rx_files_ctx c;
+    c.paths = NULL, c.files = batch, c.user = user;
+    int flags = regex ? (q->flags | 64) : (q->flags & ~64);
+    int r = rx_files_run(ext, "search-text", q, flags, b.data, b.len, rx_take_files, &c, out);
+    rx_buf_free(&g);
+    rx_buf_free(&b);
+    return r;
+}
 
 int rx_secret_key_valid(const char *key) {
     size_t n = key ? strlen(key) : 0;

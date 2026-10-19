@@ -610,7 +610,39 @@ static void on_link(rx_ext *ext, int64_t id, const char *link, size_t len, void 
     snprintf(link_got, sizeof link_got, "%.*s", (int)len, link);
 }
 
-/* the resources group: idle, secrets, uris, urls */
+static char files_got[512];
+static int found_paths_cb(const rx_found_path *p, int n, void *user) {
+    (void)user;
+    for (int i = 0; i < n; i++)
+        snprintf(files_got + strlen(files_got), sizeof files_got - strlen(files_got), "%lld:%.*s ",
+                 (long long)p[i].folder, (int)p[i].path_len, p[i].path);
+    return 1;
+}
+static int found_files_cb(const rx_found_file *f, int n, void *user) {
+    (void)user;
+    for (int i = 0; i < n; i++)
+        snprintf(files_got + strlen(files_got), sizeof files_got - strlen(files_got), "%.*s doc%lld %d:%d-%d pre%d [%.*s] ",
+                 (int)f[i].path_len, f[i].path, (long long)f[i].doc, f[i].matches[0].line, f[i].matches[0].col,
+                 f[i].matches[0].end, f[i].matches[0].pre, (int)f[i].matches[0].text_len, f[i].matches[0].text);
+    return 0;   /* stop: the run is cancelled */
+}
+static int files_ok;
+static void on_ready_files(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    const char *inc[] = {"*.c"}, *exc[] = {"vendor"};
+    rx_file_query q = {0, 10, 0, inc, 1, exc, 1};
+    rx_finished fin;
+    assert(rx_find_files(ext, &q, found_paths_cb, NULL, &fin) == 0);
+    assert(strcmp(files_got, "1:main.c 1:src/ 2:a.c ") == 0 && fin.count == 3 && strcmp(fin.status, "complete") == 0);
+    files_got[0] = 0;
+    rx_file_query all = {0, 5, RX_SEARCH_IGNORE_CASE, NULL, 0, NULL, 0};
+    assert(rx_search_text(ext, "TODO", 4, 0, &all, found_files_cb, NULL, &fin) == -1);
+    assert(strncmp(rx_error(ext), "cancelled", 9) == 0);
+    assert(strcmp(files_got, "main.c doc3 2:4-8 pre1 [//TODO!] ") == 0);
+    files_ok = 1;
+}
+
+/* the resources group: idle, secrets, uris, urls, files */
 static void resources_requests(void) {
     rx_ext none = {0};
     assert(rx_busy(&none, 1) == -1 && strncmp(rx_error(&none), "unknown ", 8) == 0);
@@ -648,6 +680,15 @@ static void resources_requests(void) {
     same(&got, "hello 1 urls\n1 open-url 9\nhttps://x2 open-url 9\nhttps://y3 open-url 9\nhttps://z"
                "4 external-uri 21\nhttp://127.0.0.1:5/cb5 link\n");
     assert(urls_ok && link_id == 5 && strcmp(link_got, "rhun://ext/o/n/abcdef0/x?y") == 0);
+    /* files: batches while the request runs, a cancel when the callback says stop */
+    rx_buf_clear(&got);
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_files;
+    input = "0 features files\n0 ready -\n0 toast-ish 1\n0 found 1 20\n2\n1 6\nmain.c1 4\nsrc/0 found 1 9\n1\n2 3\na.c"
+            "ok 1 3 complete\n0 found 2 35\n1\n1 3 7 6 1\nmain.c2 4 8 1 7\n//TODO!ok 3\nerror 2 cancelled\n0 bye\n";
+    run_bytes("files", &h, input, strlen(input), &got);
+    same(&got, "hello 1 files\n1 find-files 0 10 0 13\n+*.c\n-vendor\n2 search-text 0 5 16 8\n4 0\nTODO3 cancel 2\n");
+    assert(files_ok);
     rx_buf_free(&got);
 }
 

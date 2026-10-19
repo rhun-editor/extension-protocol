@@ -32,17 +32,18 @@
 
 #![allow(clippy::needless_doctest_main)]
 
+pub mod auth;
 pub mod chart;
 pub mod complete;
+pub mod files;
 pub mod lang;
 pub mod picture;
+pub mod resources;
 pub mod scm;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
 pub mod watch;
-pub mod resources;
-pub mod auth;
 pub use resources::{parse_link, Content, UrlOpened};
 
 use std::collections::HashMap;
@@ -170,6 +171,8 @@ pub enum Feature {
     /// Opening URLs and link callbacks: [`Ext::open_url`], [`Ext::external_uri`], [`Ext::link`]
     /// and [`parse_link`]; sign-in helpers in [`auth`].
     Urls,
+    /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
+    Files,
 }
 
 impl Feature {
@@ -197,6 +200,7 @@ impl Feature {
             Feature::Secrets => "secrets",
             Feature::Uris => "uris",
             Feature::Urls => "urls",
+            Feature::Files => "files",
         }
     }
 }
@@ -621,7 +625,15 @@ type Waiter = Sender<Result<Reply, Error>>;
 #[derive(Default)]
 struct Pending {
     waiters: HashMap<u64, (String, Waiter)>,
+    /// find-files and search-text: their batches, then their reply (files.rs)
+    streams: HashMap<u64, Sender<StreamItem>>,
     closed: bool,
+}
+
+/// What a request with batches receives: each `0 found ID` body, then its reply.
+pub(crate) enum StreamItem {
+    Batch(Vec<u8>),
+    Done(Result<Reply, Error>),
 }
 
 fn closed_error() -> Error {
@@ -728,6 +740,44 @@ impl Ext {
             });
         }
         rx.recv().unwrap_or_else(|_| Err(closed_error()))
+    }
+
+    /// [`Ext::request`] whose `0 found ID` batches and reply come through the receiver
+    /// (find-files, search-text).
+    pub(crate) fn request_stream(
+        &self,
+        verb_and_args: &str,
+        body: &[u8],
+    ) -> Result<(u64, std::sync::mpsc::Receiver<StreamItem>), Error> {
+        let (tx, rx) = channel();
+        let (wtx, _wrx) = channel();
+        let verb = verb_and_args.split(' ').next().unwrap_or("").to_string();
+        let id = {
+            let mut p = self.pending.lock().unwrap();
+            if p.closed {
+                return Err(closed_error());
+            }
+            let mut s = self.shared.lock().unwrap();
+            let mut id = s.next_id;
+            while p.waiters.contains_key(&id) {
+                id = if id >= 2_147_483_647 { 1 } else { id + 1 };
+            }
+            s.next_id = if id >= 2_147_483_647 { 1 } else { id + 1 };
+            p.waiters.insert(id, (verb, wtx));
+            p.streams.insert(id, tx);
+            id
+        };
+        let line = format!("{id} {verb_and_args} {}", body.len());
+        if let Err(e) = self.write(&line, body) {
+            let mut p = self.pending.lock().unwrap();
+            p.waiters.remove(&id);
+            p.streams.remove(&id);
+            return Err(Error {
+                code: "io".into(),
+                text: e.to_string(),
+            });
+        }
+        Ok((id, rx))
     }
 
     // ---- documents ----
@@ -1148,7 +1198,10 @@ impl Ext {
                             text: fields.get(3..).map(|f| f.join(" ")).unwrap_or_default(),
                         })
                     };
-                    if let Some((_, w)) = waiter {
+                    let stream = self.pending.lock().unwrap().streams.remove(&id);
+                    if let Some(s) = stream {
+                        let _ = s.send(StreamItem::Done(res));
+                    } else if let Some((_, w)) = waiter {
                         let _ = w.send(res);
                     }
                 }
@@ -1161,7 +1214,11 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" || ev.name == "link" {
+                    if ev.name == "edits"
+                        || ev.name == "action"
+                        || ev.name == "link"
+                        || ev.name == "found"
+                    {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1175,6 +1232,15 @@ impl Ext {
                     }
                     if ev.name == "features" {
                         *self.features.lock().unwrap() = ev.fields.clone();
+                    }
+                    if ev.name == "found" && ev.fields.len() == 2 {
+                        // a batch goes to the find or search waiting for it
+                        let id: u64 = ev.fields[0].parse().unwrap_or(0);
+                        let p = self.pending.lock().unwrap();
+                        if let Some(s) = p.streams.get(&id) {
+                            let _ = s.send(StreamItem::Batch(std::mem::take(&mut ev.body)));
+                            continue;
+                        }
                     }
                     if tx.send(Msg::Event(ev)).is_err() {
                         break;
@@ -1217,6 +1283,9 @@ impl Ext {
         p.closed = true;
         for (_, (_, w)) in p.waiters.drain() {
             let _ = w.send(Err(closed_error()));
+        }
+        for (_, s) in p.streams.drain() {
+            let _ = s.send(StreamItem::Done(Err(closed_error())));
         }
         drop(p);
         let _ = tx.send(Msg::End);
