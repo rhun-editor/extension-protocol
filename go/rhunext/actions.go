@@ -421,5 +421,5 @@ func (e *Ext) answerActions(h Handler, id int64, verb string, f []string, body [
 			}
 		}
 	}
-	return nil, nil, false
+	return e.answerMore(h, id, verb, f, body)
 }

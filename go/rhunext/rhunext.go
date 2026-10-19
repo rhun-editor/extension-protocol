@@ -96,11 +96,20 @@ const (
 	SevHint    Severity = "hint"
 )
 
-// Diagnostic is one mark: a half-open range, a severity and a one-line message.
+// Diagnostic is one mark: a half-open range, a severity and a one-line message. The other fields
+// travel only with Ext.FileDiagnostics (protocol 1.1): ID, a token of [A-Za-z0-9_.:-] unique in the
+// set, comes back in code-actions requests (CodeActionsRequest.Diagnostics); Code and Source show
+// as source(code); Href is an http(s) link explaining the code; Tags; Related places.
 type Diagnostic struct {
 	Range    Range
 	Severity Severity
 	Message  string
+	ID       string
+	Code     string
+	Source   string
+	Href     string
+	Tags     []DiagnosticTag
+	Related  []RelatedInfo
 }
 
 // Handler receives events. Methods are called on one goroutine, in order, so an extension's
