@@ -22,7 +22,10 @@
  * tabs of their own; "complete", "signature", "definition", "references", "symbols", "actions",
  * "rename" and "format" for language support ("views complete definition"). Protocol 1.1 adds
  * "query-stream" (rx_stream_part, rx_stream_progress), "provider-scope" (rx_provides),
- * "complete-items" (rx_list_item_extra, complete_resolve) and "signature-list" (signatures).
+ * "complete-items" (rx_list_item_extra, complete_resolve), "signature-list" (signatures),
+ * "navigation" (declaration, type_definition, implementation), "prepare-rename" (prepare_rename),
+ * "partial-format" (range_format, type_format) and "code-actions" (code_actions with
+ * rx_code_action, code_action_resolve).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * MIT license. */
 #ifndef RHUNEXT_H
@@ -117,6 +120,39 @@ typedef struct {
     size_t len;
 } rx_resolve_ask;
 
+/* Protocol 1.1, partial-format: format range (range-format), or the document after ch was typed
+ * ("newline" for Enter) with the cursor at `at`, after it (type-format); with the document's
+ * settings in force: spaces 1 indents with spaces, trim and final_newline are its
+ * trim_trailing_whitespace and final_newline (1 yes). rhun applies a type-format edit only while the
+ * document is still at version. */
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;
+    rx_range range;
+    int tab_width, spaces, trim, final_newline;
+} rx_range_format_ask;
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;
+    rx_pos at;
+    const char *ch;
+    int tab_width, spaces, trim, final_newline;
+} rx_type_format_ask;
+
+/* Protocol 1.1, code-actions: for range (the selection; without one the diagnostic at the cursor, or
+ * the cursor); trigger "invoked" (the user asked) or "auto" (the lightbulb); kinds the hierarchical
+ * kinds wanted, comma separated, "" for any (rx_kind_wanted); diagnostics the comma-separated ids of
+ * this extension's diagnostics in the range, "" for none. */
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;
+    rx_range range;
+    const char *trigger, *kinds, *diagnostics;
+} rx_code_actions_ask;
+
 /* Protocol 1.1, query-stream: one of rhun's pending requests, handed to the *_stream handlers for
  * rx_stream_part and rx_stream_progress. It is cancelled when rhun withdraws the request (a cancel
  * event), answers a part cancelled or toobig, or the handler returns. */
@@ -134,6 +170,12 @@ typedef struct {
     const char *fail;               /* NULL, or the code it is refused with (toobig, refused, */
     char why[256];                  /* syntax) and why, one line */
 } rx_wedit;
+/* Protocol 1.1, code-actions: the answer, built with rx_code_action; kinds (set for you in the
+ * code_actions handler: the kinds asked, NULL or "" for any) leaves out actions of other kinds */
+typedef struct { rx_buf recs; int n, full; const char *kinds; } rx_code_actions;
+/* code-action-resolve's answer: the edit (none while it names no file) and the command to run after
+ * it (rx_command_ref(&out->command, ...); none: the action's own runs) */
+typedef struct { rx_wedit edit; rx_buf command; } rx_resolved;
 
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
@@ -170,6 +212,23 @@ typedef struct {
     int (*references_stream)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_locations *out, void *user);
     int (*complete_resolve)(rx_ext *ext, const rx_resolve_ask *req, rx_buf *out, void *user);
     int (*signatures)(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user);
+    /* Protocol 1.1, each asked only with its feature agreed, and returning 1 to answer, 0 for
+     * "unknown". navigation: declaration, type_definition and implementation answer as
+     * definition_stream does (locations; parts through stream with query-stream). prepare-rename:
+     * prepare_rename appends rx_prepare_rename_answer to out, or nothing for the word at the
+     * cursor; nothing can be renamed there: return rx_refuse_answer(out, why) (shown to the user).
+     * partial-format: range_format and type_format build a workspace edit for that document only,
+     * as format does. code-actions (in place of actions): code_actions adds rx_code_action records;
+     * code_action_resolve gets the chosen action's resolve data and builds its edit in out->edit
+     * and its command in out->command; nothing comes: return rx_refuse(&out->edit, why). */
+    int (*declaration)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_locations *out, void *user);
+    int (*type_definition)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_locations *out, void *user);
+    int (*implementation)(rx_ext *ext, const rx_ask *req, rx_stream *stream, rx_locations *out, void *user);
+    int (*prepare_rename)(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user);
+    int (*range_format)(rx_ext *ext, const rx_range_format_ask *req, rx_wedit *out, void *user);
+    int (*type_format)(rx_ext *ext, const rx_type_format_ask *req, rx_wedit *out, void *user);
+    int (*code_actions)(rx_ext *ext, const rx_code_actions_ask *req, rx_code_actions *out, void *user);
+    int (*code_action_resolve)(rx_ext *ext, const rx_resolve_ask *req, rx_resolved *out, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -367,6 +426,44 @@ int rx_stream_cancelled(const rx_stream *s);
 /* Protocol 1.1, provider-scope: the values rhun uses for a [provides] key until the process stops:
  * a space-separated subset of the manifest's own values, "*" the manifest's, "-" none. */
 int rx_provides(rx_ext *ext, const char *key, const char *values);
+
+/* Protocol 1.1, prepare-rename: the range F2 selects and the name the prompt starts with (one line,
+ * cut at 200 bytes at a character). rx_refuse_answer makes out the reason a request is refused (one
+ * line, cut at 1000 bytes) and returns -1, for a handler to return. */
+void rx_prepare_rename_answer(rx_buf *out, rx_range r, const char *placeholder);
+int rx_refuse_answer(rx_buf *out, const char *why);
+/* Protocol 1.1, command-args: the record "command NAME LEN" and args: one of the extension's own
+ * commands by its local name (1 to 40 of [a-z0-9_]) with args rhun hands back verbatim (at most 8192
+ * bytes) when it runs it. A name or args rhun would refuse append nothing and return -1. */
+int rx_command_ref(rx_buf *out, const char *name, const void *args, size_t len);
+/* Protocol 1.1, code-actions: an action's other records; start from a zeroed one
+ * (rx_action_extra x = {0};). NULL and 0 leave a record out, as does resolve data that is empty or
+ * past 16 KiB, or a command reference rhun would refuse. */
+typedef struct {
+    int preferred;                  /* the one Auto Fix applies at once */
+    const char *disabled;           /* why it cannot apply now (one line, cut at 1000 bytes) */
+    const void *resolve;            /* data rhun hands back in code-action-resolve when it is chosen */
+    size_t resolve_len;
+    const char *command;            /* one of the extension's commands, run after the edit, and */
+    const void *args;               /* its args */
+    size_t args_len;
+    const char *fixes;              /* the ids of the diagnostics it fixes, space separated */
+} rx_action_extra;
+/* A code action: kind hierarchical (quickfix, refactor.extract, source.organizeImports; NULL is
+ * quickfix; cut at 128 bytes); title one line (an empty one leaves the action out); edit as
+ * rx_action's (used up); extra NULL for none. An action that does nothing (no edit, resolve data or
+ * command, and not disabled), or whose kind is not one of l->kinds, is left out. Past 1000 actions or
+ * 4 MB the rest are left out. */
+void rx_code_action(rx_code_actions *l, const char *kind, const char *title, rx_wedit *edit,
+                    const rx_action_extra *extra);
+/* whether an action of kind matches the comma-separated kinds asked: it equals or descends from one
+ * (source.organizeImports.go matches source.organizeImports); any kind for NULL, "" or "-" */
+int rx_kind_wanted(const char *kinds, const char *kind);
+/* The bodies, appended to out, for answers built outside a handler; each empties its builder.
+ * rx_resolved_finish returns -1, appending nothing, when the edit cannot be sent (out->edit.fail and
+ * out->edit.why say why). */
+void rx_code_actions_finish(rx_code_actions *l, rx_buf *out);
+int rx_resolved_finish(rx_resolved *r, rx_buf *out);
 
 /* Definition and references (12d): a location is a file by its absolute path, or with path NULL
  * the open document doc (an untitled one), and a range there (in the open document when the file
@@ -1853,16 +1950,19 @@ static void rx_add_line(rx_buf *b, const char *s, size_t n) {
         if (b->data[i] == '\n' || b->data[i] == '\r') b->data[i] = ' ';
 }
 
-/* a one-word field: s without spaces and control characters, at most 40 bytes, or dflt when nothing
- * is left */
-static void rx_add_word(rx_buf *b, const char *s, const char *dflt) {
+/* a one-word field: s without spaces and control characters, at most max bytes, or dflt when
+ * nothing is left */
+static void rx_add_word_max(rx_buf *b, const char *s, const char *dflt, size_t max) {
     size_t at = b->len;
     for (; s && *s; s++)
         if ((unsigned char)*s > ' ' && *s != 0x7f) rx_buf_add(b, s, 1);
     if (b->len == at) rx_buf_str(b, dflt);
-    b->len = at + rx_cut(b->data + at, b->len - at, RX_KIND_MAX);
+    b->len = at + rx_cut(b->data + at, b->len - at, max);
     b->data[b->len] = 0;
 }
+
+/* a kind word: at most 40 bytes */
+static void rx_add_word(rx_buf *b, const char *s, const char *dflt) { rx_add_word_max(b, s, dflt, RX_KIND_MAX); }
 
 /* PATH (12d): the path, or #DOC */
 static const char *rx_target(const char *path, rx_doc doc, char *tmp, size_t cap) {
@@ -2223,6 +2323,114 @@ int rx_provides(rx_ext *ext, const char *key, const char *values) {
     return r;
 }
 
+/* ---- protocol 1.1 language features: navigation, prepare-rename, partial-format, code-actions */
+
+#define RX_HKIND_MAX 128                        /* a hierarchical kind */
+#define RX_ARGS_MAX 8192                        /* a command reference's args */
+#define RX_ACTION_RESOLVE_MAX ((size_t)16 << 10)
+
+void rx_prepare_rename_answer(rx_buf *out, rx_range r, const char *placeholder) {
+    if (!placeholder) placeholder = "";
+    size_t n = rx_cut(placeholder, strlen(placeholder), 200);
+    rx_buf_fmt(out, "%d %d %d %d %zu\n", rx_nn(r.start.line), rx_nn(r.start.col), rx_nn(r.end.line),
+               rx_nn(r.end.col), n);
+    rx_add_line(out, placeholder, n);
+}
+
+int rx_refuse_answer(rx_buf *out, const char *why) {
+    if (!why) why = "";
+    size_t n = strlen(why);
+    while (n && rx_blank(why[0])) why++, n--;
+    while (n && rx_blank(why[n - 1])) n--;
+    rx_buf_clear(out);
+    rx_add_line(out, why, rx_cut(why, n, 1000));
+    return -1;
+}
+
+int rx_command_ref(rx_buf *out, const char *name, const void *args, size_t len) {
+    size_t n = name ? strlen(name) : 0;
+    if (n < 1 || n > 40 || len > RX_ARGS_MAX || (len && !args)) return -1;
+    for (size_t i = 0; i < n; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= '0' && name[i] <= '9') || name[i] == '_')) return -1;
+    rx_buf_fmt(out, "command %s %zu\n", name, len);
+    rx_buf_add(out, args, len);
+    return 0;
+}
+
+int rx_kind_wanted(const char *kinds, const char *kind) {
+    if (!kinds || !*kinds || strcmp(kinds, "-") == 0) return 1;
+    if (!kind) kind = "";
+    size_t kl = strlen(kind);
+    for (const char *k = kinds; *k;) {
+        const char *end = strchr(k, ',');
+        size_t n = end ? (size_t)(end - k) : strlen(k);
+        if (n && kl >= n && strncmp(kind, k, n) == 0 && (kind[n] == 0 || kind[n] == '.')) return 1;
+        if (!end) break;
+        k = end + 1;
+    }
+    return 0;
+}
+
+void rx_code_action(rx_code_actions *l, const char *kind, const char *title, rx_wedit *edit,
+                    const rx_action_extra *x) {
+    rx_buf eb = {NULL, 0, 0}, xb = {NULL, 0, 0}, kb = {NULL, 0, 0};
+    int bad = edit && rx_wedit_finish(edit, &eb) < 0;
+    if (edit) rx_wedit_free(edit);
+    if (!title) title = "";
+    size_t tl = rx_cut(title, strlen(title), RX_TEXT_MAX), mark = l->recs.len;
+    rx_add_word_max(&kb, kind, "quickfix", RX_HKIND_MAX);
+    int does = eb.len > 0;
+    if (x) {
+        if (x->preferred) rx_buf_str(&xb, "preferred 0\n");
+        if (x->disabled && *x->disabled) {
+            size_t n = rx_cut(x->disabled, strlen(x->disabled), 1000);
+            rx_buf_fmt(&xb, "disabled %zu\n", n);
+            rx_add_line(&xb, x->disabled, n);
+            does = 1;
+        }
+        if (x->resolve && x->resolve_len && x->resolve_len <= RX_ACTION_RESOLVE_MAX) {
+            rx_buf_fmt(&xb, "resolve %zu\n", x->resolve_len);
+            rx_buf_add(&xb, x->resolve, x->resolve_len);
+            does = 1;
+        }
+        if (x->command && rx_command_ref(&xb, x->command, x->args, x->args_len) == 0) does = 1;
+        if (x->fixes && *x->fixes) {
+            size_t n = strlen(x->fixes);
+            rx_buf_fmt(&xb, "fixes %zu\n", n);
+            rx_add_line(&xb, x->fixes, n);
+        }
+    }
+    /* no title, nothing to do, a kind not asked for: left out */
+    if (!tl || !does || !rx_kind_wanted(l->kinds, kb.data)) bad = 1;
+    if (!bad && l->n >= RX_ACTIONS) l->full = 1;
+    if (!bad && !l->full) {
+        rx_buf_add(&l->recs, kb.data, kb.len);
+        rx_buf_fmt(&l->recs, " %zu %zu %zu\n", tl, eb.len, xb.len);
+        rx_add_line(&l->recs, title, tl);
+        rx_buf_add(&l->recs, eb.data, eb.len);
+        rx_buf_add(&l->recs, xb.data, xb.len);
+        rx_keep(&l->recs, mark, &l->n, &l->full, RX_ACTIONS_BODY);
+    }
+    rx_buf_free(&eb);
+    rx_buf_free(&xb);
+    rx_buf_free(&kb);
+}
+
+void rx_code_actions_finish(rx_code_actions *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
+
+int rx_resolved_finish(rx_resolved *r, rx_buf *out) {
+    rx_buf eb = {NULL, 0, 0};
+    int bad = r->edit.fail || (r->edit.files && rx_wedit_finish(&r->edit, &eb) < 0);
+    if (!bad) {
+        rx_buf_fmt(out, "%zu %zu\n", eb.len, r->command.len);
+        rx_buf_add(out, eb.data, eb.len);
+        rx_buf_add(out, r->command.data, r->command.len);
+    }
+    rx_buf_free(&eb);
+    rx_buf_free(&r->command);
+    return bad ? -1 : 0;
+}
+
 /* ---- the loop */
 
 /* fields f[from] to f[to - 1] are numbers: digits only */
@@ -2236,12 +2444,24 @@ static int rx_nums(char **f, int from, int to) {
     return 1;
 }
 
+/* f[at] to f[at + 3] are TAB_WIDTH SPACES TRIM FINAL (partial-format): a tab width of at least 1,
+ * then yes or no */
+static int rx_format_options(char **f, int at, int *opt) {
+    if (!rx_nums(f, at, at + 1) || atoi(f[at]) < 1) return 0;
+    opt[0] = atoi(f[at]);
+    for (int i = 1; i < 4; i++) {
+        if (strcmp(f[at + i], "yes") != 0 && strcmp(f[at + i], "no") != 0) return 0;
+        opt[i] = f[at + i][0] == 'y';
+    }
+    return 1;
+}
+
 static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
                       const unsigned char *data, size_t data_len) {
     /* ID VERB DOC VERSION, then LINE COL KIND CHAR (12b to 12e), L1 C1 L2 C2 (actions), LINE COL
      * invoked NAME (rename), TAB_WIDTH SPACES (format) or LEN and a body (complete-resolve) */
     const char *verb = f[1];
-    int ok = 0;
+    int ok = 0, refused = 0, opt[4];
     rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
     rx_wedit e;
     memset(&e, 0, sizeof e);
@@ -2340,10 +2560,100 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.data = data ? data : (const unsigned char *)"";
         req.len = data_len;
         ok = h->complete_resolve(ext, &req, &body, user);
+    } else if ((strcmp(verb, "declaration") == 0 || strcmp(verb, "type-definition") == 0 ||
+                strcmp(verb, "implementation") == 0) && n >= 6 && rx_nums(f, 2, 6) && rx_has(ext, "navigation")) {
+        int (*fn)(rx_ext *, const rx_ask *, rx_stream *, rx_locations *, void *) =
+            verb[0] == 'd' ? h->declaration : verb[0] == 't' ? h->type_definition : h->implementation;
+        rx_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        req.kind = n > 6 ? f[6] : "invoked";
+        req.ch = "";
+        rx_locations l;
+        memset(&l, 0, sizeof l);
+        if (fn && (ok = fn(ext, &req, &stream, &l, user)) != 0) rx_locations_finish(&l, &body);
+        rx_buf_free(&l.recs);
+    } else if (strcmp(verb, "prepare-rename") == 0 && n >= 6 && rx_nums(f, 2, 6) && h->prepare_rename &&
+               rx_has(ext, "prepare-rename")) {
+        rx_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        req.kind = n > 6 ? f[6] : "invoked";
+        req.ch = "";
+        ok = h->prepare_rename(ext, &req, &body, user);
+        refused = ok < 0;
+    } else if (strcmp(verb, "range-format") == 0 && n == 12 && rx_nums(f, 2, 8) && rx_format_options(f, 8, opt) &&
+               h->range_format && rx_has(ext, "partial-format")) {
+        rx_range_format_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.range.start.line = atoi(f[4]);
+        req.range.start.col = atoi(f[5]);
+        req.range.end.line = atoi(f[6]);
+        req.range.end.col = atoi(f[7]);
+        req.tab_width = opt[0], req.spaces = opt[1], req.trim = opt[2], req.final_newline = opt[3];
+        if ((ok = h->range_format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+    } else if (strcmp(verb, "type-format") == 0 && n == 11 && rx_nums(f, 2, 6) && rx_format_options(f, 7, opt) &&
+               h->type_format && rx_has(ext, "partial-format")) {
+        rx_type_format_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        req.ch = f[6];
+        req.tab_width = opt[0], req.spaces = opt[1], req.trim = opt[2], req.final_newline = opt[3];
+        if ((ok = h->type_format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+    } else if (strcmp(verb, "code-actions") == 0 && n == 11 && rx_nums(f, 2, 8) &&
+               (strcmp(f[8], "invoked") == 0 || strcmp(f[8], "auto") == 0) && h->code_actions &&
+               rx_has(ext, "code-actions")) {
+        rx_code_actions_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.range.start.line = atoi(f[4]);
+        req.range.start.col = atoi(f[5]);
+        req.range.end.line = atoi(f[6]);
+        req.range.end.col = atoi(f[7]);
+        req.trigger = f[8];
+        req.kinds = strcmp(f[9], "-") == 0 ? "" : f[9];
+        req.diagnostics = strcmp(f[10], "-") == 0 ? "" : f[10];
+        rx_code_actions l;
+        memset(&l, 0, sizeof l);
+        l.kinds = req.kinds;
+        if ((ok = h->code_actions(ext, &req, &l, user)) != 0) rx_code_actions_finish(&l, &body);
+        rx_buf_free(&l.recs);
+    } else if (strcmp(verb, "code-action-resolve") == 0 && n == 5 && rx_nums(f, 2, 5) && h->code_action_resolve &&
+               rx_has(ext, "code-actions") && (size_t)atoll(f[4]) == data_len) {
+        rx_resolve_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.data = data ? data : (const unsigned char *)"";
+        req.len = data_len;
+        rx_resolved r;
+        memset(&r, 0, sizeof r);
+        if ((ok = h->code_action_resolve(ext, &req, &r, user)) != 0 && rx_resolved_finish(&r, &body) < 0) {
+            e.fail = r.edit.fail;               /* refused, or past a workspace edit's limits */
+            memcpy(e.why, r.edit.why, sizeof e.why);
+        }
+        rx_wedit_free(&r.edit);
+        rx_buf_free(&r.command);
     }
     ext->query_id = 0;
     ext->query_cancelled = 0;
-    if (ok && e.fail) {
+    if (refused) {
+        rx_buf_fmt(&line, "error %s refused%s", f[0], body.len ? " " : "");
+        rx_buf_add(&line, body.data, body.len);     /* one line (rx_refuse_answer) */
+        rx_write(line.data, NULL, 0);
+    } else if (ok && e.fail) {
         rx_buf_fmt(&line, "error %s %s %s", f[0], e.fail, e.why);     /* why is one line */
         rx_write(line.data, NULL, 0);
     } else if (ok) {
