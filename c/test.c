@@ -1051,8 +1051,39 @@ static void retained_patches(void) {
     rx_patch_free(&q);
 }
 
+/* protocol 1.1's agents, proposals and tools: the bodies */
+static void ai_bodies(void) {
+    rx_transcript t;
+    memset(&t, 0, sizeof t);
+    t.total = 2;
+    rx_transcript_add(&t, "tool", "read_file", "src/main.rs", 11, NULL);
+    rx_buf b = {NULL, 0, 0};
+    rx_transcript_finish(&t, &b);
+    same(&b, "2 1\ntool 9 11 0\nread_filesrc/main.rs");
+    rx_buf_free(&b);
+    char a0[] = "3", a1[] = "1", a2[] = "partial", a3[] = "1", a4[] = "2";
+    char *argv[] = {a0, a1, a2, a3, a4};
+    rx_event ev;
+    memset(&ev, 0, sizeof ev);
+    ev.name = "proposal", ev.argc = 5, ev.argv = argv;
+    rx_proposal_event pe;
+    assert(rx_parse_proposal(&ev, &pe) && pe.proposal == 3 && pe.index == 1 && pe.accepted == 1 && pe.hunks == 2);
+    char d1[] = "done", d2[] = "1", d3[] = "2";
+    char *argv2[] = {a0, d1, d2, d3};
+    ev.argv = argv2, ev.argc = 4;
+    assert(rx_parse_proposal(&ev, &pe) && strcmp(pe.state, "done") == 0 && pe.accepted == 1 && pe.rejected == 2);
+    const char *list = "1\nrhun.read ro 4 1 9\nReaddpath PATH";
+    rx_tool *tools;
+    int n;
+    assert(rx_tools_parse((const unsigned char *)list, strlen(list), &tools, &n) == 0 && n == 1);
+    assert(strcmp(tools[0].name, "rhun.read") == 0 && tools[0].readonly && strcmp(tools[0].input, "path PATH") == 0);
+    rx_tools_free(tools, n);
+    assert(rx_tools_parse((const unsigned char *)"2\nx ro 1 0 0\n", 13, &tools, &n) < 0);
+}
+
 int main(void) {
     retained_patches();
+    ai_bodies();
     snippet_transform_wire();
     snippet_transform_programs();
     snippet_snapshot_decoder();

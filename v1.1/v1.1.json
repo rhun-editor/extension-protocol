@@ -268,6 +268,34 @@
         "schemes": {
           "type": "string",
           "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
+        },
+        "agents": {
+          "type": "string",
+          "enum": ["yes", "no"],
+          "description": "yes: the extension lists agent sessions in the agents panel (feature agents)."
+        },
+        "agents.title": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "the source's name on its rows and in Settings > Agents; the default is the extension's title"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tools": {
+      "type": "object",
+      "description": "[tools] (feature tools): NAME = Title | description, with NAME.input (what the input holds) and NAME.readonly = yes (no confirmation before a call). NAME is 1 to 40 of [a-z0-9_]; at most 64 tools; texts are cut to 1000 bytes.",
+      "patternProperties": {
+        "^[a-z0-9_]{1,40}$": {
+          "type": "string",
+          "pattern": "^[^|]+(\\|.*)?$"
+        },
+        "^[a-z0-9_]{1,40}\\.input$": {
+          "type": "string"
+        },
+        "^[a-z0-9_]{1,40}\\.readonly$": {
+          "type": "string",
+          "enum": ["yes", "no"]
         }
       },
       "additionalProperties": false

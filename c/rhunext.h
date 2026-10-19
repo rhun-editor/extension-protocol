@@ -133,6 +133,20 @@ typedef struct {
     size_t text_len;
 } rx_content;
 
+/* protocol 1.1, agents, proposals and tools (v1.1/v1.1.md, "Agents, proposals and tools") */
+typedef struct {
+    const char *id, *title, *model, *cwd;   /* id: 1 to 128 visible ASCII bytes; cwd "" for any project */
+    const char *state;                       /* idle, working, waiting or error; NULL is idle */
+    int64_t updated;                         /* Unix seconds of its last change */
+} rx_session;
+typedef struct { rx_buf recs; int64_t total; int n; size_t size; } rx_transcript;
+typedef struct {
+    int64_t proposal, index;        /* index from 1; 0 for done */
+    const char *state;              /* accepted, rejected, stale, partial or done */
+    int64_t accepted, hunks, rejected;  /* partial: hunks accepted of hunks; done: files */
+} rx_proposal_event;
+typedef struct { char *name, *title, *description, *input; int readonly; } rx_tool;
+
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -178,6 +192,18 @@ typedef struct {
      * closed. */
     int (*content)(rx_ext *ext, const char *uri, rx_content *out, void *user);
     void (*content_closed)(rx_ext *ext, const char *uri, void *user);
+    /* Feature agents: a session's messages from `from` (rx_transcript_add); 1 answers, 0 "unknown". */
+    int (*agent_transcript)(rx_ext *ext, const char *sid, int64_t from, rx_transcript *out, void *user);
+    /* Feature edit-review: what became of a proposal's file, or of the proposal. */
+    void (*proposal)(rx_ext *ext, const rx_proposal_event *ev, void *user);
+    /* Feature tools: a call of one of its [tools] (name without OWNER/NAME., caller OWNER/NAME):
+     * the output in out and 1, or the error's "CODE TEXT" in out and -1; 0 is "unknown". */
+    int (*tool)(rx_ext *ext, const char *name, const char *caller, const unsigned char *input, size_t len,
+                rx_buf *out, void *user);
+    /* Feature agent-prompts: a prompt for a session (sid "" starts one): its id in out and 1, or
+     * "CODE TEXT" and -1. agent_stop: the user's Stop. */
+    int (*agent_prompt)(rx_ext *ext, const char *sid, const char *text, size_t len, rx_buf *out, void *user);
+    void (*agent_stop)(rx_ext *ext, const char *sid, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -256,6 +282,27 @@ void rx_rec(rx_buf *b, const char *head, const void *data, size_t len);
 int64_t rx_view_patch(rx_ext *ext, int64_t view, const rx_patch *p);
 /* opens a declared view's place on it; focus 1 also gives it the keyboard; its view number */
 int64_t rx_vshow(rx_ext *ext, const char *name, int focus);
+
+/* Feature agents: replace its rows in the agents panel; say a session has total messages, the first
+ * changed one at first. 0, or -1 with rx_error. */
+int rx_agent_sessions(rx_ext *ext, const rx_session *s, int n);
+int rx_agent_changed(rx_ext *ext, const char *sid, int64_t total, int64_t first);
+/* a transcript answer: messages (role user, assistant, tool, result, error or info), then finish;
+ * set t->total to the session's count first. Stops adding at 2000 messages or 4 MB. */
+void rx_transcript_add(rx_transcript *t, const char *role, const char *name, const char *text, size_t len,
+                       const char *model);
+void rx_transcript_finish(rx_transcript *t, rx_buf *out);
+/* Feature edit-review: the proposal's id, or -1; unpropose withdraws one. */
+int64_t rx_propose(rx_ext *ext, const char *label, const char *sid, rx_wedit *edit);
+int rx_unpropose(rx_ext *ext, int64_t proposal);
+int rx_parse_proposal(const rx_event *ev, rx_proposal_event *out);  /* 1 for a proposal event */
+/* Feature tools: the list (rx_tools_free it), a call's output (the user may deny: refused). */
+int rx_tools(rx_ext *ext, rx_tool **tools, int *n);
+int rx_tools_parse(const unsigned char *body, size_t len, rx_tool **tools, int *n);
+void rx_tools_free(rx_tool *tools, int n);
+int rx_tool_call(rx_ext *ext, const char *tool, const void *input, size_t len, rx_buf *out);
+/* Feature agent-prompts: a card in a session; the option picked, from 0, or -1 (cancelled). */
+int rx_agent_ask(rx_ext *ext, const char *sid, const char *prompt, const char *const *options, int n);
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
 int rx_run(const char *features, const rx_handlers *h, void *user);
@@ -685,8 +732,9 @@ static const char rx_bad_len[] = "a body's length that is not a decimal of at mo
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
     if (line[0] >= '1' && line[0] <= '9') {
-        /* requests: ID commit-message ... LEN; vkids, vmore (the node id follows) */
-        static const char *const req[] = {"commit-message ", "vkids ", "vmore ", NULL};
+        /* requests: ID commit-message ... LEN; vkids, vmore (the node id follows); tool and
+         * agent-prompt (their input) */
+        static const char *const req[] = {"commit-message ", "vkids ", "vmore ", "tool ", "agent-prompt ", NULL};
         const char *v = strchr(line, ' ');
         if (!v) return 0;
         for (int i = 0; req[i]; i++)
@@ -769,7 +817,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
 
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
-                     strncmp(verb_args, "git-show ", 9) == 0;
+                     strncmp(verb_args, "git-show ", 9) == 0 ||
+                     strcmp(verb_args, "tools") == 0 || strncmp(verb_args, "tool-call ", 10) == 0;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {
@@ -2529,6 +2578,9 @@ static int rx_nums(char **f, int from, int to) {
     return 1;
 }
 
+static void rx_answer_ai(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                         const unsigned char *in, size_t in_len, int *ok, rx_buf *body);
+
 static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
                       const unsigned char *rbody, size_t rbody_len) {
     /* ID VERB DOC VERSION, then LINE COL KIND CHAR (12b to 12e), L1 C1 L2 C2 (actions), LINE COL
@@ -2664,8 +2716,16 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             }
             rx_buf_free(&msg);
         }
+    } else {
+        rx_answer_ai(ext, h, user, f, n, rbody, rbody_len, &ok, &body);
     }
-    if (ok && e.fail) {
+    if (ok < 0 && !e.fail) {        /* an AI handler's "CODE TEXT" */
+        rx_buf_add(&body, "", 1);
+        for (char *c = body.data; *c; c++)
+            if (*c == '\n' || *c == '\r') *c = ' ';
+        rx_buf_fmt(&line, "error %s %s", f[0], body.data[0] ? body.data : "refused");
+        rx_write(line.data, NULL, 0);
+    } else if (ok && e.fail) {
         rx_buf_fmt(&line, "error %s %s %s", f[0], e.fail, e.why);     /* why is one line */
         rx_write(line.data, NULL, 0);
     } else if (ok) {
@@ -2944,6 +3004,11 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                     rx_view_dispatch(ext, h, user, f, n);
             } else if (strcmp(f[1], "content-closed") == 0 && h->content_closed) {
                 h->content_closed(ext, ev.rest, user);
+            } else if (strcmp(f[1], "proposal") == 0 && h->proposal) {
+                rx_proposal_event pe;
+                if (rx_parse_proposal(&ev, &pe)) h->proposal(ext, &pe, user);
+            } else if (strcmp(f[1], "agent-stop") == 0 && n == 3 && h->agent_stop) {
+                h->agent_stop(ext, f[2], user);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "bye") == 0) {
@@ -2959,6 +3024,237 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
         free(copy);
         rx_free_msg(m);
         if (done) return 0;
+    }
+}
+
+/* ---- protocol 1.1: agents, proposals and tools ---- */
+
+static int rx_sid_ok(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n == 0 || n > 128) return 0;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)s[i] < 0x21 || (unsigned char)s[i] > 0x7e) return 0;
+    return 1;
+}
+
+static size_t rx_cut_len(const char *s, size_t n, size_t max) {
+    if (n <= max) return n;
+    while (max > 0 && ((unsigned char)s[max] & 0xc0) == 0x80) max--;
+    return max;
+}
+
+int rx_agent_sessions(rx_ext *ext, const rx_session *s, int n) {
+    rx_buf b = {NULL, 0, 0};
+    if (n < 0 || n > 1000) {
+        snprintf(ext->error, sizeof ext->error, "toobig %d sessions: at most 1000", n);
+        return -1;
+    }
+    rx_buf_fmt(&b, "%d\n", n);
+    for (int i = 0; i < n; i++) {
+        const char *cwd = s[i].cwd ? s[i].cwd : "";
+        int bad = !rx_sid_ok(s[i].id) || strchr(cwd, '\n') ||
+                  (*cwd && cwd[0] != '/' && cwd[0] != '\\' && !(cwd[0] && cwd[1] == ':'));
+        for (int k = 0; k < i && !bad; k++) bad = strcmp(s[k].id, s[i].id) == 0;
+        if (bad) {
+            snprintf(ext->error, sizeof ext->error, "syntax session %d: an id of 1 to 128 visible bytes, once; an absolute folder", i + 1);
+            rx_buf_free(&b);
+            return -1;
+        }
+        const char *title = s[i].title ? s[i].title : "", *model = s[i].model ? s[i].model : "";
+        size_t tl = rx_cut_len(title, strlen(title), 4096), ml = rx_cut_len(model, strlen(model), 4096);
+        rx_buf_fmt(&b, "%lld %s %zu %zu %zu %zu\n", (long long)s[i].updated, s[i].state ? s[i].state : "idle",
+                   strlen(s[i].id), tl, ml, strlen(cwd));
+        rx_buf_str(&b, s[i].id);
+        rx_buf_add(&b, title, tl);
+        rx_buf_add(&b, model, ml);
+        rx_buf_str(&b, cwd);
+    }
+    char line[64];
+    snprintf(line, sizeof line, "agent-sessions %zu", b.len);
+    int r = rx_request(ext, line, b.data, b.len, NULL, NULL);
+    rx_buf_free(&b);
+    return r;
+}
+
+int rx_agent_changed(rx_ext *ext, const char *sid, int64_t total, int64_t first) {
+    char line[256];
+    snprintf(line, sizeof line, "agent-changed %s %lld %lld", sid, (long long)total, (long long)first);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+void rx_transcript_add(rx_transcript *t, const char *role, const char *name, const char *text, size_t len,
+                       const char *model) {
+    name = name ? name : "", model = model ? model : "", text = text ? text : "";
+    size_t nl = rx_cut_len(name, strlen(name), 4096), tl = rx_cut_len(text, len, 71680),
+           ml = rx_cut_len(model, strlen(model), 4096);
+    size_t need = 40 + nl + tl + ml;
+    if (t->n >= 2000 || t->size + need > ((size_t)4 << 20) - 32) return;
+    rx_buf_fmt(&t->recs, "%s %zu %zu %zu\n", role, nl, tl, ml);
+    rx_buf_add(&t->recs, name, nl);
+    rx_buf_add(&t->recs, text, tl);
+    rx_buf_add(&t->recs, model, ml);
+    t->size += need;
+    t->n++;
+}
+
+void rx_transcript_finish(rx_transcript *t, rx_buf *out) {
+    rx_buf_fmt(out, "%lld %d\n", (long long)t->total, t->n);
+    rx_buf_add(out, t->recs.data, t->recs.len);
+    rx_buf_free(&t->recs);
+    t->n = 0, t->size = 0;
+}
+
+int64_t rx_propose(rx_ext *ext, const char *label, const char *sid, rx_wedit *edit) {
+    rx_buf e = {NULL, 0, 0}, b = {NULL, 0, 0};
+    sid = sid ? sid : "", label = label ? label : "";
+    if (rx_wedit_finish(edit, &e) && edit->fail) {
+        snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
+        rx_buf_free(&e);
+        return -1;
+    }
+    rx_buf_fmt(&b, "%zu %zu\n%s%s", strlen(label), strlen(sid), label, sid);
+    rx_buf_add(&b, e.data, e.len);
+    char line[64];
+    snprintf(line, sizeof line, "propose %zu", b.len);
+    int64_t id = rx_req_num(ext, line, b.data, b.len);
+    rx_buf_free(&e), rx_buf_free(&b);
+    return id;
+}
+
+int rx_unpropose(rx_ext *ext, int64_t proposal) {
+    char line[64];
+    snprintf(line, sizeof line, "unpropose %lld", (long long)proposal);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+int rx_parse_proposal(const rx_event *ev, rx_proposal_event *out) {
+    memset(out, 0, sizeof *out);
+    if (strcmp(ev->name, "proposal") != 0 || ev->argc < 3) return 0;
+    out->proposal = atoll(ev->argv[0]);
+    if (strcmp(ev->argv[1], "done") == 0) {
+        if (ev->argc < 4) return 0;
+        out->state = "done";
+        out->accepted = atoll(ev->argv[2]);
+        out->rejected = atoll(ev->argv[3]);
+        return 1;
+    }
+    out->index = atoll(ev->argv[1]);
+    out->state = ev->argv[2];
+    if (strcmp(out->state, "partial") == 0) {
+        if (ev->argc < 5) return 0;
+        out->accepted = atoll(ev->argv[3]);
+        out->hunks = atoll(ev->argv[4]);
+    }
+    return strcmp(out->state, "accepted") == 0 || strcmp(out->state, "rejected") == 0 ||
+           strcmp(out->state, "stale") == 0 || strcmp(out->state, "partial") == 0;
+}
+
+static char *rx_take_str(const unsigned char *b, size_t len, size_t *pos, size_t n) {
+    if (n > len - *pos) return NULL;
+    char *s = (char *)malloc(n + 1);
+    if (!s) abort();
+    memcpy(s, b + *pos, n);
+    s[n] = 0;
+    *pos += n;
+    return s;
+}
+
+int rx_tools_parse(const unsigned char *body, size_t len, rx_tool **tools, int *n) {
+    *tools = NULL, *n = 0;
+    size_t pos = 0;
+    char head[400];
+    long long count = -1;
+    const unsigned char *nl = (const unsigned char *)memchr(body, '\n', len);
+    if (!nl || nl - body > 20) return -1;
+    memcpy(head, body, (size_t)(nl - body));
+    head[nl - body] = 0;
+    count = atoll(head);
+    pos = (size_t)(nl - body) + 1;
+    if (count < 0 || count > 100000) return -1;
+    rx_tool *v = (rx_tool *)calloc((size_t)(count ? count : 1), sizeof *v);
+    if (!v) abort();
+    for (long long i = 0; i < count; i++) {
+        nl = (const unsigned char *)memchr(body + pos, '\n', len - pos);
+        if (!nl || (size_t)(nl - body - pos) >= sizeof head) goto bad;
+        memcpy(head, body + pos, (size_t)(nl - body - pos));
+        head[nl - body - pos] = 0;
+        pos = (size_t)(nl - body) + 1;
+        char name[300], flags[8];
+        size_t tl, dl, il;
+        if (sscanf(head, "%299s %7s %zu %zu %zu", name, flags, &tl, &dl, &il) != 5) goto bad;
+        v[i].name = (char *)malloc(strlen(name) + 1);
+        if (!v[i].name) abort();
+        strcpy(v[i].name, name);
+        v[i].readonly = strcmp(flags, "ro") == 0;
+        *n = (int)i + 1;
+        if (!(v[i].title = rx_take_str(body, len, &pos, tl)) || !(v[i].description = rx_take_str(body, len, &pos, dl)) ||
+            !(v[i].input = rx_take_str(body, len, &pos, il)))
+            goto bad;
+    }
+    *tools = v, *n = (int)count;
+    return 0;
+bad:
+    rx_tools_free(v, *n);
+    *n = 0;
+    return -1;
+}
+
+void rx_tools_free(rx_tool *tools, int n) {
+    for (int i = 0; tools && i < n; i++) {
+        free(tools[i].name), free(tools[i].title), free(tools[i].description), free(tools[i].input);
+    }
+    free(tools);
+}
+
+int rx_tools(rx_ext *ext, rx_tool **tools, int *n) {
+    rx_buf body = {NULL, 0, 0};
+    *tools = NULL, *n = 0;
+    if (rx_request(ext, "tools", NULL, 0, NULL, &body) < 0) return -1;
+    int r = rx_tools_parse((const unsigned char *)(body.data ? body.data : ""), body.len, tools, n);
+    if (r < 0) snprintf(ext->error, sizeof ext->error, "syntax the tool list cannot be read");
+    rx_buf_free(&body);
+    return r;
+}
+
+int rx_tool_call(rx_ext *ext, const char *tool, const void *input, size_t len, rx_buf *out) {
+    char line[512];
+    snprintf(line, sizeof line, "tool-call %s %zu", tool, len);
+    return rx_request(ext, line, input, len, NULL, out);
+}
+
+int rx_agent_ask(rx_ext *ext, const char *sid, const char *prompt, const char *const *options, int n) {
+    rx_buf b = {NULL, 0, 0};
+    rx_buf_str(&b, prompt);
+    for (int i = 0; i < n; i++) {
+        rx_buf_add(&b, "\n", 1);
+        rx_buf_str(&b, options[i]);
+    }
+    for (size_t i = 0; i < b.len; i++)
+        if (b.data[i] == '\r') b.data[i] = ' ';
+    char line[256];
+    snprintf(line, sizeof line, "agent-ask %s %zu", sid, b.len);
+    int64_t pick = rx_req_num(ext, line, b.data, b.len);
+    rx_buf_free(&b);
+    return pick > 0 ? (int)pick - 1 : -1;
+}
+
+static void rx_answer_ai(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                         const unsigned char *in, size_t in_len, int *ok, rx_buf *body) {
+    const char *verb = f[1];
+    if (strcmp(verb, "agent-transcript") == 0 && n == 4 && h->agent_transcript && rx_has(ext, "agents") &&
+        rx_nums(f, 3, 4)) {
+        rx_transcript t;
+        memset(&t, 0, sizeof t);
+        if ((*ok = h->agent_transcript(ext, f[2], atoll(f[3]), &t, user)) > 0) rx_transcript_finish(&t, body);
+        rx_buf_free(&t.recs);
+    } else if (strcmp(verb, "tool") == 0 && n == 5 && h->tool && rx_has(ext, "tools")) {
+        *ok = h->tool(ext, f[2], f[3], in ? in : (const unsigned char *)"", in_len, body, user);
+    } else if (strcmp(verb, "agent-prompt") == 0 && n == 4 && h->agent_prompt && rx_has(ext, "agent-prompts")) {
+        rx_buf text = {NULL, 0, 0};
+        rx_buf_add(&text, in ? (const char *)in : "", in_len);
+        rx_buf_add(&text, "", 1);
+        *ok = h->agent_prompt(ext, strcmp(f[2], "-") == 0 ? "" : f[2], text.data, in_len, body, user);
+        rx_buf_free(&text);
     }
 }
 

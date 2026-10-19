@@ -37,6 +37,7 @@
 
 #![allow(clippy::needless_doctest_main)]
 
+pub mod ai;
 pub mod chart;
 pub mod complete;
 pub mod lang;
@@ -183,6 +184,14 @@ pub enum Feature {
     /// Test controllers (protocol 1.1): [`Handler::resolve_tests`], [`Handler::run_tests`],
     /// [`Ext::set_test_items`], [`Ext::test_exec`].
     Tests,
+    /// Agent sessions in rhun's agents panel: [`Ext::agent_sessions`], [`Handler::agent_transcript`].
+    Agents,
+    /// Edit proposals the user reviews: [`Ext::propose`], [`Handler::proposal`].
+    EditReview,
+    /// Tools called through rhun: [`Ext::tools`], [`Ext::tool_call`], [`Handler::tool`].
+    Tools,
+    /// Prompts, Stop and cards for its sessions: [`Handler::agent_prompt`], [`Ext::agent_ask`].
+    AgentPrompts,
 }
 
 impl Feature {
@@ -211,6 +220,10 @@ impl Feature {
             Feature::Secrets => "secrets",
             Feature::Uris => "uris",
             Feature::Tests => "tests",
+            Feature::Agents => "agents",
+            Feature::EditReview => "edit-review",
+            Feature::Tools => "tools",
+            Feature::AgentPrompts => "agent-prompts",
         }
     }
 }
@@ -638,6 +651,35 @@ pub trait Handler: Send {
     /// The user cancelled a run: stop it and end it with [`Ext::end_test_run`] (rhun stops its
     /// processes after 2 s and ends it itself after 5 s).
     fn cancel_tests(&mut self, _ext: &Ext, _run: u64) {}
+    /// rhun asks for messages of one of its sessions from index `from` (feature agents).
+    fn agent_transcript(
+        &mut self,
+        _ext: &Ext,
+        _sid: &str,
+        _from: u64,
+    ) -> Result<ai::Transcript, ai::Refusal> {
+        Err(ai::Refusal::new("refused", "no such session"))
+    }
+    /// What became of a proposal's file, or of the proposal (feature edit-review).
+    fn proposal(&mut self, _ext: &Ext, _ev: ai::ProposalEvent) {}
+    /// Another extension calls one of its [tools] (feature tools): the output, or why not. The
+    /// input is opaque to rhun. Handlers run one at a time, so a long tool holds up the events
+    /// behind it.
+    fn tool(&mut self, _ext: &Ext, _call: &ai::ToolCall) -> Result<Vec<u8>, ai::Refusal> {
+        Err(ai::Refusal::new("refused", "no such tool"))
+    }
+    /// The user sent a prompt to one of its sessions, or with `sid` None started a new one
+    /// (feature agent-prompts): the session's id.
+    fn agent_prompt(
+        &mut self,
+        _ext: &Ext,
+        _sid: Option<&str>,
+        _text: &str,
+    ) -> Result<String, ai::Refusal> {
+        Err(ai::Refusal::new("refused", "this extension takes no prompts"))
+    }
+    /// The user pressed Stop in one of its sessions (feature agent-prompts).
+    fn agent_stop(&mut self, _ext: &Ext, _sid: &str) {}
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
     /// rhun asks for a virtual document's text (feature `uris`): a URI of one of the schemes in
@@ -656,7 +698,7 @@ enum Msg {
         verb: String,
         fields: Vec<String>,
         /// The body of a request that has one (`commit-message`, `vkids`, `vmore`,
-        /// `tests-resolve`, `test-run`).
+        /// `tests-resolve`, `test-run`, `tool`, `agent-prompt`).
         body: Vec<u8>,
     },
     /// a reply went to the request waiting for it
@@ -1275,6 +1317,8 @@ impl Ext {
                                 | "git-show"
                                 | "secret-get"
                                 | "secret-keys"
+                                | "tools"
+                                | "tool-call"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1373,6 +1417,8 @@ impl Ext {
                             v if views::request_has_body(v) => Some(4096),
                             // tests: the parent item's id, the run's items
                             "tests-resolve" | "test-run" => Some(4 << 20),
+                            // a tool call and a prompt (at most 4 MB)
+                            "tool" | "agent-prompt" => Some(4 << 20),
                             _ => None,
                         };
                         let mut body = Vec::new();
@@ -1489,6 +1535,16 @@ impl Ext {
                                 h.cancel_tests(self, run);
                             }
                         }
+                        "proposal" => {
+                            if let Some(p) = ai::ProposalEvent::parse(&ev.fields) {
+                                h.proposal(self, p);
+                            }
+                        }
+                        "agent-stop" => {
+                            if let Some(sid) = ev.fields.first() {
+                                h.agent_stop(self, sid);
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             return false;
@@ -1586,6 +1642,36 @@ impl Ext {
                                 },
                             }
                         }
+                        "agent-transcript" if self.has(Feature::Agents) => {
+                            match (fields.first(), fields.get(1).and_then(|f| f.parse().ok())) {
+                                (Some(sid), Some(from)) => Some(
+                                    h.agent_transcript(self, sid, from)
+                                        .map(|t| t.encode())
+                                        .map_err(|r| (refusal_code(&r.code), r.text)),
+                                ),
+                                _ => None,
+                            }
+                        }
+                        "tool" if self.has(Feature::Tools) && fields.len() == 3 => {
+                            let call = ai::ToolCall {
+                                name: fields[0].clone(),
+                                caller: fields[1].clone(),
+                                input: req_body,
+                            };
+                            Some(
+                                h.tool(self, &call)
+                                    .map_err(|r| (refusal_code(&r.code), r.text)),
+                            )
+                        }
+                        "agent-prompt" if self.has(Feature::AgentPrompts) && fields.len() == 2 => {
+                            let sid = fields[0].as_str();
+                            let text = String::from_utf8_lossy(&req_body).into_owned();
+                            Some(
+                                h.agent_prompt(self, if sid == "-" { None } else { Some(sid) }, &text)
+                                    .map(|s| s.into_bytes())
+                                    .map_err(|r| (refusal_code(&r.code), r.text)),
+                            )
+                        }
                         _ => None,
                     };
                     let _ = match body {
@@ -1633,6 +1719,24 @@ fn code_str(code: &str) -> &'static str {
         "nofile" => "nofile",
         "nodoc" => "nodoc",
         "timeout" => "timeout",
+        _ => "refused",
+    }
+}
+
+/// An error code of the protocol for a refusal (anything else travels as refused).
+fn refusal_code(code: &str) -> &'static str {
+    match code {
+        "syntax" => "syntax",
+        "unknown" => "unknown",
+        "needs" => "needs",
+        "nodoc" => "nodoc",
+        "nofile" => "nofile",
+        "readonly" => "readonly",
+        "stale" => "stale",
+        "badpos" => "badpos",
+        "toobig" => "toobig",
+        "busy" => "busy",
+        "cancelled" => "cancelled",
         _ => "refused",
     }
 }

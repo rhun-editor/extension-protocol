@@ -52,6 +52,7 @@ type manifest struct {
 	provides                    map[string]string
 	views                       map[string]string // [views] KEY.FIELD -> value (views.go)
 	top                         map[string]string // top-level keys of later features (idle, runs)
+	tools                       []string          // [tools] names (protocol 1.1)
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -137,6 +138,10 @@ func readManifest(dir string) (*manifest, error) {
 				m.views = map[string]string{}
 			}
 			m.views[k] = v
+		case "tools":
+			if !strings.Contains(k, ".") {
+				m.tools = append(m.tools, k)
+			}
 		}
 	}
 	return m, nil
@@ -391,7 +396,8 @@ type message struct {
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
 	"vpatch": true, "vreveal": true, // retained views: views.go
-	"secret-set": true} // resources: resources.go
+	"secret-set":     true,                                                        // resources: resources.go
+	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true} // ai: ai.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1080,6 +1086,17 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "cancel":
 		reply(fmt.Sprintf("ok %d", id))
+	case "agent-sessions", "agent-changed", "propose", "unpropose", "tools", "tool-call", "agent-ask":
+		var b []byte
+		ok := true
+		if bodyVerbs[verb] {
+			if len(args) == 0 {
+				rerr("syntax", "cannot parse the line")
+				return
+			}
+			b, ok = body(args[len(args)-1])
+		}
+		h.aiRequest(id, verb, args, b, ok, reply, rerr)
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
@@ -1552,6 +1569,7 @@ func main() {
 	// 2c. section 12: the requests rhun sends (completion, signature help, definition, references,
 	// symbols, code actions, rename, format), and the views it opened
 	h.checkFeatures()
+	h.checkAI()
 
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")

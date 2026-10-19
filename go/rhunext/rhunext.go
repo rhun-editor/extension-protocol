@@ -298,6 +298,14 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				}
 			}
 			h.Event(ext, ev)
+		case "agent-stop":
+			if p, ok := h.(Prompter); ok {
+				if sid, ok := ParseAgentStop(ev); ok {
+					p.AgentStop(ext, sid)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		case "view":
 			if rv, ok := h.(RetainedViewer); ok {
 				if open, ok := parseViewOpen(ev); ok {
@@ -501,6 +509,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		}
 		if len(fields) > 2 && (fields[1] == "tests-resolve" || fields[1] == "test-run") {
 			n, ok := bodyLen(fields[len(fields)-1], MaxEventBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		// a tool call and a prompt carry their input (at most 4 MB)
+		if len(fields) > 2 && (fields[1] == "tool" || fields[1] == "agent-prompt") {
+			n, ok := bodyLen(fields[len(fields)-1], MaxAIBody)
 			if !ok {
 				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
 			}

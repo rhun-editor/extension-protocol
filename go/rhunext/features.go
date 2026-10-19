@@ -569,6 +569,8 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 			}
 			known = true
 		}
+	case "agent-transcript", "tool", "agent-prompt":
+		body, rerr, known = e.answerAI(h, f, reqBody)
 	default:
 		body, rerr, known = e.answerLang(h, f[1], f[2:])
 	}
