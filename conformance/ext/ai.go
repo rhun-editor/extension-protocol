@@ -315,3 +315,22 @@ func containsString(list []string, s string) bool {
 	}
 	return false
 }
+
+// agentsProvidesProblem checks the [provides] keys of agent sessions: handled is false for other
+// keys; why is empty when the value is one rhun takes (agents yes or no, agents.title at most 80
+// bytes)
+func agentsProvidesProblem(k, v string) (handled bool, why string) {
+	switch k {
+	case "agents":
+		if v != "yes" && v != "no" {
+			return true, fmt.Sprintf("[provides] agents = %s is not yes or no", v)
+		}
+		return true, ""
+	case "agents.title":
+		if len(v) > 80 {
+			return true, "[provides] agents.title is longer than 80 bytes"
+		}
+		return true, ""
+	}
+	return false, ""
+}

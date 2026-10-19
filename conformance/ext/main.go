@@ -1578,6 +1578,12 @@ func main() {
 		if notebook && k == "notebook.kernel" && v != "yes" && v != "no" {
 			bad("[provides] notebook.kernel is yes or no")
 		}
+		if handled, why := agentsProvidesProblem(k, v); handled { // agent sessions (ai.go)
+			if why != "" {
+				bad(why)
+			}
+			continue
+		}
 		if k == "commit_message" || k == "scm" { // source control: yes or no
 			if v != "yes" && v != "no" {
 				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))

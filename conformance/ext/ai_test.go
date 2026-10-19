@@ -39,3 +39,24 @@ func TestAgentAskGrammar(t *testing.T) {
 		})
 	}
 }
+
+// [provides] agents and agents.title are manifest keys of the agents feature
+func TestAgentsProvidesKeys(t *testing.T) {
+	cases := []struct {
+		k, v          string
+		handled, fail bool
+	}{
+		{"agents", "yes", true, false},
+		{"agents", "no", true, false},
+		{"agents", "maybe", true, true},
+		{"agents.title", "Gemini CLI", true, false},
+		{"agents.title", string(make([]byte, 81)), true, true},
+		{"complete", "*.go", false, false},
+	}
+	for _, c := range cases {
+		handled, why := agentsProvidesProblem(c.k, c.v)
+		if handled != c.handled || (why != "") != c.fail {
+			t.Fatalf("%s = %q: handled %v, why %q", c.k, c.v, handled, why)
+		}
+	}
+}
