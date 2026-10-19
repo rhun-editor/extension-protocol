@@ -360,12 +360,8 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-<<<<<<< HEAD
-var bodyVerbs = map[string]bool{"secret-set": true, "replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
-=======
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
+var bodyVerbs = map[string]bool{"secret-set": true, "replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true} // source control: scm.go
->>>>>>> rhun-0.18
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1359,9 +1355,6 @@ func main() {
 		}
 	}
 	for k := range m.provides {
-<<<<<<< HEAD
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" && k != "schemes" {
-=======
 		if k == "commit_message" || k == "scm" { // source control: yes or no
 			if v := m.provides[k]; v != "yes" && v != "no" {
 				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))
@@ -1371,8 +1364,7 @@ func main() {
 		if k == "quickdiff" {
 			continue
 		}
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
->>>>>>> rhun-0.18
+		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" && k != "schemes" {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
 	}

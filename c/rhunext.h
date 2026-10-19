@@ -152,13 +152,11 @@ typedef struct {
     int (*rename)(rx_ext *ext, const rx_rename_ask *req, rx_wedit *out, void *user);
     int (*format)(rx_ext *ext, const rx_format_ask *req, rx_wedit *out, void *user);
     int (*save_actions)(rx_ext *ext, const rx_save_actions_ask *req, rx_wedit *out, void *user);
-<<<<<<< HEAD
     /* Resources group, feature uris: fill out for a URI of one of the schemes in [provides]
      * schemes and return 1, or return 0 for "nofile"; content_closed: the last tab showing it
      * closed. */
     int (*content)(rx_ext *ext, const char *uri, rx_content *out, void *user);
     void (*content_closed)(rx_ext *ext, const char *uri, void *user);
-=======
     /* Commit messages (feature "commit-message", [provides] commit_message = yes): append the
      * message to out and return 1; append why not and return -1 (the user sees it); 0 for
      * "unknown". req's strings live until it returns. */
@@ -166,7 +164,6 @@ typedef struct {
     /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
      * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
     int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
->>>>>>> rhun-0.18
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -193,7 +190,6 @@ int rx_unregister(rx_ext *ext, const char *name);
 int64_t rx_watch_workspace(rx_ext *ext);
 int rx_unwatch_workspace(rx_ext *ext, int64_t watch);
 int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan);
-<<<<<<< HEAD
 /* Resources group (protocol 1.1). Feature "idle": not stopped for idleness while busy. */
 int rx_busy(rx_ext *ext, int busy);
 /* Feature "secrets" ([needs] secrets = yes): KEY is 1 to 64 bytes of a-z 0-9 _ . -, a value at
@@ -209,7 +205,6 @@ int rx_secret_key_valid(const char *key);
  * without LF, CR or NUL. rx_open takes a URI too; rx_content_changed asks rhun to read again. */
 int rx_uri_valid(const char *uri);
 int rx_content_changed(rx_ext *ext, const char *uri);
-=======
 /* Source control (protocol 1.1). Feature "git-data" with [needs] git = read: rhun's Git data.
  * Requests return 0 on ok (-1 and rx_error otherwise); results own their body: free them with
  * their _free function. Strings point into the body and are not NUL-terminated (use the lengths).
@@ -268,7 +263,6 @@ int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, r
 /* what quickdiff gets; rx_quickdiff_refresh asks rhun to ask again for a file (NULL: every file) */
 typedef struct rx_quickdiff_ask_s { int64_t id; rx_doc doc; int64_t version; } rx_quickdiff_ask;
 int rx_quickdiff_refresh(rx_ext *ext, const char *path);
->>>>>>> rhun-0.18
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -664,13 +658,11 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     int context_body = strncmp(verb_args, "snippet-context ", 16) == 0;
     int wants_body = strncmp(verb_args, "text ", 5) == 0 || strncmp(verb_args, "range ", 6) == 0 ||
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
-<<<<<<< HEAD
-                     strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0;
-=======
+                     strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0 ||
+
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
                      strncmp(verb_args, "git-show ", 9) == 0;
->>>>>>> rhun-0.18
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {

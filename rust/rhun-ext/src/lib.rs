@@ -151,14 +151,6 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
-<<<<<<< HEAD
-    /// Not stopped for idleness while busy: [`Ext::busy`] (resources group).
-    Idle,
-    /// Passwords and tokens in the system keychain: [`Ext::secret_get`] and the others.
-    Secrets,
-    /// URIs and virtual documents: [`Handler::content`], [`Ext::open_uri`], [`Ext::content_changed`].
-    Uris,
-=======
     /// Git data through rhun: [`Ext::git_repo`], [`Ext::git_status`], [`Ext::git_blame`],
     /// [`Ext::git_log`], [`Ext::git_show`], [`Ext::git_diff_open`]; needs `[needs] git = read`.
     GitData,
@@ -167,7 +159,12 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
->>>>>>> rhun-0.18
+    /// Not stopped for idleness while busy: [`Ext::busy`] (resources group).
+    Idle,
+    /// Passwords and tokens in the system keychain: [`Ext::secret_get`] and the others.
+    Secrets,
+    /// URIs and virtual documents: [`Handler::content`], [`Ext::open_uri`], [`Ext::content_changed`].
+    Uris,
 }
 
 impl Feature {
@@ -188,15 +185,12 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
-<<<<<<< HEAD
-            Feature::Idle => "idle",
-            Feature::Secrets => "secrets",
-            Feature::Uris => "uris",
-=======
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
->>>>>>> rhun-0.18
+            Feature::Idle => "idle",
+            Feature::Secrets => "secrets",
+            Feature::Uris => "uris",
         }
     }
 }
@@ -1103,10 +1097,6 @@ impl Ext {
                     let verb = waiter.as_ref().map(|w| w.0.as_str()).unwrap_or("");
                     let mut body = Vec::new();
                     if fields[0] == "ok"
-<<<<<<< HEAD
-                        && matches!(verb, "text" | "range" | "ask" | "snippet-context"
-                            | "secret-get" | "secret-keys")
-=======
                         && matches!(
                             verb,
                             "text"
@@ -1118,8 +1108,9 @@ impl Ext {
                                 | "git-blame"
                                 | "git-log"
                                 | "git-show"
+                                | "secret-get"
+                                | "secret-keys"
                         )
->>>>>>> rhun-0.18
                     {
                         let len: usize = if verb == "snippet-context" {
                             match fields

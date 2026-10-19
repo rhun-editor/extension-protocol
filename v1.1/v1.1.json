@@ -155,15 +155,6 @@
           "type": "string",
           "description": "programs the extension may start, by name, space separated"
         },
-<<<<<<< HEAD
-        "secrets": {
-          "enum": [
-            "no",
-            "yes"
-          ],
-          "default": "no",
-          "description": "store passwords and tokens in the system keychain (feature secrets)"
-=======
         "git": {
           "enum": [
             "none",
@@ -171,7 +162,14 @@
           ],
           "default": "none",
           "description": "read the project's Git data through rhun (feature git-data); shown as 'read the project's Git history'"
->>>>>>> rhun-0.18
+        },
+        "secrets": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "store passwords and tokens in the system keychain (feature secrets)"
         }
       },
       "additionalProperties": false
@@ -246,11 +244,6 @@
           "$ref": "#/$defs/patterns",
           "description": "Source code actions before saving; requires negotiated save-actions and documents=write."
         },
-<<<<<<< HEAD
-        "schemes": {
-          "type": "string",
-          "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
-=======
         "commit_message": {
           "enum": [
             "yes",
@@ -270,7 +263,10 @@
           ],
           "default": "no",
           "description": "a version control provider (feature scm): it registers Source Control tabs at run time"
->>>>>>> rhun-0.18
+        },
+        "schemes": {
+          "type": "string",
+          "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
         }
       },
       "additionalProperties": false
