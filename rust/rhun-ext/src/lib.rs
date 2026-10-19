@@ -29,6 +29,11 @@
 //! [`Feature::Complete`], [`Feature::Signature`], [`Feature::Definition`], [`Feature::References`],
 //! [`Feature::Symbols`], [`Feature::Actions`], [`Feature::Rename`] and [`Feature::Format`] for
 //! language support (the [`Handler`] methods of the same names answer them).
+//!
+//! Built for `wasm32-wasip1` (rhun runs such extensions itself, in any system: see
+//! `run.wasm32-wasip1` in the spec), the crate needs no threads: a request reads rhun's input
+//! itself until its reply comes, and keeps the events it reads meanwhile for later, so the
+//! behaviour is the same.
 
 #![allow(clippy::needless_doctest_main)]
 
@@ -44,11 +49,12 @@ pub mod views;
 pub mod watch;
 pub mod resources;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "wasi"))]
 use std::thread;
 
 pub use complete::{
@@ -623,7 +629,16 @@ enum Msg {
         /// The body of a request that has one (`commit-message`, `vkids`, `vmore`).
         body: Vec<u8>,
     },
+    /// a reply went to the request waiting for it
+    Delivered,
     End,
+}
+
+/// Without threads (`wasm32-wasip1`): rhun's input, read by whoever waits, and the events and
+/// requests read while a request waited for its reply, delivered after it in order.
+struct Inline {
+    input: Mutex<Box<dyn BufRead + Send>>,
+    queue: Mutex<VecDeque<Msg>>,
 }
 
 type Waiter = Sender<Result<Reply, Error>>;
@@ -653,6 +668,7 @@ pub struct Ext {
     shared: Arc<Mutex<Shared>>,
     pending: Arc<Mutex<Pending>>,
     features: Arc<Mutex<Vec<String>>>,
+    inline: Option<Arc<Inline>>,
 }
 
 /// Speaks the protocol over standard input and output until rhun stops the extension, with
@@ -668,13 +684,15 @@ where
     W: Write + Send + 'static,
     H: Handler + 'static,
 {
-    let ext = Ext {
+    #[allow(unused_mut)]
+    let mut ext = Ext {
         shared: Arc::new(Mutex::new(Shared {
             out: Box::new(output),
             next_id: 1,
         })),
         pending: Arc::new(Mutex::new(Pending::default())),
         features: Arc::new(Mutex::new(Vec::new())),
+        inline: None,
     };
     let mut hello = String::from("hello 1");
     for f in features {
@@ -682,12 +700,23 @@ where
         hello.push_str(f.name());
     }
     ext.write(&hello, &[])?;
-    let (tx, rx) = channel();
+    #[cfg(not(target_os = "wasi"))]
     {
-        let ext = ext.clone();
-        thread::spawn(move || ext.reader(BufReader::new(input), tx));
+        let (tx, rx) = channel();
+        {
+            let ext = ext.clone();
+            thread::spawn(move || ext.reader(BufReader::new(input), tx));
+        }
+        ext.dispatch(rx, &mut handler);
     }
-    ext.dispatch(rx, &mut handler);
+    #[cfg(target_os = "wasi")]
+    {
+        ext.inline = Some(Arc::new(Inline {
+            input: Mutex::new(Box::new(BufReader::new(input))),
+            queue: Mutex::new(VecDeque::new()),
+        }));
+        ext.dispatch_inline(&mut handler);
+    }
     Ok(())
 }
 
@@ -737,6 +766,31 @@ impl Ext {
                 code: "io".into(),
                 text: e.to_string(),
             });
+        }
+        self.wait(rx)
+    }
+
+    /// The reply for a request: from the reader thread, or (without threads) read here.
+    fn wait(&self, rx: Receiver<Result<Reply, Error>>) -> Result<Reply, Error> {
+        if let Some(inline) = &self.inline {
+            loop {
+                if let Ok(reply) = rx.try_recv() {
+                    return reply;
+                }
+                let msg = {
+                    let mut input = inline.input.lock().unwrap();
+                    self.read_msg(&mut **input)
+                };
+                match msg {
+                    Msg::Delivered => {}
+                    Msg::End => {
+                        self.close();
+                        inline.queue.lock().unwrap().push_back(Msg::End);
+                        return rx.try_recv().unwrap_or_else(|_| Err(closed_error()));
+                    }
+                    other => inline.queue.lock().unwrap().push_back(other),
+                }
+            }
         }
         rx.recv().unwrap_or_else(|_| Err(closed_error()))
     }
@@ -1123,12 +1177,40 @@ impl Ext {
 
     // ---- reading ----
 
+    #[cfg(not(target_os = "wasi"))]
     fn reader<R: BufRead>(&self, mut input: R, tx: Sender<Msg>) {
+        loop {
+            match self.read_msg(&mut input) {
+                Msg::Delivered => {}
+                Msg::End => break,
+                msg => {
+                    if tx.send(msg).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        self.close();
+        let _ = tx.send(Msg::End);
+    }
+
+    /// rhun is gone: every waiting request fails, later ones fail at once
+    fn close(&self) {
+        let mut p = self.pending.lock().unwrap();
+        p.closed = true;
+        for (_, (_, w)) in p.waiters.drain() {
+            let _ = w.send(Err(closed_error()));
+        }
+    }
+
+    /// Reads one message: a reply goes to its waiter (Delivered); End when rhun's input ends or
+    /// breaks the framing.
+    fn read_msg(&self, input: &mut dyn BufRead) -> Msg {
         let mut line = Vec::new();
         loop {
             line.clear();
             match input.read_until(b'\n', &mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => return Msg::End,
                 Ok(_) => {}
             }
             while matches!(line.last(), Some(b'\n') | Some(b'\r')) {
@@ -1168,14 +1250,14 @@ impl Ext {
                                 .and_then(|v| usize::try_from(v).ok())
                             {
                                 Some(n) if n <= snippet::MAX_BODY => n,
-                                _ => break,
+                                _ => return Msg::End,
                             }
                         } else {
                             fields.last().and_then(|v| v.parse().ok()).unwrap_or(0)
                         };
                         body = vec![0; len];
                         if input.read_exact(&mut body).is_err() {
-                            break;
+                            return Msg::End;
                         }
                     }
                     let res = if fields[0] == "ok" {
@@ -1192,6 +1274,7 @@ impl Ext {
                     if let Some((_, w)) = waiter {
                         let _ = w.send(res);
                     }
+                    return Msg::Delivered;
                 }
                 "0" => {
                     let name = fields.get(1).cloned().unwrap_or_default();
@@ -1209,19 +1292,17 @@ impl Ext {
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
                             Some(n) if n <= 4 << 20 => n,
-                            _ => break,
+                            _ => return Msg::End,
                         };
                         ev.body = vec![0; len];
                         if input.read_exact(&mut ev.body).is_err() {
-                            break;
+                            return Msg::End;
                         }
                     }
                     if ev.name == "features" {
                         *self.features.lock().unwrap() = ev.fields.clone();
                     }
-                    if tx.send(Msg::Event(ev)).is_err() {
-                        break;
-                    }
+                    return Msg::Event(ev);
                 }
                 id => {
                     // a request from rhun (section 12): ID VERB FIELDS
@@ -1240,42 +1321,68 @@ impl Ext {
                         if let Some(max) = body_max {
                             let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
                                 Some(n) if n <= max => n,
-                                _ => break,
+                                _ => return Msg::End,
                             };
                             body = vec![0; len];
                             if input.read_exact(&mut body).is_err() {
-                                break;
+                                return Msg::End;
                             }
                         }
-                        if tx
-                            .send(Msg::HostRequest {
-                                id,
-                                verb,
-                                fields: rest,
-                                body,
-                            })
-                            .is_err()
-                        {
-                            break;
-                        }
+                        return Msg::HostRequest {
+                            id,
+                            verb,
+                            fields: rest,
+                            body,
+                        };
                     }
                 }
             }
         }
-        // rhun is gone: every waiting request fails, later ones fail at once, the handler loop ends
-        let mut p = self.pending.lock().unwrap();
-        p.closed = true;
-        for (_, (_, w)) in p.waiters.drain() {
-            let _ = w.send(Err(closed_error()));
-        }
-        drop(p);
-        let _ = tx.send(Msg::End);
     }
 
+    /// The handler loop without threads: queued messages first, then rhun's input.
+    #[cfg(target_os = "wasi")]
+    fn dispatch_inline<H: Handler>(&self, h: &mut H) {
+        let inline = self.inline.clone().expect("inline input");
+        loop {
+            let queued = inline.queue.lock().unwrap().pop_front();
+            let msg = match queued {
+                Some(m) => m,
+                None => {
+                    let mut input = inline.input.lock().unwrap();
+                    self.read_msg(&mut **input)
+                }
+            };
+            match msg {
+                Msg::Delivered => {}
+                Msg::End => {
+                    self.close();
+                    break;
+                }
+                msg => {
+                    if !self.handle(msg, h) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "wasi"))]
     fn dispatch<H: Handler>(&self, rx: Receiver<Msg>, h: &mut H) {
         while let Ok(msg) = rx.recv() {
+            if !self.handle(msg, h) {
+                break;
+            }
+        }
+    }
+
+    /// One event or request from rhun for the handler; false when the session ends.
+    fn handle<H: Handler>(&self, msg: Msg, h: &mut H) -> bool {
+        {
             match msg {
-                Msg::End => break,
+                Msg::End => return false,
+                Msg::Delivered => {}
                 Msg::Event(ev) => {
                     h.event(self, &ev);
                     match ev.name.as_str() {
@@ -1321,7 +1428,7 @@ impl Ext {
                         "content-closed" => h.content_closed(self, &ev.rest),
                         "bye" => {
                             h.bye(self);
-                            break;
+                            return false;
                         }
                         _ => {}
                     }
@@ -1428,6 +1535,7 @@ impl Ext {
                 }
             }
         }
+        true
     }
 }
 

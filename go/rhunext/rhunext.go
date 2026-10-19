@@ -5,6 +5,10 @@
 // Usage: implement Handler, then call Run. Events arrive one at a time on a single goroutine;
 // requests may be made from any goroutine, including from inside an event handler, and block
 // until rhun answers.
+//
+// Built with GOOS=wasip1 GOARCH=wasm, an extension is one module rhun runs itself on every system
+// (run.wasm32-wasip1 in the manifest); Run then reads standard input non-blocking, so the other
+// goroutines keep running while it waits.
 package rhunext
 
 import (
@@ -174,7 +178,7 @@ type result struct {
 // Run talks to rhun over stdin and stdout until rhun says bye or closes the pipe. It returns
 // nil on bye, io.EOF when rhun went away, or the protocol error that ended the exchange.
 func Run(h Handler) error {
-	return RunOn(os.Stdin, os.Stdout, os.Stderr, h)
+	return RunOn(stdin(), os.Stdout, os.Stderr, h)
 }
 
 // RunOn is Run on explicit streams (tests).
@@ -186,7 +190,7 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 // FeatureSignature, FeatureDefinition, FeatureReferences, FeatureSymbols, FeatureActions,
 // FeatureRename, FeatureFormat. Those rhun agrees to are in Ext.Has before Ready is called.
 func RunWith(features []string, h Handler) error {
-	return RunOnWith(os.Stdin, os.Stdout, os.Stderr, features, h)
+	return RunOnWith(stdin(), os.Stdout, os.Stderr, features, h)
 }
 
 // RunOnWith is RunWith on explicit streams (tests).

@@ -39,12 +39,13 @@
     },
     "run": {
       "type": "object",
-      "description": "the program per target, relative to the extension folder (from the dotted keys run.TARGET); or, with 'runtime', the single key 'run' at the top level is the script",
+      "description": "the program per target, relative to the extension folder (from the dotted keys run.TARGET; wasm32-wasip1 is a WebAssembly module rhun runs itself where no other target applies); or, with 'runtime', the single key 'run' at the top level is the script",
       "propertyNames": {
         "enum": [
           "linux-x86_64",
           "macos-arm64",
-          "windows-x64"
+          "windows-x64",
+          "wasm32-wasip1"
         ]
       },
       "additionalProperties": {
