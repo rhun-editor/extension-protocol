@@ -32,6 +32,9 @@ jobs:
         run: |
           cc=cc; cxx=c++; [ "$RUNNER_OS" = Windows ] && cc=clang && cxx=clang++
           $cc -std=c99 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o rhunext-test test.c && ./rhunext-test
+          $cc -std=c99 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o commands-test commands_test.c && ./commands-test
+          libs=; [ "$RUNNER_OS" = Windows ] && libs="-lws2_32 -lbcrypt"
+          $cc -std=c99 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o auth-test auth_test.c $libs && ./auth-test
           $cc -std=c99 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o tasks-test tasks_test.c && ./tasks-test
           printf '#define RHUNEXT_IMPLEMENTATION\n#include "rhunext.h"\nint main(void) { return 0; }\n' > cxx.cpp
           $cxx -std=c++17 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -o cxx-test cxx.cpp

@@ -181,26 +181,32 @@ func (e *Ext) closeConnection(err error) {
 // RequestContext sends one request and waits for its reply. Cancellation releases the caller;
 // a reply body already on the wire is still consumed to preserve framing for later requests.
 func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args ...string) (Reply, error) {
-	return e.requestContext(ctx, verb, body, nil, args...)
+	id, ch, err := e.startRequest(ctx, verb, body, nil, args...)
+	if err != nil {
+		return Reply{}, err
+	}
+	return e.waitReply(ctx, id, ch)
 }
 
-// requestContext is RequestContext telling onID the request's id before it is sent (a start that
-// may wait for the approval dialog cancels it by that id: tasks.go).
-func (e *Ext) requestContext(ctx context.Context, verb string, body []byte, onID func(int64), args ...string) (Reply, error) {
+// startRequest sends a request; stream, when not nil, receives the bodies of its "0 found ID"
+// batches until the reply comes.
+func (e *Ext) startRequest(ctx context.Context, verb string, body []byte, stream chan []byte, args ...string) (int64, chan result, error) {
 	if err := ctx.Err(); err != nil {
-		return Reply{}, err
+		return 0, nil, err
 	}
 	e.pmu.Lock()
 	if e.closed != nil {
 		err := e.closed
 		e.pmu.Unlock()
-		return Reply{}, err
+		return 0, nil, err
 	}
 	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "terminal-screen" ||
-		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show"
+		verb == "secret-get" || verb == "secret-keys" || verb == "external-uri" || verb == "link" ||
+		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show" || verb == "scm-input" ||
+		verb == "tools" || verb == "tool-call" || verb == "run-command" || verb == "editor-read"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()
-		return Reply{}, &Error{Code: "busy", Text: "too many pending requests"}
+		return 0, nil, &Error{Code: "busy", Text: "too many pending requests"}
 	}
 	var id int64
 	for {
@@ -225,10 +231,19 @@ func (e *Ext) requestContext(ctx context.Context, verb string, body []byte, onID
 		}
 		e.replyBodyCaps[id] = MaxSnippetBody
 	}
-	e.pmu.Unlock()
-	if onID != nil {
-		onID(id)
+	if verb == "run-command" {
+		if e.replyBodyCaps == nil {
+			e.replyBodyCaps = make(map[int64]int64)
+		}
+		e.replyBodyCaps[id] = MaxCallResult
 	}
+	if stream != nil {
+		if e.streams == nil {
+			e.streams = make(map[int64]chan []byte)
+		}
+		e.streams[id] = stream
+	}
+	e.pmu.Unlock()
 	line := itoa(id) + " " + verb
 	for _, arg := range args {
 		line += " " + arg
@@ -236,8 +251,12 @@ func (e *Ext) requestContext(ctx context.Context, verb string, body []byte, onID
 	started, err := e.writeContext(ctx, line+"\n", body)
 	if err != nil {
 		e.cancelPending(id, ch, !started)
-		return Reply{}, err
+		return 0, nil, err
 	}
+	return id, ch, nil
+}
+
+func (e *Ext) waitReply(ctx context.Context, id int64, ch chan result) (Reply, error) {
 	select {
 	case res := <-ch:
 		return res.reply, res.err

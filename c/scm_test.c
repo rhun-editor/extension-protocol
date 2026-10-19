@@ -54,5 +54,25 @@ int main(void) {
     rx_ext ext = {0};
     rx_git_repo_info r2;
     assert(rx_git_repo(&ext, &r2) == -1 && strstr(rx_error(&ext), "unknown"));
+
+    /* an scm-update body */
+    rx_buf u = {NULL, 0, 0};
+    rx_scm_head(&u, "default", "Message", 1, 1);
+    rx_scm_action(&u, "check", "commit", NULL, 0, "Commit");
+    rx_scm_group(&u, "changes", "Changes", 1, 2);
+    rx_scm_action(&u, NULL, "revert_all", NULL, 0, NULL);
+    rx_scm_res(&u, 'M', "modified", "a.txt", 2);
+    rx_scm_click(&u, "open_change", "a.txt", 5);
+    rx_scm_action(&u, NULL, "revert", "a.txt", 5, "Revert");
+    rx_scm_res(&u, 'R', NULL, "gone.txt", 1);
+    rx_scm_tip(&u, "renamed");
+    const char *want = "7 7 1 1\ndefaultMessage"
+                       "action check commit 0 6\nCommit"
+                       "group changes 7 1 2\nChanges" "action - revert_all 0 0\n"
+                       "res M modified 5 2\na.txt" "command open_change 5\na.txt" "action - revert 5 6\na.txtRevert"
+                       "res R - 8 1\ngone.txt" "tip 7\nrenamed";
+    assert(u.len == strlen(want) && !memcmp(u.data, want, u.len));
+    rx_buf_free(&u);
+    assert(rx_scm_register(&ext, "/r", "Hg") == -1 && strstr(rx_error(&ext), "unknown"));
     return 0;
 }

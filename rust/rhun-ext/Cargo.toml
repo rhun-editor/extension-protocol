@@ -1,9 +1,9 @@
 [package]
 name = "rhun-ext"
-version = "1.3.0"
+version = "1.4.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Write extensions for the rhun editor: its extension protocol (v1 and features), pictures and charts for views, completion, signature help, definition, references, symbols, code actions, rename and format."
+description = "Write extensions for the rhun editor: its extension protocol (v1 and features), pictures and charts for views, completion, signature help, definition, references, symbols, code actions, rename and format, workspace edits as transactions with file operations, several selections, reveal, diff tabs and linked editing."
 license = "MIT"
 repository = "https://github.com/rhun-editor/extension-protocol"
 keywords = ["rhun", "editor", "extension", "plugin"]

@@ -581,7 +581,13 @@ func (e *Ext) start(ctx context.Context, verb string, body []byte, args ...strin
 	}
 	done := make(chan answer, 1)
 	go func() {
-		r, err := e.requestContext(context.Background(), verb, body, func(id int64) { ids <- id }, args...)
+		id, ch, err := e.startRequest(context.Background(), verb, body, nil, args...)
+		if err != nil {
+			done <- answer{Reply{}, err}
+			return
+		}
+		ids <- id
+		r, err := e.waitReply(context.Background(), id, ch)
 		done <- answer{r, err}
 	}()
 	select {

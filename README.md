@@ -9,11 +9,11 @@ versions, a Go package that speaks it, and the conformance tools.
 | `v1/v1.md` | the specification, written to be read by people and by coding agents |
 | `v1/v1.abnf` | the grammar of every line |
 | `v1/v1.json` | the manifest (`extension.ini`) as a JSON Schema, with every key, pattern and default |
-| `v1.1/` | additive protocol 1.1 features, including runtime command removal; v1 stays unchanged |
+| `v1.1/` | additive protocol 1.1 features, including runtime command removal and the language features; v1 stays unchanged |
 | `rust/rhun-ext` | the Rust crate (the first choice): framing, requests, events, views with pictures and charts, and every language feature of section 12 |
 | `go/rhunext` | a Go package: framing, ids, bodies, requests that block until their reply, section 12 features |
 | `c/rhunext.h` | one header for C and C++: the same, with nothing but the C library |
-| `conformance/ext` | `rhun-ext-check DIR`: plays rhun against an extension and reports what it gets wrong |
+| `conformance/ext` | `rhun-ext-check DIR`: plays rhun against an extension and reports what it gets wrong (a `wasm32-wasip1` module through `rhun --wasm-host`) |
 | `conformance/host` | scripted extensions and headless scripts that check rhun itself against the spec |
 
 Status: **v1 is frozen** (2026-10-16, rhun 0.18.0). Later additions are features announced after
@@ -30,11 +30,11 @@ test and a release workflow that builds Linux, macOS and Windows binaries. In C 
 plugin from [rhun-editor/skills](https://github.com/rhun-editor/skills).
 
 ```toml
-rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.3.0" }
+rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.4.0" }
 ```
 
 ```sh
-go get github.com/rhun-editor/extension-protocol@v1.3.0
+go get github.com/rhun-editor/extension-protocol@v1.4.0
 ```
 
 Test with the checker, `rhun-ext-check DIR` (it asks every feature the extension agreed, checks
@@ -42,6 +42,22 @@ each answer as rhun reads it, applies the edits and serves `apply`) (`go run git
 where `DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` and `bin/`), then
 headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
+
+## WebAssembly
+
+An extension may ship one `wasm32-wasip1` module instead of (or besides) a binary per system:
+`run.wasm32-wasip1 = bin/NAME.wasm` in the manifest. rhun runs it itself on Linux, macOS and
+Windows, holding it to its `[needs]` through WASI preview 1 on every system (v1.1/v1.1.md, section
+"WebAssembly extensions"). The three SDKs work unchanged in such a build:
+
+```sh
+rustup target add wasm32-wasip1 && cargo build --release --target wasm32-wasip1   # rhun-ext reads without threads there
+GOOS=wasip1 GOARCH=wasm go build -o bin/NAME.wasm .                              # rhunext reads stdin non-blocking there
+clang --target=wasm32-wasip1 --sysroot=$WASI_SYSROOT -O2 main.c -o bin/NAME.wasm  # rhunext.h as is
+```
+
+The checker runs a module through rhun: `rhun-ext-check -target wasm32-wasip1 -rhun PATH DIR` (it
+picks the module by itself when the manifest names no program for this machine).
 
 ## Go request cancellation
 
@@ -60,6 +76,33 @@ passed to `RunOn` should implement `io.Closer` with interruptible IO; Go cannot 
 non-closable reader or writer. Context cancellation still releases callers, and no extra writer
 worker is started for that connection.
 
+## Workspace edits and the editor model
+
+Protocol 1.1 (v1.4.0 of the SDKs) adds six features, specified in [v1.1](v1.1/v1.1.md#feature-workspace-edits):
+
+| Feature | Rust | Go | C |
+| --- | --- | --- | --- |
+| `workspace-edits`: an edit is one transaction, files that are not open are edited on disk, one undo | `WorkspaceEdit::file_hashed`, `.label`, `.confirm`, `Ext::apply` returns `ApplyError` (code, entry, text) | `AddFileHashed`, `Label`, `Confirm`, `Apply` returns `*ApplyError` | `rx_wedit_file_hashed`, `rx_fnv1a64`, `rx_wedit_label`, `rx_wedit_confirm`, `rx_last_apply_error` |
+| `file-operations`: create, rename and delete entries | `.create`, `.rename`, `.delete` with `Create`, `Rename`, `Delete` | `Create`, `Rename`, `Delete` with their options | `rx_wedit_create`, `rx_wedit_rename`, `rx_wedit_delete` with `RX_OVERWRITE` … |
+| LSP's ordered `documentChanges` onto rhun's phases | `edits::from_ordered`, `edits::locate` | `NormalizeOrdered`, `Locate` | `rx_wedit_from_ordered`, `rx_locate` |
+| `selections`: every selection | `Ext::select_many`, `Handler::selections` | `SelectMany`, `ParseSelections` | `rx_select_many`, `rx_parse_selections` |
+| `reveal`: scroll to a place, list locations | `Ext::reveal`, `Ext::reveal_uri`, `Ext::show_locations` | `Reveal`, `RevealURI`, `ShowLocations` | `rx_reveal`, `rx_reveal_uri`, `rx_show_locations` |
+| `diff`: a diff tab between two documents (with `uris`, virtual documents by URI) | `Ext::diff`, `Ext::diff_uris`, `Ext::diff_close` | `Diff`, `DiffURIs`, `DiffClose` | `rx_diff`, `rx_diff_uris`, `rx_diff_close` |
+| `linked-editing`: ranges that change together (`[provides] linked`) | `Handler::linked` → `Linked` | `LinkedEditor` → `Linked` | the `linked` handler, `rx_linked_range`, `rx_linked_word` |
+
+A file that is not open is named with the bytes the extension read it from (`fnv1a64:HEX`
+precondition): rhun refuses the edit (`stale`) when the file changed since. The body lists the
+creates, then the text groups, then the renames, then the deletes; an apply error's ENTRY counts
+in that order (`WorkspaceEdit::entry`, `Entry`). The ordered normaliser rewrites an edit that
+follows a rename to the name before it, composes repeated edits of one file into one group, and
+refuses what the phases cannot express with the index of the change at fault (for LSP's
+`failedChange`). Without the features an edit goes as 12g's grammar (the hash as `-`, no label or
+confirm) and file operations fail as `unknown` without being sent; format and save-action answers
+always keep 12g's grammar. A create path ending in `/` makes a folder: Go's `filepath.Join` and
+Rust's `Path::join` drop that slash, so append it after joining. The checker serves all of it: it
+makes transactions in its scratch project as rhun does (files written on disk, renamed documents
+reopened under a new id) and answers a refused apply with `error ID CODE ENTRY TEXT`.
+
 ## Source actions before saving
 
 Protocol 1.1 adds negotiated `save-actions` and `[provides] save_actions` patterns. Go implements
@@ -76,6 +119,150 @@ instead of the released SDK or `@latest`. For Go, use a `go.work` containing the
 repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this repository.
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
+
+## Language features (1.1)
+
+The [language features](v1.1/v1.1.md#language-features) of protocol 1.1 add negotiated
+features to completion, signature help, navigation, rename, formatting, code actions, hover,
+selection, hierarchies, project symbols, links and diagnostics:
+
+- `query-stream`: parts of a long answer and progress on one of rhun's pending requests. Go's
+  `StreamingCompleter` and `StreamingLocator` get a `Stream` (`Part`, `PartLocations`, `PartItems`,
+  `Progress`) whose context rhun's `cancel` ends. Rust's `Handler::complete_stream`, `definition_stream` and `references_stream` get
+  a `Stream` (`part`, `part_locations`, `part_items`, `progress`, `is_cancelled`); it is `Clone`
+  and `Send`, so worker threads can send parts while the serial handler waits for them. C's
+  `rx_handlers` gain `complete_stream`, `definition_stream` and `references_stream` with an
+  `rx_stream` for `rx_stream_part`, `rx_stream_locations`, `rx_stream_items`,
+  `rx_stream_progress` and `rx_stream_cancelled`. Without the feature agreed, parts fail locally
+  and the answer carries everything.
+- `provider-scope`: narrowing `[provides]` at run time with Go `Provides`, `ProvidesManifest` and
+  `Withdraw`, Rust `Ext::provides`, `provides_manifest` and `withdraw`, and C `rx_provides`.
+- `complete-items`: completion items with resolve data, a replace range, commit characters, a
+  filter text, a suffix, preselect, deprecated, adjust and after-accept records (Go and Rust
+  `CompletionItem` fields, C `rx_item_extra` with `rx_list_item_extra`), resolved by Go's
+  `CompletionResolver`, Rust's `Handler::complete_resolve` (`Resolution`) and C's
+  `complete_resolve` handler (`rx_resolve_answer`).
+- `signature-list`: every overload in signature help: Go's `SignatureLister`, Rust's
+  `Handler::signatures` (`SignatureList`) and C's `signatures` handler (`rx_signatures_answer`).
+- `navigation`: Go to Declaration, Type Definition and Implementation, answered with locations by
+  Go's `Declarer`, `TypeDefiner` and `Implementer` (or `StreamingLocator`), Rust's
+  `Handler::declaration`, `type_definition` and `implementation` (and their `*_stream` variants),
+  and C's `declaration`, `type_definition` and `implementation` handlers (with an `rx_stream`).
+- `prepare-rename`: what F2 selects and fills the prompt with, or why nothing can be renamed:
+  Go's `RenamePreparer` (`PreparedRename`, an error refuses), Rust's `Handler::prepare_rename`
+  (`Ok(Some(PreparedRename))`, `Ok(None)` for the word at the cursor, `Err` refuses) and C's
+  `prepare_rename` handler (`rx_prepare_rename_answer`, `rx_refuse_answer`).
+- `partial-format`: Format Selection and formatting as you type, with the document's
+  `trim_trailing_whitespace` and `final_newline`: Go's `RangeFormatter` and `TypeFormatter`, Rust's
+  `Handler::range_format` and `type_format` (`RangeFormatRequest`, `TypeFormatRequest`) and C's
+  `range_format` and `type_format` handlers (`rx_range_format_ask`, `rx_type_format_ask`).
+- `code-actions`: in place of v1's `actions`, hierarchical kinds (actions of a kind not asked are
+  left out before answering), preferred and disabled actions, resolve data, command references
+  (`command NAME ARGS_LEN`) and the diagnostics fixed: Go's `CodeActionProvider2` (`Action`,
+  `CommandRef`, `CodeActionsRequest.Wants`) and `CodeActionResolver` (`ResolvedAction`), Rust's
+  `Handler::code_actions` (`Action`, `CommandRef`, `CodeActionsRequest::wants`) and
+  `code_action_resolve` (`ResolvedAction`), and C's `code_actions` handler (`rx_code_action` with
+  `rx_action_extra`, `rx_kind_wanted`) and `code_action_resolve` handler (`rx_resolved`,
+  `rx_command_ref`).
+- `hover-query`: the hover card's text and the range it describes: Go's `HoverProvider`
+  (`HoverRequest` with the kind and a context, `Hover`), Rust's `Handler::hover` (`HoverRequest`,
+  `Option<Hover>`) and C's `hover` handler (`rx_hover_answer`); the text is cut to fit 64 KiB.
+- `selection-ranges`: Expand and Shrink Selection: Go's `SelectionRanger`
+  (`SelectionRangesRequest`, `EncodeSelectionRanges`, `SelectionChain`), Rust's
+  `Handler::selection_ranges` (`selection_chain`) and C's `selection_ranges` handler
+  (`rx_selection_group`). Each group becomes a chain (equal ranges skipped, the first that does not
+  contain the one before ends it), an empty group the empty range at its cursor, and the outermost
+  ranges go until the answer fits 64 KiB.
+- `hierarchy`: call and type hierarchies: Go's `CallHierarchyProvider` (`CallHierarchy`,
+  `CallsIn`, `CallsOut`) and `TypeHierarchyProvider` (`TypeHierarchy`, `Supertypes`, `Subtypes`)
+  with `HierarchyItem`, `Call` and `HierarchyRequest`, the item requests getting the item's data
+  and a `Stream` (`PartCalls`, `PartHierarchyItems`); Rust's `Handler::call_hierarchy`, `calls_in`,
+  `calls_out`, `type_hierarchy`, `supertypes` and `subtypes` (`HierarchyItem`, `Call`,
+  `Stream::part_calls`, `part_hierarchy_items`); C's handlers of the same names
+  (`rx_hierarchy_item` with `rx_hierarchy_add`, `rx_call_add`, `rx_stream_hierarchy`,
+  `rx_stream_calls`).
+- `workspace-symbols`: Go to Symbol in Project: Go's `WorkspaceSymbolProvider`
+  (`WorkspaceSymbolsRequest`, `WorkspaceSymbol`, `PartWorkspaceSymbols`), Rust's
+  `Handler::workspace_symbols` and C's `workspace_symbols` handler (`rx_workspace_symbol`,
+  `rx_stream_workspace_symbols`); a new query withdraws the request and cancels its stream.
+- `document-links`: links under ctrl+hover: Go's `DocumentLinker` (`DocRequest`, `DocumentLink`
+  with `LinkURL`, `LinkPath`, `LinkDoc`, `ValidLinkTarget`), Rust's `Handler::document_links`
+  (`DocumentLink`, `LinkTarget`) and C's `document_links` handler (`rx_document_link`,
+  `rx_link_target_valid`); links to anything but an http(s) URL, an absolute path (with a line and
+  column) or a document are left out.
+- `file-diagnostics`: diagnostics for any file, open or not, in rhun's Problems store, with ids
+  that code actions get back, codes, sources, links, tags and related places: Go's
+  `Ext.FileDiagnostics` and `ResetDiagnostics` (`Diagnostic`'s `ID`, `Code`, `Source`, `Href`,
+  `Tags`, `Related`), Rust's `Ext::file_diagnostics` and `reset_diagnostics` and C's
+  `rx_file_diagnostics` (`rx_diagnostic`, `rx_related`) and `rx_reset_diagnostics`. The SDKs
+  leave out or cut what rhun would refuse (an empty message, a bad or repeated id, a link that is
+  not http(s), more than 2000 records or 4 MiB).
+
+The SDKs read the bodies of rhun's 1.1 requests that carry data (up to 64 KiB). The checker
+validates the new completion records, sends `complete-resolve` with the data a list gave and
+checks the resolution, asks `signatures` instead of `signature` when agreed, serves `query-part`,
+`query-progress` and `provides` against the manifest, and knows the new `[provides]` keys. It
+asks `declaration`, `type-definition` and `implementation` and reads their locations, sends
+`prepare-rename` before a rename, `range-format` and (after typing the first trigger)
+`type-format` and checks that their edits name only the document asked about, and asks
+`code-actions` for any kind and for `quickfix`, checking kinds, the extra records and command
+names against the extension's commands, then resolves an action with `code-action-resolve`. It
+asks `hover-query`, `selection-ranges` (each range containing the one before), `call-hierarchy`
+and `type-hierarchy` and then the calls or items about the first root with its data,
+`workspace-symbols` and `document-links`, reading parts only where the kind takes them, and
+serves `file-diagnostics` (targets, versions, records and their ids) and
+`file-diagnostics-reset`.
+
+## Source control
+
+Protocol 1.1 adds Git data read through rhun (`git-data`, with `[needs] git = read`), commit-message
+providers (`commit-message`), quick-diff bases for the gutter (`quickdiff`) and version control
+panels for other systems (`scm`). Go: `Ext.GitRepo`, `GitStatus`, `GitBlame`, `GitLog`, `GitShow`,
+`GitDiffOpen`, the `CommitMessageProvider` and `QuickDiffProvider` interfaces, `QuickDiffRefresh`,
+and `ScmRegister`, `ScmUpdate` with an `ScmPanel`, `ScmInput`, `ScmInputSet`. Rust: `Ext::git_*`,
+`Handler::commit_message` and `Handler::quickdiff`, `Ext::quickdiff_refresh`, `Ext::scm_register`,
+`scm_update` with an `ScmPanel`, `scm_input`, `scm_input_set`. C: `rx_git_*`, the
+`commit_message` and `quickdiff` handlers, `rx_quickdiff_refresh`, `rx_scm_register`,
+`rx_scm_update` with a body from the `rx_scm_*` appenders, `rx_scm_input`, `rx_scm_input_set`.
+Panel buttons and clicks run command references, whose ARGS arrive through `command-args`
+(below).
+
+## Commands with arguments, context keys and status items
+
+Protocol 1.1's `command-args` tells a command where it was invoked from (`palette`, `key`, `menu`,
+`ref`) and gives it a body: a key binding's ARGS, a menu's `TARGET` line and the item's args, or a
+command reference's ARGS. Go handlers implement `Invoker` (`Invocation.From`, `.Body`,
+`.Target()` for menus), build references with `EncodeCommandRef`, run built-ins and other extensions'
+callable commands with `RunCommand`, and answer calls with `Callee` (`CallRequest.Context` ends on
+`cancel`). Rust has `Handler::invoke`, `command_ref`, `Ext::run_command` and `Handler::call`; C has
+`rx_handlers.invoke`, `rx_menu_target`, `rx_command_ref`, `rx_run_command` and `rx_handlers.call`.
+`context-keys` sets the extension's keys for when clauses (`SetContext` / `set_context` /
+`rx_set_context`), and `status-items` adds status bar items (`SetStatusItem` with `StatusItem` /
+`set_status_item` / `rx_set_status_item`). Without `command-args` the old `Run` / `command`
+handlers keep receiving every run.
+
+## Test controllers
+
+Protocol 1.1's `tests` feature (`v1.1/v1.1.md`, "Feature: tests") lets an extension publish a tree
+of tests, run what rhun asks, and report results, failure messages with expected and actual values,
+output and line coverage. `test-exec` starts a program `[needs] tests` names (`go`, `cargo`) as the
+user and streams its output back.
+
+- Rust: `Feature::Tests`; `Handler::resolve_tests`, `run_tests` (return at once, report from a
+  thread through `TestReporter`, end with `Ext::end_test_run`) and `cancel_tests`;
+  `Ext::set_test_items`, `report_coverage`, and `test_exec`, whose `TestProcess` streams implement
+  `Read`.
+- Go: `FeatureTests`; a handler that is a `TestController`; `SetTestItems`, `NewTestReporter`,
+  `TestExec`, `ReportCoverage`, `EndTestRun`.
+- C: the `resolve_tests`, `run_tests`, `cancel_tests`, `test_out` and `test_exit` handlers;
+  `rx_test_item`, `rx_test_update`, `rx_test_exec`, `rx_test_coverage_send`, `rx_test_end`.
+- `expected_actual` (Rust) and `ExpectedActual` (Go) find compared values in Go, testify and Rust
+  failure text.
+
+`rhun-ext-check` resolves the roots and one lazy level, runs each profile the manifest offers and
+cancels a run, checking every body as rhun reads it. It refuses `test-exec` unless given
+`-test-exec-script FILE` (lines `out TEXT`, `err TEXT`, `sleep MS`, `exit CODE`); `-test-timeout`
+bounds a run (default 60 s).
 
 ## Prepared snippet fields
 
