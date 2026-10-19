@@ -356,7 +356,8 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
+	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true} // source control: scm.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1044,6 +1045,10 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
+		h.gitRequest(id, verb, args, msg, reply, rerr)
+	case "quickdiff-refresh":
+		h.quickdiffRefresh(id, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1342,6 +1347,15 @@ func main() {
 		}
 	}
 	for k := range m.provides {
+		if k == "commit_message" || k == "scm" { // source control: yes or no
+			if v := m.provides[k]; v != "yes" && v != "no" {
+				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))
+			}
+			continue
+		}
+		if k == "quickdiff" {
+			continue
+		}
 		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
@@ -1357,6 +1371,8 @@ func main() {
 			ok = v == "no" || v == "yes"
 		case "run":
 			ok = true
+		case "git": // source control: the project's Git data through rhun
+			ok = v == "none" || v == "read"
 		}
 		if !ok {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))

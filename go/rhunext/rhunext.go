@@ -275,7 +275,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
-			ext.answer(h, ev.Args)
+			ext.answer(h, ev.Args, ev.Body)
 		case "view":
 			if v, ok := h.(Viewer); ok {
 				if view, vev, ok := parseViewEvent(ev); ok {
@@ -433,6 +433,20 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
 		ev := &Event{Name: hostRequest, Args: fields}
 		if len(fields) > 1 && fields[1] == "save-actions" {
+			if _, err := e.beginSource(id); err != nil {
+				return nil, err
+			}
+		}
+		// commit-message (LEN) is followed by a body; "0 cancel ID" ends its context
+		if len(fields) == 3 && fields[1] == FeatureCommitMessage {
+			n, ok := bodyLen(fields[2], MaxEventBody)
+			if !ok {
+				return nil, fmt.Errorf("a commit-message length %q", fields[2])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err
 			}
