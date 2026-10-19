@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,8 @@ import (
 	"github.com/rhun-editor/extension-protocol/go/rhunext"
 )
 
-var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms"}
+var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
+	"query-stream", "provider-scope", "complete-items", "signature-list"}
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -29,6 +31,7 @@ func (h *host) agree(hello string) {
 	for _, f := range strings.Fields(hello)[2:] {
 		asked[f] = true
 	}
+	h.asked = asked
 	var said []string
 	for _, f := range knownFeatures {
 		if asked[f] {
@@ -52,6 +55,10 @@ func (h *host) hostReply(fields []string, msg message) bool {
 		return false
 	}
 	if _, ok := h.hostReqs[id]; !ok {
+		if h.withdrawn[id] {
+			h.note("a late answer to %d, which rhun withdrew: dropped", id)
+			return true
+		}
 		return false
 	}
 	delete(h.hostReqs, id)
@@ -258,18 +265,30 @@ func (h *host) ask(line string) (message, bool) {
 
 // askWithin is ask with rhun's own wait for that request
 func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
+	return h.askBodyWithin(line, nil, wait)
+}
+
+// askBodyWithin is askWithin for a request with a body (its line ends in LEN): the answer, served
+// meanwhile, before the request's hard limit, which progress reports may move (query-stream)
+func (h *host) askBodyWithin(line string, body []byte, wait time.Duration) (message, bool) {
 	h.hostSeq++
 	id := h.hostSeq
+	h.lastAsk = id
 	h.hostReqs[id] = line
+	now := time.Now()
+	q := &query{line: line, verb: strings.Fields(line)[0], base: wait, started: now, due: now.Add(wait)}
+	if h.queries == nil {
+		h.queries = map[int64]*query{}
+	}
+	h.queries[id] = q
 	if f := strings.Fields(line); len(f) == 4 && f[0] == "save-actions" {
 		docID, _ := strconv.ParseInt(f[1], 10, 64)
 		version, _ := strconv.ParseInt(f[2], 10, 64)
 		h.saveScope = &saveScope{id: id, doc: docID, version: version}
 		defer func() { h.saveScope = nil }()
 	}
-	h.write(fmt.Sprintf("%d %s\n", id, line))
-	deadline := time.Now().Add(wait)
-	for time.Now().Before(deadline) {
+	h.write(fmt.Sprintf("%d %s\n%s", id, line, body))
+	for time.Now().Before(q.due) {
 		if m, ok := h.hostAnswers[id]; ok {
 			delete(h.hostAnswers, id)
 			if s := h.saveScope; s != nil && s.id == id {
@@ -286,6 +305,10 @@ func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
 		}
 	}
 	delete(h.hostReqs, id)
+	if h.withdrawn == nil {
+		h.withdrawn = map[int64]bool{}
+	}
+	h.withdrawn[id] = true
 	h.write(fmt.Sprintf("0 cancel %d\n", id))
 	return message{}, false
 }
@@ -293,16 +316,32 @@ func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
 // checkFeatures is step 12: the requests rhun sends, and the events of the views opened
 func (h *host) checkFeatures() {
 	for _, f := range providerFeatures {
-		if h.features[f] && h.patterns(f) == "" {
+		if h.features[f] && h.manifestPatterns(f) == "" {
 			h.fail("provides", f+" agreed after hello but [provides] has no "+f+" patterns: rhun never asks")
 		}
-		if !h.features[f] && h.patterns(f) != "" {
+		if !h.features[f] && h.manifestPatterns(f) != "" {
 			h.fail("provides", "[provides] "+f+" without saying it after hello 1: rhun never asks")
+		}
+	}
+	keys := make([]string, 0, len(h.m.provides))
+	for k := range h.m.provides {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		f, known := providesKeys[k]
+		if v := strings.TrimSpace(h.m.provides[k]); known && v != "" && v != "no" && !slices.Contains(providerFeatures, f) {
+			if !h.asked[f] {
+				h.warn("provides", fmt.Sprintf("[provides] %s without %s after hello 1: rhun never asks", k, f))
+			} else {
+				h.note("[provides] %s: the checker does not ask %s requests", k, f)
+			}
 		}
 	}
 	if h.features["complete"] && h.patterns("complete") != "" {
 		d := h.sampleFor(h.patterns("complete"))
 		h.serve(300 * time.Millisecond)
+		version := d.version
 		m, ok := h.ask(fmt.Sprintf("complete %d %d 1 3 invoked -", d.id, d.version))
 		switch {
 		case !ok:
@@ -310,10 +349,14 @@ func (h *host) checkFeatures() {
 		case strings.HasPrefix(m.line, "error "):
 			h.fail("complete", "a completion request answered "+m.line)
 		default:
-			if why := checkCompletion(m, d, h.features); why != "" {
+			info, why := checkCompletionList(m, d, h.features)
+			if why != "" {
 				h.fail("complete", why)
-			} else {
-				h.ok("answers completion requests with a list rhun can read")
+				break
+			}
+			h.ok("answers completion requests with a list rhun can read" + h.partsSaid(h.lastAsk, "items"))
+			if h.features["complete-items"] && info.resolve != nil {
+				h.checkResolveRequest(d, version, *info.resolve)
 			}
 		}
 		h.hostSeq++
@@ -323,12 +366,27 @@ func (h *host) checkFeatures() {
 	if h.features["signature"] && h.patterns("signature") != "" {
 		d := h.sampleFor(h.patterns("signature"))
 		h.serve(300 * time.Millisecond)
-		m, ok := h.ask(fmt.Sprintf("signature %d %d 1 3 invoked -", d.id, d.version))
+		// with signature-list agreed rhun sends signatures, and signature no more
+		verb := "signature"
+		if h.features["signature-list"] {
+			verb = "signatures"
+		}
+		m, ok := h.ask(fmt.Sprintf("%s %d %d 1 3 invoked -", verb, d.id, d.version))
 		switch {
 		case !ok:
-			h.fail("signature", "no answer to a signature request within 3 s")
+			h.fail("signature", "no answer to a "+verb+" request within 3 s")
 		case strings.HasPrefix(m.line, "error "):
-			h.fail("signature", "a signature request answered "+m.line)
+			h.fail("signature", "a "+verb+" request answered "+m.line)
+		case verb == "signatures":
+			warns, why := checkSignatures(m)
+			for _, w := range warns {
+				h.warn("signature-list", w)
+			}
+			if why != "" {
+				h.fail("signature-list", why+" (rhun hides the help)")
+			} else {
+				h.ok("answers signatures requests with overloads rhun can show")
+			}
 		default:
 			if why := checkSignature(m); why != "" {
 				h.fail("signature", why)
@@ -381,89 +439,113 @@ func (h *host) checkUnknownRequest(d *doc) {
 
 // checkCompletion validates an answer against 12b and the document it was asked about
 func checkCompletion(m message, d *doc, features map[string]bool) string {
+	_, why := checkCompletionList(m, d, features)
+	return why
+}
+
+// completionInfo is what a list rhun can read holds: its items, and the first item with resolve
+// data (complete-items)
+type completionInfo struct {
+	items   int
+	resolve *resolvable
+}
+
+// checkCompletionList is checkCompletion, with what the list holds
+func checkCompletionList(m message, d *doc, features map[string]bool) (completionInfo, string) {
+	var info completionInfo
 	f := strings.Fields(m.line)
 	if len(f) != 3 || f[0] != "ok" {
-		return fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
+		return info, fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
 	}
 	if m.err != nil {
-		return m.err.Error()
+		return info, m.err.Error()
 	}
 	b := m.body
 	if len(b) > 1<<20 {
-		return "the list is over 1 MB"
+		return info, "the list is over 1 MB"
 	}
 	nl := bytes.IndexByte(b, '\n')
 	if nl < 0 {
-		return "the body has no first line N MORE"
+		return info, "the body has no first line N MORE"
 	}
 	head := strings.Fields(string(b[:nl]))
 	if len(head) != 2 || (head[1] != "0" && head[1] != "1") {
-		return fmt.Sprintf("the first line %q is not N MORE", b[:nl])
+		return info, fmt.Sprintf("the first line %q is not N MORE", b[:nl])
 	}
 	n, err := strconv.Atoi(head[0])
 	if err != nil || n < 0 || n > 4096 {
-		return fmt.Sprintf("N %q is not 0 to 4096", head[0])
+		return info, fmt.Sprintf("N %q is not 0 to 4096", head[0])
 	}
 	pos := nl + 1
 	for i := 0; i < n; i++ {
 		e := bytes.IndexByte(b[pos:], '\n')
 		if e < 0 {
-			return fmt.Sprintf("item %d has no header line", i+1)
+			return info, fmt.Sprintf("item %d has no header line", i+1)
 		}
 		h := strings.Fields(string(b[pos : pos+e]))
 		if len(h) != 9 {
-			return fmt.Sprintf("item %d's header %q is not L1 C1 L2 C2 KIND LABEL_LEN INSERT_LEN DETAIL_LEN EXTRA_LEN", i+1, b[pos:pos+e])
+			return info, fmt.Sprintf("item %d's header %q is not L1 C1 L2 C2 KIND LABEL_LEN INSERT_LEN DETAIL_LEN EXTRA_LEN", i+1, b[pos:pos+e])
 		}
 		start, why := d.position(h[0], h[1])
 		if why != "" {
-			return fmt.Sprintf("item %d's range starts badly: %s", i+1, why)
+			return info, fmt.Sprintf("item %d's range starts badly: %s", i+1, why)
 		}
 		end, why := d.position(h[2], h[3])
 		if why != "" {
-			return fmt.Sprintf("item %d's range ends badly: %s", i+1, why)
+			return info, fmt.Sprintf("item %d's range ends badly: %s", i+1, why)
 		}
 		if end < start {
-			return fmt.Sprintf("item %d's range ends before it starts", i+1)
+			return info, fmt.Sprintf("item %d's range ends before it starts", i+1)
 		}
 		pos += e + 1
 		sizes := make([]int, 4)
 		for j := range sizes {
 			v, err := strconv.Atoi(h[5+j])
 			if err != nil || v < 0 || v > len(b)-pos {
-				return fmt.Sprintf("item %d: %q is not a length within the body", i+1, h[5+j])
+				return info, fmt.Sprintf("item %d: %q is not a length within the body", i+1, h[5+j])
 			}
 			sizes[j] = v
 		}
 		if sizes[0] > len(b)-pos || sizes[1] > len(b)-pos-sizes[0] || sizes[2] > len(b)-pos-sizes[0]-sizes[1] ||
 			sizes[3] > len(b)-pos-sizes[0]-sizes[1]-sizes[2] {
-			return fmt.Sprintf("item %d's bytes run past the body", i+1)
+			return info, fmt.Sprintf("item %d's bytes run past the body", i+1)
 		}
 		label := b[pos : pos+sizes[0]]
 		detail := b[pos+sizes[0]+sizes[1] : pos+sizes[0]+sizes[1]+sizes[2]]
 		if bytes.ContainsAny(label, "\r\n") || bytes.ContainsAny(detail, "\r\n") {
-			return fmt.Sprintf("item %d's label or detail holds a line break", i+1)
+			return info, fmt.Sprintf("item %d's label or detail holds a line break", i+1)
 		}
 		if !utf8.Valid(label) {
-			return fmt.Sprintf("item %d's label is not UTF-8", i+1)
+			return info, fmt.Sprintf("item %d's label is not UTF-8", i+1)
 		}
 		extra := b[pos+sizes[0]+sizes[1]+sizes[2] : pos+sizes[0]+sizes[1]+sizes[2]+sizes[3]]
 		insert := b[pos+sizes[0] : pos+sizes[0]+sizes[1]]
-		if why := checkExtra(extra, d, start, end, insert, features); why != "" {
-			return fmt.Sprintf("item %d: %s", i+1, why)
+		var r resolvable
+		if why := checkExtraItem(extra, d, start, end, insert, features, &r); why != "" {
+			return info, fmt.Sprintf("item %d: %s", i+1, why)
+		}
+		if r.data != nil && info.resolve == nil {
+			info.resolve = &r
 		}
 		pos += sizes[0] + sizes[1] + sizes[2] + sizes[3]
 	}
 	if pos != len(b) {
-		return fmt.Sprintf("%d bytes after the %d items N says", len(b)-pos, n)
+		return info, fmt.Sprintf("%d bytes after the %d items N says", len(b)-pos, n)
 	}
-	return ""
+	info.items = n
+	return info, ""
 }
 
 // checkExtra validates an item's EXTRA records: each a header line whose last word is its length,
 // then that many bytes; an edit's range in the document, overlapping neither the item nor another
 func checkExtra(x []byte, d *doc, istart, iend int, insert []byte, features map[string]bool) string {
-	type span struct{ a, b int }
-	taken := []span{{istart, iend}}
+	return checkExtraItem(x, d, istart, iend, insert, features, &resolvable{})
+}
+
+// checkExtraItem is checkExtra, with the complete-items records when the feature is agreed: r
+// gets the item's resolve data, range and edits
+func checkExtraItem(x []byte, d *doc, istart, iend int, insert []byte, features map[string]bool, r *resolvable) string {
+	taken := []extent{{istart, iend}}
 	var fields []rhunext.Field
 	var choices []rhunext.SnippetChoice
 	var variants []int
@@ -553,10 +635,16 @@ func checkExtra(x []byte, d *doc, istart, iend int, insert []byte, features map[
 					return "an extra edit overlaps the item's range or another edit"
 				}
 			}
-			taken = append(taken, span{a, b})
+			taken = append(taken, extent{a, b})
+		}
+		if features["complete-items"] {
+			if why := checkItemRecord(w, x[e+1:e+1+n], d, istart, r); why != "" {
+				return why
+			}
 		}
 		x = x[e+1+n:]
 	}
+	r.taken = taken
 	if len(fields) > 0 || len(choices) > 0 || len(variants) > 0 || transformsSeen {
 		if err := (rhunext.SnippetProgram{Snippet: rhunext.PreparedSnippet{Text: string(insert), Fields: fields}, Choices: choices, InitialVariants: variants, Transforms: transforms}).Validate(); err != nil {
 			return "invalid snippet fields: " + err.Error()

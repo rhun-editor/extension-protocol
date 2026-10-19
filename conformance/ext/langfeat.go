@@ -36,8 +36,24 @@ var symbolKinds = func() map[string]bool {
 	return m
 }()
 
-// patterns are the file patterns [provides] gives a feature, "" for none ("no" is none)
+// patterns are the file patterns in force for a feature, "" for none: what a provides request
+// set (provider-scope), else the manifest's
 func (h *host) patterns(f string) string {
+	key := f
+	if f == "save-actions" {
+		key = "save_actions"
+	}
+	if v, ok := h.scope[key]; ok {
+		if v == "-" {
+			return ""
+		}
+		return v
+	}
+	return h.manifestPatterns(f)
+}
+
+// manifestPatterns are the file patterns [provides] gives a feature, "" for none ("no" is none)
+func (h *host) manifestPatterns(f string) string {
 	if f == "save-actions" {
 		f = "save_actions"
 	}
@@ -46,6 +62,22 @@ func (h *host) patterns(f string) string {
 		return ""
 	}
 	return p
+}
+
+// partsSaid says what came in parts before the answer to request id (query-stream), or ""
+func (h *host) partsSaid(id int64, what string) string {
+	q := h.queries[id]
+	if q == nil || q.parts+q.progresses == 0 {
+		return ""
+	}
+	said := ""
+	if q.parts > 0 {
+		said = fmt.Sprintf(", and %d %s in %d parts before it", q.items, what, q.parts)
+	}
+	if q.progresses > 0 {
+		said += fmt.Sprintf(", after %d progress reports", q.progresses)
+	}
+	return said
 }
 
 // matches says whether a path's file name matches one of the patterns: * for all, *.go a suffix,
@@ -849,7 +881,7 @@ func (h *host) checkLangFeatures() {
 		if why != "" {
 			h.fail(f, why)
 		} else {
-			h.ok(fmt.Sprintf("answers %s requests with locations rhun can list (%d)", f, n))
+			h.ok(fmt.Sprintf("answers %s requests with locations rhun can list (%d%s)", f, n, h.partsSaid(h.lastAsk, "locations")))
 		}
 	}
 	if has("symbols") {

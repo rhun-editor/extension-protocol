@@ -184,6 +184,14 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
+
+	// protocol 1.1 language features (query.go)
+	asked     map[string]bool   // the features hello named
+	scope     map[string]string // [provides] values set by provides, "-" for withdrawn
+	scoped    bool              // a provides was served (said once)
+	queries   map[int64]*query  // rhun's requests: parts, progress, the hard limit
+	withdrawn map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
+	lastAsk   int64             // the last request asked
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -356,7 +364,8 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
+	"query-part": true, "query-progress": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1044,6 +1053,23 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "query-part", "query-progress":
+		if len(args) == 0 {
+			h.fail("request grammar", verb+" takes LEN last")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[len(args)-1])
+		if !ok {
+			return
+		}
+		if verb == "query-part" {
+			h.queryPart(args, b, reply, rerr, id)
+		} else {
+			h.queryProgress(args, b, reply, rerr, id)
+		}
+	case "provides":
+		h.providesRequest(line, reply, rerr, id)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1217,6 +1243,7 @@ func (h *host) expectHello() bool {
 	}
 	h.ok("hello 1 as the first line")
 	h.views, h.hostReqs, h.hostAnswers = map[int64]bool{}, map[int64]string{}, map[int64]message{}
+	h.scope, h.scoped, h.queries, h.withdrawn = map[string]string{}, false, map[int64]*query{}, map[int64]bool{}
 	h.agree(line)
 	return true
 }
@@ -1341,9 +1368,9 @@ func main() {
 			bad(fmt.Sprintf("[subscribe] %s is not an event with a subscription", k))
 		}
 	}
-	for k := range m.provides {
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
-			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
+	for k, v := range m.provides {
+		if why := providesKeyProblem(k, v); why != "" {
+			bad(why)
 		}
 	}
 	for k, v := range m.needs {
