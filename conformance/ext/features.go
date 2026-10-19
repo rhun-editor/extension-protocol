@@ -27,7 +27,7 @@ var knownFeatures = []string{"views", "complete", "signature", "definition", "re
 	"idle", "secrets", "uris", "urls", "files", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
-	"notebooks",                                                                                                                            // notebooks: notebook.go
+	"notebooks", "custom-editors", // notebooks: notebook.go
 	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions", // language features: query.go, actions.go
 	"hover-query", "selection-ranges", "hierarchy", "workspace-symbols", "document-links", "file-diagnostics", // langfeat.go
 	"command-args", "context-keys", "status-items", // commands.go
@@ -420,6 +420,7 @@ func (h *host) checkFeatures() {
 		return
 	}
 	h.checkNotebooks()
+	h.checkEditors()
 	if h.cmdExited() {
 		return
 	}
