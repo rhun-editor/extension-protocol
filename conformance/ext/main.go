@@ -197,6 +197,7 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
+	scm         scmState        // version control panels: scmpanel.go
 	contextKeys map[string]bool // context-keys: set-context keys (true: set, false: removed)
 	statusItems map[string]bool // status-items: runtime items
 }
@@ -372,7 +373,9 @@ type message struct {
 
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
-	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, "run-command": true, "status-item": true} // source control: scm.go
+	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
+	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
+	"run-command": true, "status-item": true} // commands.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1064,6 +1067,8 @@ func (h *host) handle(msg message) {
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
+	case "scm-register", "scm-update", "scm-input", "scm-input-set":
+		h.scmRequest(id, verb, args, msg, reply, rerr)
 	case "run-command", "set-context", "status-item", "status-remove":
 		h.commandRequest(id, verb, args, msg, reply, rerr)
 	default:

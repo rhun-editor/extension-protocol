@@ -21,7 +21,7 @@ import (
 )
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
-	"git-data", "commit-message", "quickdiff", // source control: scm.go
+	"git-data", "commit-message", "quickdiff", "scm", // source control: scm.go, scmpanel.go
 	"command-args", "context-keys", "status-items"} // commands.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.

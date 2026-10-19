@@ -79,6 +79,23 @@ feature      =/ "quickdiff"
 host-request =/ id SP "quickdiff" SP doc SP version
 request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolute path or "-"
 
+; scm: version control panels (v1.1.md "Feature: scm"); bodies are length-framed
+feature      =/ "scm"
+request      =/ id SP "scm-register" SP len                    ; body: ROOT_LEN SP LABEL_LEN LF <ROOT><LABEL>
+             / id SP "scm-update" SP num SP len                ; SCM, then an scm-body
+             / id SP "scm-input" SP num                        ; ok ID LEN + the message box's text
+             / id SP "scm-input-set" SP num SP len             ; body: the text (at most 65536 bytes)
+scm-body     = len SP len SP num SP num LF                     ; STATUS_LEN PLACEHOLDER_LEN NACT (0-4) NGROUP (0-64), then their bytes
+scm-action   = "action" SP ( scm-word / "-" ) SP scm-cmd SP len SP len LF   ; ICON NAME ARGS_LEN LABEL_LEN, then ARGS LABEL
+scm-group    = "group" SP scm-word SP len SP num SP num LF     ; ID LABEL_LEN NACT (0-8) NRES, then LABEL
+scm-res      = "res" SP %x21-7E SP scm-color SP len SP num LF  ; CODE COLOR PATH_LEN NREC (0-64), then PATH
+scm-record   = "command" SP scm-cmd SP len LF                 ; the click (before the actions), then ARGS
+             / scm-action
+             / "tip" SP len LF                                 ; then at most 1000 bytes
+             / 1*( %x21-7E ) *( SP 1*( %x21-7E ) ) SP len LF   ; any other record, skipped with its LEN bytes
+scm-color    = "added" / "modified" / "deleted" / "conflict" / "untracked" / "ignored" / "-"
+scm-word     = 1*64( %x21-7E )
+scm-cmd      = 1*40( %x61-7A / DIGIT / "_" )                ; a command of the extension, its local name
 ; command-args: runs carry where they came from and a body; command references inside bodies;
 ; run-command (extension to rhun) and call (rhun to a callable command's owner)
 feature      =/ "command-args"

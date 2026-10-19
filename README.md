@@ -77,6 +77,20 @@ repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
 
+## Source control
+
+Protocol 1.1 adds Git data read through rhun (`git-data`, with `[needs] git = read`), commit-message
+providers (`commit-message`), quick-diff bases for the gutter (`quickdiff`) and version control
+panels for other systems (`scm`). Go: `Ext.GitRepo`, `GitStatus`, `GitBlame`, `GitLog`, `GitShow`,
+`GitDiffOpen`, the `CommitMessageProvider` and `QuickDiffProvider` interfaces, `QuickDiffRefresh`,
+and `ScmRegister`, `ScmUpdate` with an `ScmPanel`, `ScmInput`, `ScmInputSet`. Rust: `Ext::git_*`,
+`Handler::commit_message` and `Handler::quickdiff`, `Ext::quickdiff_refresh`, `Ext::scm_register`,
+`scm_update` with an `ScmPanel`, `scm_input`, `scm_input_set`. C: `rx_git_*`, the
+`commit_message` and `quickdiff` handlers, `rx_quickdiff_refresh`, `rx_scm_register`,
+`rx_scm_update` with a body from the `rx_scm_*` appenders, `rx_scm_input`, `rx_scm_input_set`.
+Panel buttons and clicks run command references, whose ARGS arrive through `command-args`
+(below).
+
 ## Commands with arguments, context keys and status items
 
 Protocol 1.1's `command-args` tells a command where it was invoked from (`palette`, `key`, `menu`,

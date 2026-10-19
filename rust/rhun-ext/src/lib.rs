@@ -38,6 +38,7 @@ pub mod complete;
 pub mod lang;
 pub mod picture;
 pub mod scm;
+pub mod scmpanel;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
@@ -63,6 +64,7 @@ pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
     LogEntry, LogOf, QuickDiffRequest,
 };
+pub use scmpanel::{ScmAction, ScmGroup, ScmPanel, ScmResource};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
@@ -160,6 +162,8 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Version control panels: [`Ext::scm_register`], [`Ext::scm_update`], [`Ext::scm_input`].
+    Scm,
     /// Where commands are invoked from and their bodies ([`Handler::invoke`]), command
     /// references ([`command_ref`]), [`Ext::run_command`] and [`Handler::call`] (protocol 1.1).
     CommandArgs,
@@ -190,6 +194,7 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::Scm => "scm",
             Feature::CommandArgs => "command-args",
             Feature::ContextKeys => "context-keys",
             Feature::StatusItems => "status-items",
@@ -1120,6 +1125,7 @@ impl Ext {
                                 | "git-log"
                                 | "git-show"
                                 | "run-command"
+                                | "scm-input"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {

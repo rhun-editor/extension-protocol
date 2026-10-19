@@ -893,3 +893,86 @@ fn command_args_runs_calls_context_and_status_items() {
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+#[test]
+fn scm_panels_and_command_args() {
+    use rhun_ext::{Doc, ScmPanel};
+    struct Scm(Sender<String>);
+    impl Handler for Scm {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            let h = ext.scm_register("/r", "Hg").unwrap();
+            ext.scm_update(
+                h,
+                &ScmPanel {
+                    status: "s".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let input = ext.scm_input(h).unwrap();
+            ext.scm_input_set(h, "").unwrap();
+            let _ = self.0.send(format!("{h} {input}"));
+        }
+        fn command(&mut self, _ext: &Ext, name: &str, _doc: Doc) {
+            let _ = self.0.send(format!("command {name}"));
+        }
+        fn invoke(&mut self, ext: &Ext, inv: &rhun_ext::Invocation) {
+            if inv.from.is_empty() {
+                return self.command(ext, &inv.name, inv.doc);
+            }
+            let _ = self.0.send(format!(
+                "args {} {} {}",
+                inv.name,
+                inv.from,
+                String::from_utf8_lossy(&inv.body)
+            ));
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (tx, results) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Scm, Feature::CommandArgs],
+            Scm(tx),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 scm command-args");
+    host.send("0 features scm command-args\n0 ready /r\n");
+    assert_eq!(host.line(), "1 scm-register 8");
+    assert_eq!(host.body(8), "2 2\n/rHg");
+    host.send("ok 1 3\n");
+    assert_eq!(host.line(), "2 scm-update 3 9");
+    assert_eq!(host.body(9), "1 0 0 0\ns");
+    host.send("ok 2\n");
+    assert_eq!(host.line(), "3 scm-input 3");
+    host.send("ok 3 3\nmsg");
+    assert_eq!(host.line(), "4 scm-input-set 3 0");
+    host.send("ok 4\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "3 msg"
+    );
+    host.send("0 run hg.open_change 0 ref 5\na.txt0 run hg.refresh 0\n0 bye\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "args open_change ref a.txt"
+    );
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "command refresh"
+    );
+    done.join().unwrap().unwrap();
+}
