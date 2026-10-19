@@ -2103,16 +2103,14 @@ impl Ext {
                         }
                         "range-format" if self.has(Feature::PartialFormat) => {
                             RangeFormatRequest::parse(&fields).map(|r| {
-                                h.range_format(self, &r)
-                                    .encode()
-                                    .map_err(|why| ("toobig", why))
+                                // a format answer: 12g's grammar whatever was agreed
+                                h.range_format(self, &r).encode_with(lang::EditCaps::V1)
                             })
                         }
                         "type-format" if self.has(Feature::PartialFormat) => {
                             TypeFormatRequest::parse(&fields).map(|r| {
-                                h.type_format(self, &r)
-                                    .encode()
-                                    .map_err(|why| ("toobig", why))
+                                // a format answer: 12g's grammar whatever was agreed
+                                h.type_format(self, &r).encode_with(lang::EditCaps::V1)
                             })
                         }
                         "code-actions" if self.has(Feature::CodeActions) => {

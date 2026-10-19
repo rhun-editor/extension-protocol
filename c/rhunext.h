@@ -4183,7 +4183,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.range.end.line = atoi(f[6]);
         req.range.end.col = atoi(f[7]);
         req.tab_width = opt[0], req.spaces = opt[1], req.trim = opt[2], req.final_newline = opt[3];
-        if ((ok = h->range_format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+        if ((ok = h->range_format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
     } else if (strcmp(verb, "type-format") == 0 && n == 11 && rx_nums(f, 2, 6) && rx_format_options(f, 7, opt) &&
                h->type_format && rx_has(ext, "partial-format")) {
         rx_type_format_ask req;
@@ -4194,7 +4194,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.at.col = atoi(f[5]);
         req.ch = f[6];
         req.tab_width = opt[0], req.spaces = opt[1], req.trim = opt[2], req.final_newline = opt[3];
-        if ((ok = h->type_format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+        if ((ok = h->type_format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
     } else if (strcmp(verb, "code-actions") == 0 && n == 11 && rx_nums(f, 2, 8) &&
                (strcmp(f[8], "invoked") == 0 || strcmp(f[8], "auto") == 0) && h->code_actions &&
                rx_has(ext, "code-actions")) {
