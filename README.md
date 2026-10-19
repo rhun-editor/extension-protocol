@@ -70,8 +70,8 @@ Protocol 1.1 (v1.4.0 of the SDKs) adds six features, specified in [v1.1](v1.1/v1
 | `file-operations`: create, rename and delete entries | `.create`, `.rename`, `.delete` with `Create`, `Rename`, `Delete` | `Create`, `Rename`, `Delete` with their options | `rx_wedit_create`, `rx_wedit_rename`, `rx_wedit_delete` with `RX_OVERWRITE` … |
 | LSP's ordered `documentChanges` onto rhun's phases | `edits::from_ordered`, `edits::locate` | `NormalizeOrdered`, `Locate` | `rx_wedit_from_ordered`, `rx_locate` |
 | `selections`: every selection | `Ext::select_many`, `Handler::selections` | `SelectMany`, `ParseSelections` | `rx_select_many`, `rx_parse_selections` |
-| `reveal`: scroll to a place, list locations | `Ext::reveal`, `Ext::show_locations` | `Reveal`, `ShowLocations` | `rx_reveal`, `rx_show_locations` |
-| `diff`: a diff tab between two open documents | `Ext::diff`, `Ext::diff_close` | `Diff`, `DiffClose` | `rx_diff`, `rx_diff_close` |
+| `reveal`: scroll to a place, list locations | `Ext::reveal`, `Ext::reveal_uri`, `Ext::show_locations` | `Reveal`, `RevealURI`, `ShowLocations` | `rx_reveal`, `rx_reveal_uri`, `rx_show_locations` |
+| `diff`: a diff tab between two documents (with `uris`, virtual documents by URI) | `Ext::diff`, `Ext::diff_uris`, `Ext::diff_close` | `Diff`, `DiffURIs`, `DiffClose` | `rx_diff`, `rx_diff_uris`, `rx_diff_close` |
 | `linked-editing`: ranges that change together (`[provides] linked`) | `Handler::linked` → `Linked` | `LinkedEditor` → `Linked` | the `linked` handler, `rx_linked_range`, `rx_linked_word` |
 
 A file that is not open is named with the bytes the extension read it from (`fnv1a64:HEX`

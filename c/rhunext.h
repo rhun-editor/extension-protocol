@@ -371,6 +371,12 @@ int rx_show_locations(rx_ext *ext, const char *title, rx_locations *locs);
  * line, 200 bytes), activated unless background; the tab's id (not a document), or -1 */
 int64_t rx_diff(rx_ext *ext, rx_doc left, rx_doc right, const char *title, int background);
 int rx_diff_close(rx_ext *ext, int64_t tab);
+/* "diff" and "uris": rx_diff with sides named by URI (1 to 4128 bytes, no spaces or line breaks):
+ * a virtual document's (opened without a tab when it is not open, closed with the last diff tab
+ * showing it unless the user opened it meanwhile), a file: URI of an open file, or a document id */
+int64_t rx_diff_uris(rx_ext *ext, const char *left, const char *right, const char *title, int background);
+/* "reveal" and "uris": rx_reveal for the open document with that URI */
+int rx_reveal_uri(rx_ext *ext, const char *uri, rx_pos at, const char *where);
 /* the linked handler's answer: 2 to 64 ranges at the asked version with equal text, one holding
  * the cursor (another count is sent as none); word: the printable ASCII characters that may be
  * typed in them besides letters, digits and non-ASCII (rhun's default "-_.:" without it) */
@@ -2331,22 +2337,57 @@ int rx_show_locations(rx_ext *ext, const char *title, rx_locations *locs) {
     return r;
 }
 
-int64_t rx_diff(rx_ext *ext, rx_doc left, rx_doc right, const char *title, int background) {
+static int64_t rx_diff_sides(rx_ext *ext, const char *left, const char *right, const char *title, int background) {
     if (!rx_need(ext, "diff")) return -1;
-    rx_buf t = {NULL, 0, 0}, f = {NULL, 0, 0};
+    rx_buf t = {NULL, 0, 0}, f = {NULL, 0, 0}, line = {NULL, 0, 0};
     rx_title(&t, title);
-    char line[128];
-    snprintf(line, sizeof line, "diff %lld %lld %s %zu", (long long)left, (long long)right,
-             background ? "background" : "show", t.len);
+    rx_buf_fmt(&line, "diff %s %s %s %zu", left, right, background ? "background" : "show", t.len);
     int64_t tab = -1;
-    if (rx_request(ext, line, t.data ? t.data : "", t.len, &f, NULL) == 0 &&
+    if (rx_request(ext, line.data, t.data ? t.data : "", t.len, &f, NULL) == 0 &&
         (!rx_positive_num(f.data, INT64_MAX, &tab) || tab <= 0)) {
         snprintf(ext->error, sizeof ext->error, "syntax invalid diff reply");
         tab = -1;
     }
     rx_buf_free(&t);
     rx_buf_free(&f);
+    rx_buf_free(&line);
     return tab;
+}
+
+int64_t rx_diff(rx_ext *ext, rx_doc left, rx_doc right, const char *title, int background) {
+    char l[24], r[24];
+    snprintf(l, sizeof l, "%lld", (long long)left);
+    snprintf(r, sizeof r, "%lld", (long long)right);
+    return rx_diff_sides(ext, l, r, title, background);
+}
+
+/* a URI where rhun takes a document: one field */
+static int rx_uri_field(rx_ext *ext, const char *uri) {
+    size_t n = uri ? strlen(uri) : 0;
+    if (!n || n > 4128 || strpbrk(uri, " \n\r")) {
+        snprintf(ext->error, sizeof ext->error, "syntax a URI field is 1 to 4128 bytes without spaces or line breaks");
+        return 0;
+    }
+    return 1;
+}
+
+int64_t rx_diff_uris(rx_ext *ext, const char *left, const char *right, const char *title, int background) {
+    if (!rx_need(ext, "diff") || !rx_uri_field(ext, left) || !rx_uri_field(ext, right)) return -1;
+    return rx_diff_sides(ext, left, right, title, background);
+}
+
+int rx_reveal_uri(rx_ext *ext, const char *uri, rx_pos at, const char *where) {
+    if (!rx_need(ext, "reveal") || !rx_uri_field(ext, uri)) return -1;
+    if (!where || (strcmp(where, "top") && strcmp(where, "center") && strcmp(where, "nearest") &&
+                   strcmp(where, "center-if-outside"))) {
+        snprintf(ext->error, sizeof ext->error, "syntax where is top, center, nearest or center-if-outside");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "reveal %s %d %d %s", uri, at.line, at.col, where);
+    int r = rx_request(ext, line.data, NULL, 0, NULL, NULL);
+    rx_buf_free(&line);
+    return r;
 }
 
 int rx_diff_close(rx_ext *ext, int64_t tab) {

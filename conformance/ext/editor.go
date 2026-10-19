@@ -45,6 +45,12 @@ func (h *host) editorRequest(id int64, verb string, args []string, msg message, 
 		}
 		return d
 	}
+	// with uris agreed, reveal and diff may name a document by a URI of one field (the checker
+	// has no virtual documents: it takes the URI as it comes)
+	uriSide := func(s string) bool {
+		i := strings.IndexByte(s, ':')
+		return h.features["uris"] && i >= 2 && i <= 32 && s[0] >= 'a' && s[0] <= 'z' && i+1 < len(s)
+	}
 	switch verb {
 	case "select-many":
 		if len(args) != 3 {
@@ -106,6 +112,10 @@ func (h *host) editorRequest(id int64, verb string, args []string, msg message, 
 		default:
 			h.fail("request grammar", fmt.Sprintf("reveal: WHERE %q is not top, center, nearest or center-if-outside", args[3]))
 			rerr("syntax", "cannot parse the line")
+			return
+		}
+		if uriSide(args[0]) {
+			reply(fmt.Sprintf("ok %d", id))
 			return
 		}
 		d := getDoc(args[0])
@@ -176,8 +186,10 @@ func (h *host) editorRequest(id int64, verb string, args []string, msg message, 
 		if len(b) > 200 {
 			h.warn("diff", fmt.Sprintf("a diff title of %d bytes: rhun shows 200", len(b)))
 		}
-		if getDoc(args[0]) == nil || getDoc(args[1]) == nil {
-			return
+		for _, side := range args[:2] {
+			if !uriSide(side) && getDoc(side) == nil {
+				return
+			}
 		}
 		key := args[0] + " " + args[1] + " " + string(b)
 		if h.diffs == nil {

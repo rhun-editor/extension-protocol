@@ -76,6 +76,21 @@ pub use snippet_transform::{
 };
 pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 
+/// A URI where rhun takes a document (feature `uris`): one field, without spaces or line breaks
+/// (write a space as `%20`).
+fn uri_field(uri: &str) -> Result<(), Error> {
+    if uri.is_empty()
+        || uri.len() > 4128
+        || uri.bytes().any(|b| matches!(b, b' ' | b'\n' | b'\r' | 0))
+    {
+        return Err(Error {
+            code: "syntax".into(),
+            text: "a URI field is 1 to 4128 bytes without spaces or line breaks".into(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +901,18 @@ impl Ext {
         .map(|_| ())
     }
 
+    /// [`Ext::reveal`] for the open document with that URI (features `reveal` and `uris`): a
+    /// virtual document's URI, or a `file:` URI of an open file.
+    pub fn reveal_uri(&self, uri: &str, at: Pos, how: Reveal) -> Result<(), Error> {
+        self.need(Feature::Reveal)?;
+        uri_field(uri)?;
+        self.request(
+            &format!("reveal {uri} {} {} {}", at.line, at.col, how.word()),
+            None,
+        )
+        .map(|_| ())
+    }
+
     /// Lists locations in the palette as Find All References does, under a title (feature
     /// `reveal`); `busy` while a prompt or the palette is open.
     pub fn show_locations(&self, title: &str, locs: &[Location]) -> Result<(), Error> {
@@ -898,6 +925,26 @@ impl Ext {
     /// document `left` to document `right` (feature `diff`); the tab's id, which is not a
     /// document.
     pub fn diff(&self, left: Doc, right: Doc, title: &str, show: Show) -> Result<Doc, Error> {
+        self.diff_sides(&left.to_string(), &right.to_string(), title, show)
+    }
+
+    /// [`Ext::diff`] with sides named by URI (features `diff` and `uris`): a virtual document's
+    /// URI (opened without a tab when it is not open, and closed with the last diff tab showing
+    /// it unless the user opened it meanwhile), a `file:` URI of an open file, or a document id.
+    pub fn diff_uris(
+        &self,
+        left: &str,
+        right: &str,
+        title: &str,
+        show: Show,
+    ) -> Result<Doc, Error> {
+        self.need(Feature::Diff)?;
+        uri_field(left)?;
+        uri_field(right)?;
+        self.diff_sides(left, right, title, show)
+    }
+
+    fn diff_sides(&self, left: &str, right: &str, title: &str, show: Show) -> Result<Doc, Error> {
         self.need(Feature::Diff)?;
         let t = editor::title(title, editor::MAX_TITLE);
         let rep = self.request(

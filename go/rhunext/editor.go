@@ -105,6 +105,28 @@ func (e *Ext) Reveal(doc Doc, at Pos, how RevealHow) error {
 	return err
 }
 
+// uriField checks a URI given where rhun takes a document (feature uris): one field, without
+// spaces or line breaks (write a space as %20).
+func uriField(uri string) error {
+	if uri == "" || len(uri) > 4128 || strings.ContainsAny(uri, " \n\r\x00") {
+		return &Error{Code: "syntax", Text: "a URI field is 1 to 4128 bytes without spaces or line breaks"}
+	}
+	return nil
+}
+
+// RevealURI is Reveal for the open document with that URI (features reveal and uris): a virtual
+// document's URI, or a file: URI of an open file.
+func (e *Ext) RevealURI(uri string, at Pos, how RevealHow) error {
+	if !e.Has(FeatureReveal) {
+		return &Error{Code: "unknown", Text: "reveal was not agreed"}
+	}
+	if err := uriField(uri); err != nil {
+		return err
+	}
+	_, err := e.Request("reveal", nil, uri, pos(at), string(how))
+	return err
+}
+
 // title is a one-line title of at most MaxTitle bytes, cut at a character.
 func title(s string) string { return cut(oneLine(s), MaxTitle) }
 
@@ -136,11 +158,30 @@ const (
 // document left to document right (feature diff) and returns the tab's id, which is not a
 // document.
 func (e *Ext) Diff(left, right Doc, heading string, flags DiffFlags) (Doc, error) {
+	return e.diff(itoa(int64(left)), itoa(int64(right)), heading, flags)
+}
+
+// DiffURIs is Diff with sides named by URI (features diff and uris): a virtual document's URI
+// (opened without a tab when it is not open, and closed with the last diff tab showing it unless
+// the user opened it meanwhile), a file: URI of an open file, or a document id in decimal.
+func (e *Ext) DiffURIs(left, right, heading string, flags DiffFlags) (Doc, error) {
+	if !e.Has(FeatureDiff) {
+		return 0, &Error{Code: "unknown", Text: "diff was not agreed"}
+	}
+	for _, u := range []string{left, right} {
+		if err := uriField(u); err != nil {
+			return 0, err
+		}
+	}
+	return e.diff(left, right, heading, flags)
+}
+
+func (e *Ext) diff(left, right, heading string, flags DiffFlags) (Doc, error) {
 	if !e.Has(FeatureDiff) {
 		return 0, &Error{Code: "unknown", Text: "diff was not agreed"}
 	}
 	t := title(heading)
-	r, err := e.Request("diff", []byte(t), itoa(int64(left)), itoa(int64(right)), string(flags), itoa(int64(len(t))))
+	r, err := e.Request("diff", []byte(t), left, right, string(flags), itoa(int64(len(t))))
 	if err != nil {
 		return 0, err
 	}

@@ -202,3 +202,41 @@ func TestEditorModelBodiesAndEvents(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 }
+
+type uriProbe struct {
+	modelProbe
+}
+
+func (u *uriProbe) Ready(ext *Ext, project string) {
+	go func() {
+		tab, err := ext.DiffURIs("res-x:/a.txt", "file:///p/a.go", "t", DiffShow)
+		u.got <- fmt.Sprintf("diff %d %v", tab, err)
+		_, err = ext.DiffURIs("res-x:/a b", "5", "t", DiffShow)
+		u.got <- fmt.Sprint(err)
+		u.got <- fmt.Sprint(ext.RevealURI("res-x:/a.txt", Pos{2, 3}, RevealTop))
+	}()
+}
+
+func TestDiffAndRevealTakeURIs(t *testing.T) {
+	u := &uriProbe{modelProbe{got: make(chan string, 16)}}
+	s := startHost(t, []string{FeatureReveal, FeatureDiff}, u)
+	s.expect("hello 1 reveal diff")
+	s.send("0 features reveal diff\n0 ready -\n")
+	s.expect("1 diff res-x:/a.txt file:///p/a.go show 1")
+	if b := s.body(1); b != "t" {
+		t.Fatalf("diff title %q", b)
+	}
+	s.send("ok 1 78\n")
+	for _, want := range []string{"diff 78 <nil>", "rhun: syntax: a URI field is 1 to 4128 bytes without spaces or line breaks"} {
+		if got := u.next(t); got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	}
+	s.expect("2 reveal res-x:/a.txt 2 3 top")
+	s.send("ok 2\n")
+	if got := u.next(t); got != "<nil>" {
+		t.Fatal(got)
+	}
+	s.send("0 bye\n")
+	<-s.done
+}

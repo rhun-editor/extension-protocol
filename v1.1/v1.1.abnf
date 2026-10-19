@@ -82,12 +82,15 @@ sel-line      = range LF                                  ; anchor, then cursor
 
 ; reveal
 request      =/ id SP r-reveal / id SP r-show-locations
-r-reveal      = "reveal" SP doc SP pos SP ( "top" / "center" / "nearest" / "center-if-outside" )
+r-reveal      = "reveal" SP doc-or-uri SP pos SP ( "top" / "center" / "nearest" / "center-if-outside" )
 r-show-locations = "show-locations" SP len                ; a title line (200 bytes), then a 12d locations body
 
 ; diff: the reply is "ok ID DOC", DOC the tab's id
 request      =/ id SP r-diff / id SP r-diff-close
-r-diff        = "diff" SP doc SP doc SP ( "show" / "background" ) SP len   ; TITLE follows, one line
+r-diff        = "diff" SP doc-or-uri SP doc-or-uri SP ( "show" / "background" ) SP len   ; TITLE follows, one line
+; with feature uris a document may be named by a URI of one field (no SP; write %20)
+doc-or-uri    = doc / ( uri-scheme ":" 1*4095( %x21-7E / %x80-FF ) )
+uri-scheme    = %x61-7A 1*31( %x61-7A / DIGIT / "+" / "." / "-" )
 r-diff-close  = "diff-close" SP doc
 
 ; linked-editing: answered "ok ID LEN" and "N" LF (0, or 2 to 64), N lines of range LF, and

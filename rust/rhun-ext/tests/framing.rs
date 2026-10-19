@@ -974,3 +974,59 @@ fn without_the_features_requests_fail_and_edits_stay_v1() {
     host.send("0 selections 4 1 8\n1 1 1 1\n0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+#[test]
+fn diff_and_reveal_take_uris() {
+    use rhun_ext::{Reveal, Show};
+    struct Uris(Sender<String>);
+    impl Handler for Uris {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            let tab = ext.diff_uris("res-x:/a.txt", "file:///p/a.rs", "t", Show::Front);
+            self.0
+                .send(format!("diff {:?}", tab.map_err(|e| e.code)))
+                .unwrap();
+            let bad = ext.diff_uris("res-x:/a b", "5", "t", Show::Front);
+            self.0
+                .send(format!("{:?}", bad.map_err(|e| e.code)))
+                .unwrap();
+            let r = ext.reveal_uri("res-x:/a.txt", Pos::new(2, 3), Reveal::Top);
+            self.0.send(format!("{:?}", r.map_err(|e| e.code))).unwrap();
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, got) = channel();
+    let feats = [Feature::Reveal, Feature::Diff];
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &feats,
+            Uris(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    let next = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(host.line(), "hello 1 reveal diff");
+    host.send("0 features reveal diff\n0 ready -\n");
+    assert_eq!(host.line(), "1 diff res-x:/a.txt file:///p/a.rs show 1");
+    assert_eq!(host.body(1), "t");
+    host.send("ok 1 78\n");
+    assert_eq!(next(&got), "diff Ok(78)");
+    assert_eq!(next(&got), "Err(\"syntax\")");
+    assert_eq!(host.line(), "2 reveal res-x:/a.txt 2 3 top");
+    host.send("ok 2\n");
+    assert_eq!(next(&got), "Ok(())");
+    host.send("0 bye\n");
+    drop(host);
+    assert!(done.join().unwrap().is_ok());
+}

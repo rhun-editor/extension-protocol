@@ -1115,6 +1115,27 @@ static int on_model_linked(rx_ext *ext, const rx_linked_ask *req, rx_linked *out
     return 1;
 }
 
+static void on_uris_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    assert(rx_diff_uris(ext, "res-x:/a.txt", "file:///p/a.c", "t", 0) == 78);
+    assert(rx_diff_uris(ext, "res-x:/a b", "5", "t", 0) == -1 && strncmp(rx_error(ext), "syntax", 6) == 0);
+    rx_pos at = {2, 3};
+    assert(rx_reveal_uri(ext, "res-x:/a.txt", at, "top") == 0);
+    model_note("uris");
+}
+
+static void uri_sides(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_uris_ready;
+    rx_buf got = {NULL, 0, 0};
+    model_seen[0] = 0;
+    run("reveal diff", &h, "0 features reveal diff\n0 ready -\nok 1 78\nok 2\n0 bye\n", &got);
+    same(&got, "hello 1 reveal diff\n1 diff res-x:/a.txt file:///p/a.c show 1\nt2 reveal res-x:/a.txt 2 3 top\n");
+    assert(strcmp(model_seen, "uris|") == 0);
+    rx_buf_free(&got);
+}
+
 static void editor_model(void) {
     rx_handlers h;
     memset(&h, 0, sizeof h);
@@ -1180,6 +1201,7 @@ int main(void) {
     ordered();
     dispatch();                 /* last: standard output goes to a file from here on */
     editor_model();
+    uri_sides();
     save_actions();
     snippet_requests();
     transform_requests();
