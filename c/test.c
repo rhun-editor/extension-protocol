@@ -566,7 +566,395 @@ static void cursors(void) {
     rx_buf_free(&out);
 }
 
+static void command_removal_guards(void) {
+    rx_ext ext = {0};
+    assert(rx_unregister(&ext, "old") == -1);
+    assert(strncmp(rx_error(&ext), "unknown ", 8) == 0);
+    strcpy(ext.features, "commands");
+    const char *bad[] = {NULL, "", "UPPER", "x\n2 unregister other", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        assert(rx_unregister(&ext, bad[i]) == -1);
+        assert(strncmp(rx_error(&ext), "syntax ", 7) == 0);
+    }
+}
+
+static int on_save_actions(rx_ext *ext, const rx_save_actions_ask *req, rx_wedit *out, void *user) {
+    rx_wedit intermediate = {0};
+    (void)out, (void)user;
+    assert(req->id == 24 && req->doc == 7 && req->version == 9 && strcmp(req->kind, "source.fixAll") == 0);
+    assert(rx_save_apply(ext, req->id, req->doc, req->version, &intermediate) == 10);
+    return 1;
+}
+
+static void save_actions(void) {
+    rx_ext ext = {0};
+    rx_wedit edit = {0};
+    assert(rx_save_apply(&ext, 24, 7, 9, &edit) == -1 && strncmp(rx_error(&ext), "unknown ", 8) == 0);
+    strcpy(ext.features, "save-actions");
+    assert(rx_save_apply(&ext, 2147483648LL, 7, 9, &edit) == -1 && strncmp(rx_error(&ext), "syntax ", 7) == 0);
+    assert(rx_source_kind("source") && rx_source_kind("source.fixAll.eslint") && rx_source_kind("source.a_b-1"));
+    assert(!rx_source_kind("quickfix") && !rx_source_kind("source.") && !rx_source_kind("source..x") && !rx_source_kind("source.\xc3\xa9"));
+    int64_t number;
+    assert(rx_positive_num("9223372036854775807", INT64_MAX, &number) && number == INT64_MAX);
+    assert(!rx_positive_num("9223372036854775808", INT64_MAX, &number));
+    rx_handlers h = {0};
+    h.save_actions = on_save_actions;
+    rx_buf got = {0};
+    run("save-actions", &h,
+        "0 features save-actions\n24 save-actions 7 9 source.fixAll\nok 1 10\n"
+        "25 save-actions 7 9 source.\n26 save-actions 7 -1 source\n"
+        "27 save-actions 9223372036854775808 9 source\n28 save-actions 7 9 source extra\n0 bye\n", &got);
+    same(&got, "hello 1 save-actions\n1 save-apply 24 7 9 2\n0\nok 24 2\n0\n"
+               "error 25 unknown no such request\nerror 26 unknown no such request\n"
+               "error 27 unknown no such request\nerror 28 unknown no such request\n");
+    rx_buf_clear(&got);
+    run("save-actions", &h, "24 save-actions 7 9 source.fixAll\n0 bye\n", &got);
+    same(&got, "hello 1 save-actions\nerror 24 unknown no such request\n");
+    rx_buf_free(&got);
+}
+
+static void prepared_snippets(void) {
+    rx_snippet_field fields[] = {{1,0,1,0},{1,2,3,0},{0,3,3,0}};
+    rx_snippet snippet = {"x x",3,fields,3};
+    rx_buf out = {0};
+    assert(rx_snippet_encode(&snippet,&out)==0);
+    same(&out,"0 0 0 0 snippet 0 3 0 48\nx xfield 1 0 1 0 0\nfield 1 2 3 0 0\nfield 0 3 3 0 0\n");
+    rx_buf_free(&out);
+    rx_snippet_field final_fields[]={{0,0,6,0}};
+    rx_snippet final_snippet={"result",6,final_fields,1};
+    assert(rx_snippet_encode(&final_snippet,&out)==0);
+    same(&out,"0 0 0 0 snippet 0 6 0 16\nresultfield 0 0 6 0 0\n");rx_buf_free(&out);
+    rx_snippet_field crossing[]={{1,0,1,0},{1,1,2,0},{0,1,3,0}};
+    final_snippet.text="xxy";final_snippet.len=3;final_snippet.fields=crossing;final_snippet.nfields=3;
+    assert(rx_snippet_validate(&final_snippet));
+    rx_snippet_field nested[]={{1,0,1,0},{2,0,1,1},{2,2,3,0},{0,3,3,0}};
+    snippet.fields=nested;snippet.nfields=4;assert(rx_snippet_validate(&snippet));
+    rx_snippet_field cycle[]={{1,0,1,0},{2,2,3,0},{2,0,1,1},{1,2,3,2}};
+    snippet.fields=cycle;assert(!rx_snippet_validate(&snippet));
+    rx_buf_str(&out,"unchanged");assert(rx_snippet_encode(&snippet,&out)==-1);
+    same(&out,"unchanged");rx_buf_free(&out);
+    rx_snippet_field invalid[][4]={
+        {{1,0,4,0}},{{1,1,0,0}},{{-1,0,1,0}},{{2147483648LL,0,1,0}},
+        {{0,2,1,0}},{{0,0,0,0},{0,0,0,0}},{{1,0,1,1}},
+        {{1,0,1,2},{2,0,1,0}},{{1,0,1,0},{2,1,2,1}},
+        {{1,0,1,0},{1,1,2,0},{2,1,2,2}},
+        {{1,0,2,0},{2,1,1,0}},{{1,0,2,0},{2,0,2,0}},
+        {{1,0,2,0},{2,1,3,0}}
+    };
+    const size_t counts[]={1,1,1,1,1,2,1,2,2,3,2,2,2};
+    for(size_t i=0;i<sizeof counts/sizeof counts[0];i++) {
+        rx_snippet bad={"xxx",3,invalid[i],counts[i]};assert(!rx_snippet_validate(&bad));
+    }
+    rx_snippet_field different[]={{1,0,1,0},{1,1,2,0}};
+    rx_snippet bad={"xy",2,different,2};assert(!rx_snippet_validate(&bad));
+    const char *invalid_utf8[]={"\xc0\x80","\xed\xa0\x80","\xf4\x90\x80\x80","\xe0\x80\x80","\xf0\x80\x80\x80","\xc3"};
+    for(size_t i=0;i<sizeof invalid_utf8/sizeof invalid_utf8[0];i++) {
+        bad.text=invalid_utf8[i];bad.len=strlen(bad.text);bad.nfields=0;assert(!rx_snippet_validate(&bad));
+    }
+    rx_snippet_field unicode[]={{1,0,4,0},{2,0,4,1},{0,4,4,2}};
+    bad.text="\xf0\x9f\x98\x80";bad.len=4;bad.fields=unicode;bad.nfields=3;
+    assert(rx_snippet_validate(&bad));unicode[0].start=1;assert(!rx_snippet_validate(&bad));
+    rx_snippet_field limits[513];memset(limits,0,sizeof limits);
+    for(size_t i=0;i<513;i++)limits[i].group=1;
+    bad.text="";bad.len=0;bad.fields=limits;bad.nfields=512;
+    assert(rx_snippet_validate(&bad));bad.nfields=513;assert(!rx_snippet_validate(&bad));
+    for(size_t i=0;i<257;i++)limits[i].group=(int64_t)i+1;
+    bad.nfields=256;assert(rx_snippet_validate(&bad));bad.nfields=257;assert(!rx_snippet_validate(&bad));
+    for(size_t i=0;i<33;i++)limits[i].parent=i;
+    bad.nfields=32;assert(rx_snippet_validate(&bad));bad.nfields=33;assert(!rx_snippet_validate(&bad));
+    char *large=(char *)malloc(4u<<20);assert(large);memset(large,'x',4u<<20);
+    bad.text=large;bad.len=4u<<20;bad.nfields=0;assert(!rx_snippet_validate(&bad));free(large);
+    for(int i=0;i<3;i++) {
+        rx_list list={0};rx_snippet_field empty={(int64_t)(i==1),0,0,0};
+        rx_snippet prep={"",0,&empty,i?1u:0u};
+        rx_list_item_snippet(&list,R(0,0,0,0),"text","label",&prep,NULL,NULL,NULL,NULL,0);
+        rx_list_finish(&list,&out);
+        if(i==0)same(&out,"1 0\n0 0 0 0 text 5 0 0 0\nlabel");
+        else assert(!strstr(out.data,"labellabel")&&strstr(out.data,"text 5 0 0 "));
+        rx_buf_free(&out);
+    }
+    rx_list list={0};bad.text="x";bad.len=1;bad.fields=invalid[0];bad.nfields=1;
+    rx_list_item_snippet(&list,R(0,0,0,0),"text","label",&bad,NULL,NULL,NULL,NULL,0);
+    rx_list_finish(&list,&out);same(&out,"1 0\n0 0 0 0 text 5 1 0 0\nlabelx");rx_buf_free(&out);
+    rx_ext ext={0};
+    assert(rx_insert_snippet(&ext,1,0,R(1,1,1,1),&snippet)==-1&&!strncmp(rx_error(&ext),"unknown ",8));
+    strcpy(ext.features,"snippets");
+    assert(rx_insert_snippet(&ext,0,0,R(1,1,1,1),&snippet)==-1&&!strncmp(rx_error(&ext),"syntax ",7));
+}
+
+static void snippet_programs(void) {
+    rx_snippet_field fields[]={{1,0,1,0},{1,2,3,0},{0,3,3,0}};
+    rx_snippet s={"x x",3,fields,3};
+    rx_snippet_option options[]={{"x",1},{NULL,0},{"a\n😀",6}};
+    rx_snippet_choice choices[]={{1,options,3},{1,options,3}};
+    rx_snippet_program p={&s,choices,1, NULL, 0, NULL, 0};
+    rx_buf out={NULL,0,0};
+    assert(rx_snippet_program_encode(&p,&out)==0);
+    same(&out,"0 0 0 0 snippet 0 3 0 75\nx xfield 1 0 1 0 0\nfield 1 2 3 0 0\nfield 0 3 3 0 0\nchoice 1 3 13\n1\nx0\n6\na\n😀");
+    rx_buf_free(&out);
+    rx_list list={0};
+    rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+    rx_list_finish(&list,&out);
+    assert(strstr(out.data,"choice 1 3 13\n1\nx0\n6\na\n😀"));
+    rx_buf_free(&out);
+    for (int i=0;i<8;i++) {
+        p.nchoices=1;choices[0].group=1;choices[0].noptions=3;choices[0].options=options;
+        options[0].text="x";options[0].len=1;options[1].text=NULL;options[1].len=0;
+        switch(i) {
+            case 0:choices[0].group=0;break;
+            case 1:choices[0].group=2;break;
+            case 2:p.nchoices=2;break;
+            case 3:choices[0].noptions=0;break;
+            case 4:choices[0].noptions=257;break;
+            case 5:options[0].text="y";break;
+            case 6:options[1].text="\xff";options[1].len=1;break;
+            default:options[1].len=(1u<<20)+1;break;
+        }
+        assert(!rx_snippet_program_validate(&p));
+        rx_buf_str(&out,"unchanged");assert(rx_snippet_program_encode(&p,&out)==-1);same(&out,"unchanged");rx_buf_free(&out);
+        rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+        rx_list_finish(&list,&out);same(&out,"1 0\n0 0 0 0 text 5 3 0 0\nlabelx x");rx_buf_free(&out);
+    }
+    rx_snippet_option many[256];memset(many,0,sizeof many);many[0].text="x";many[0].len=1;
+    many[255].text="last\0😀\n";many[255].len=10;
+    choices[0].group=1;choices[0].options=many;choices[0].noptions=256;p.nchoices=1;
+    assert(rx_snippet_program_validate(&p));
+    choices[0].options=NULL;assert(!rx_snippet_program_validate(&p));choices[0].options=many;
+    p.choices=NULL;assert(!rx_snippet_program_validate(&p));p.choices=choices;
+    p.nchoices=257;assert(!rx_snippet_program_validate(&p));p.nchoices=1;
+    char *big=(char *)malloc(1u<<20);memset(big,'a',1u<<20);
+    rx_snippet_option large[]={{NULL,0},{big,1u<<20},{big,1u<<20},{big,1u<<20},{big,(1u<<20)-200}};
+    fields[0].end=0;s.text=NULL;s.len=0;s.nfields=1;choices[0].options=large;choices[0].noptions=5;
+    assert(rx_snippet_program_encode(&p,&out)==0);
+    large[4].len+=(4u<<20)-out.len;rx_buf_clear(&out);
+    assert(rx_snippet_program_encode(&p,&out)==0&&out.len==(4u<<20));
+    large[4].len++;assert(!rx_snippet_program_validate(&p));rx_buf_free(&out);free(big);
+}
+
+static void snippet_variants(void) {
+    rx_snippet_field fields[]={{1,0,1,0},{1,2,5,0},{0,5,5,0}};
+    rx_snippet s={"a ABC",5,fields,3};size_t indices[]={2,2};
+    rx_snippet_program p={&s,NULL,0,indices,1, NULL, 0};rx_buf out={0};
+    assert(!rx_snippet_validate(&s));assert(rx_snippet_program_encode(&p,&out)==0);
+    same(&out,"0 0 0 0 snippet 0 5 0 60\na ABCfield 1 0 1 0 0\nfield 1 2 5 0 0\nfield 0 5 5 0 0\nvariant 2 0\n");rx_buf_free(&out);
+    rx_list list={0};rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+    indices[0]=1;rx_list_finish(&list,&out);assert(strstr(out.data,"variant 2 0\n"));rx_buf_free(&out);
+    size_t bad[]={0,1,3,4,SIZE_MAX};
+    for(size_t i=0;i<sizeof bad/sizeof *bad;i++) {indices[0]=bad[i];assert(!rx_snippet_program_validate(&p));}
+    indices[0]=2;p.ninitial_variants=2;assert(!rx_snippet_program_validate(&p));p.ninitial_variants=513;assert(!rx_snippet_program_validate(&p));
+    p.ninitial_variants=1;p.initial_variants=NULL;assert(!rx_snippet_program_validate(&p));p.initial_variants=indices;
+    s.text="a a";s.len=3;fields[1].end=3;s.nfields=2;assert(!rx_snippet_program_validate(&p));
+    rx_ext ext={0};strcpy(ext.features,"snippets");assert(rx_insert_snippet_program(&ext,1,0,R(1,1,1,1),&p)==-1&&!strncmp(rx_error(&ext),"unknown ",8));
+}
+
+static void on_snippet_ready(rx_ext *ext,const char *project,void *user) {
+    (void)project;(void)user;
+    rx_snippet s={"",0,NULL,0};
+    assert(rx_insert_snippet(ext,7,9,R(1,1,1,1),&s)==10);
+    assert(rx_insert_snippet(ext,7,10,R(1,1,1,1),&s)==-1);
+    rx_snippet_field field={1,0,0,0};s.fields=&field;s.nfields=1;
+    rx_snippet_option options[]={{NULL,0},{"x",1}};
+    rx_snippet_choice choice={2,options,2};rx_snippet_program p={&s,&choice,1, NULL, 0, NULL, 0};
+    assert(rx_insert_snippet_program(ext,7,10,R(1,1,1,1),&p)==-1);
+    choice.group=1;
+    assert(rx_insert_snippet_program(ext,7,10,R(1,1,1,1),&p)==11);
+}
+
+static void snippet_requests(void) {
+    rx_handlers h={0};h.ready=on_snippet_ready;
+    rx_buf out={0};
+    run("snippets",&h,"0 features snippets\n0 ready -\nok 1 10\nok 2 9\nok 3 11\n0 bye\n",&out);
+    const char *body="0 0 0 0 snippet 0 0 0 0\n";
+    rx_buf want={0};rx_buf_str(&want,"hello 1 snippets\n");
+    rx_buf_fmt(&want,"1 snippet 7 9 1 1 1 1 %zu\n%s2 snippet 7 10 1 1 1 1 %zu\n%s",strlen(body),body,strlen(body),body);
+    const char *program="0 0 0 0 snippet 0 0 0 34\nfield 1 0 0 0 0\nchoice 1 2 5\n0\n1\nx";
+    rx_buf_fmt(&want,"3 snippet 7 10 1 1 1 1 %zu\n%s",strlen(program),program);
+    same(&out,want.data);rx_buf_free(&out);rx_buf_free(&want);
+}
+
+static void snippet_snapshot_decoder(void) {
+    const char *text="context 1 1 3 8 0 1 5 6 4 2 2 2\n😀\n  😀/p/a/p  //";
+    rx_buf body={0},fields={0};rx_buf_str(&body,text);rx_buf_fmt(&fields,"9 %zu",body.len);
+    rx_snippet_snapshot s;
+    assert(rx_snapshot_decode(&fields,&body,9,R(1,3,1,3).start,&s));
+    same(&s.selected_text,"😀\n");same(&s.current_line,"  😀");same(&s.indent,"  ");
+    assert(s.tab_width==8 && !s.insert_spaces && s.crlf && s.version==9);
+    rx_snippet_snapshot_free(&s);assert(!s.current_line.data && !s.version);
+    for (size_t i=0;i<body.len;i++) {
+        char old=body.data[i];body.data[i]=(char)255;
+        assert(!rx_snapshot_decode(&fields,&body,9,R(1,3,1,3).start,&s));
+        assert(!s.current_line.data && !s.version);body.data[i]=old;
+    }
+    const char *bad[]={"context 1 1 4 8 0 1 5 6 4 2 2 2\n😀\n  😀/p/a/p  //",
+        "context 1 1 3 17 0 1 5 6 4 2 2 2\n😀\n  😀/p/a/p  //",
+        "context 1 1 3 8 2 1 5 6 4 2 2 2\n😀\n  😀/p/a/p  //",
+        "context 1 1 3 8 0 1 5 6 4 2 1 2\n😀\n  😀/p/a/p //",
+        "context 1 1 3 8 0 1 0 4 0 0 0 0\n😀",
+        "context 1 1 3 8 0 1 0 3 0 0 2 0\n  \n  ","context 1 1 3 8 0 1 +0 0 0 0 0 0\n"};
+    for (size_t i=0;i<sizeof bad/sizeof *bad;i++) {
+        rx_buf_clear(&body);rx_buf_str(&body,bad[i]);rx_buf_clear(&fields);rx_buf_fmt(&fields,"9 %zu",body.len);
+        assert(!rx_snapshot_decode(&fields,&body,9,R(1,3,1,3).start,&s));
+    }
+    rx_buf_free(&body);rx_buf_free(&fields);
+}
+
+static int snapshot_cap_test;
+static void on_snapshot_ready(rx_ext *ext,const char *project,void *user) {
+    (void)project;(void)user;rx_snippet_snapshot s;
+    assert(rx_get_snippet_snapshot(ext,0,9,R(1,3,1,3),&s)==-1);
+    if (snapshot_cap_test) {
+        assert(rx_get_snippet_snapshot(ext,7,9,R(1,3,1,3),&s)==-1 && !s.current_line.data);
+        assert(ext->gone);return;
+    }
+    assert(rx_get_snippet_snapshot(ext,7,9,R(1,3,1,3),&s)==0);
+    same(&s.current_line,"  😀");same(&s.indent,"  ");rx_snippet_snapshot_free(&s);
+    assert(rx_toast(ext,"after")==0);
+}
+
+static void snippet_snapshot_requests(void) {
+    rx_handlers h={0};h.ready=on_snapshot_ready;rx_buf input={0},out={0};
+    const char *body="context 1 1 3 4 1 0 0 6 4 2 2 0\n  😀/p/a/p  ";
+    rx_buf_fmt(&input,"0 features snippets\n0 ready -\n0 active 7\nok 1 9 %zu\n%sok 2\n0 bye\n",strlen(body),body);
+    run("snippets",&h,input.data,&out);
+    same(&out,"hello 1 snippets\n1 snippet-context 7 9 1 3 1 3\n2 toast 5\nafter");
+    rx_buf_free(&out);rx_buf_free(&input);snapshot_cap_test=1;
+    const char *bad[]={"4194305","+0","-1","wat","9223372036854775808"};
+    for(size_t i=0;i<sizeof bad/sizeof *bad;i++) {
+        rx_buf_fmt(&input,"0 features snippets\n0 ready -\nok 1 9 %s\n",bad[i]);
+        assert(run_bytes("snippets",&h,input.data,input.len,&out)==1);
+        same(&out,"hello 1 snippets\n1 snippet-context 7 9 1 3 1 3\n");
+        rx_buf_free(&out);rx_buf_free(&input);
+    }
+}
+
+struct st_fixture {
+    const unsigned char *base;
+    size_t len;
+    int patch;
+    unsigned char value;
+    int valid;
+    size_t offset;
+};
+#include "snippet_transform_fixtures.h"
+static void snippet_transform_programs(void) {
+    unsigned char empty[32] = {'S','N','T','X',1,0,0,0,0,0,16,0,0,0,0,0,32};
+    size_t offset=99, maximum=0;
+    assert(rx_snippet_transform_validate(empty,sizeof(empty),&offset)==1 && offset==0);
+    assert(rx_snippet_transform_validate(empty,sizeof(empty),NULL)==1);
+    empty[0]=0; empty[20]=1;
+    assert(!rx_snippet_transform_validate(empty,sizeof(empty),&offset) && offset==0);
+    empty[0]='S';
+    assert(!rx_snippet_transform_validate(empty,sizeof(empty),&offset) && offset==20);
+    assert(!rx_snippet_transform_validate(NULL,0,&offset) && offset==0);
+    assert(!rx_snippet_transform_validate(NULL,31,&offset) && offset==31);
+    assert(!rx_snippet_transform_validate(NULL,32,&offset) && offset==0);
+    assert(!rx_snippet_transform_validate(NULL,SIZE_MAX,&offset) && offset==16);
+    for (size_t i=0;i<sizeof(st_fixtures)/sizeof(st_fixtures[0]);i++)
+        if (st_fixtures[i].len>maximum) maximum=st_fixtures[i].len;
+    int part=99;
+    assert(!rx_snippet_transform_program_validate(NULL,&part,&offset) && part==0 && offset==0);
+    rx_snippet_transform_program pair={NULL,0,NULL,0};
+    assert(!rx_snippet_transform_program_validate(&pair,&part,&offset) && part==1 && offset==0);
+    pair.regex_len=262145;
+    assert(!rx_snippet_transform_program_validate(&pair,&part,&offset) && part==1 && offset==40);
+    pair.regex_len=80;pair.replacement_len=4u<<20;
+    assert(!rx_snippet_transform_program_validate(&pair,&part,&offset) && part==0 && offset==0);
+    for (size_t i=0;i<sizeof(st_fixtures)/sizeof(st_fixtures[0]);i++) {
+        const struct st_fixture *v=&st_fixtures[i];
+        if (!v->valid || v->patch>=0 || !rx_st_word(v->base,12)) continue;
+        size_t roff=rx_st_word(v->base,36), foff=rx_st_word(v->base,44), flen=rx_st_word(v->base,48);
+        pair.regex=v->base+roff;pair.regex_len=foff-roff;
+        pair.replacement=v->base+foff;pair.replacement_len=flen;
+        assert(rx_snippet_transform_program_validate(&pair,&part,&offset) && part==0 && offset==0);
+        assert(rx_snippet_transform_program_validate(&pair,NULL,NULL));
+        pair.replacement_len=0;
+        assert(!rx_snippet_transform_program_validate(&pair,&part,&offset) && part==2 && offset==0);
+        break;
+    }
+    unsigned char *allocation=(unsigned char *)malloc(maximum+2);
+    assert(allocation);
+    unsigned char *input=allocation+1; /* deliberately unaligned */
+    for (size_t i=0;i<sizeof(st_fixtures)/sizeof(st_fixtures[0]);i++) {
+        const struct st_fixture *v=&st_fixtures[i];
+        memcpy(input,v->base,v->len);
+        if (v->patch>=0) input[(size_t)v->patch]=v->value;
+        allocation[0]=0xa5; input[v->len]=0x5a;
+        offset=99;
+        int result=rx_snippet_transform_validate(input,v->len,&offset);
+        if (result!=v->valid || offset!=v->offset) {
+            fprintf(stderr,"transform fixture %zu: got %d/%zu, want %d/%zu\n",i,result,offset,v->valid,v->offset);
+            abort();
+        }
+        assert(allocation[0]==0xa5 && input[v->len]==0x5a);
+        for (size_t j=0;j<v->len;j++) assert(input[j]==(v->patch>=0 && (size_t)v->patch==j ? v->value : v->base[j]));
+    }
+    free(allocation);
+}
+static void snippet_transform_wire(void) {
+    static const unsigned char regex[]={82,78,82,88,1,0,0,0,0,0,16,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,80,0,0,0,0,0,0,0,1,0,0,0,97,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+    static const unsigned char format[]={82,78,82,70,1,0,0,0,0,0,16,0,1,0,0,0,1,0,0,0,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,120};
+    rx_snippet_field fields[]={{1,0,1,0},{1,2,3,0},{0,3,3,0}};
+    rx_snippet s={"a",1,fields,1};
+    rx_snippet_field_transform bindings[]={{1,{regex,sizeof regex,format,sizeof format}},{2,{regex,sizeof regex,format,sizeof format}}};
+    rx_snippet_program p={&s,NULL,0,NULL,0,bindings,1};rx_buf out={0};
+    assert(rx_snippet_program_encode(&p,&out)==0);
+    same(&out,"0 0 0 0 snippet 0 1 0 293\nafield 1 0 1 0 0\ntransforms 0 260\nU05UWAEAAAAAABAAAQAAAMEAAAAAAAAAAAAAAAAAAAABAAAAOAAAAFAAAACIAAAAOQAAAAAAAABSTlJYAQAAAAAAEAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAABAAAAYQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFJOUkYBAAAAAAAQAAEAAAABAAAAOQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAeA==");rx_buf_free(&out);
+    rx_list list={0};rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+    bindings[0].field=0;rx_list_finish(&list,&out);assert(strstr(out.data,"transforms 0 260\nU05UWAEAAAAAABAAAQAAAMEAAAAAAAAAAAAAAAAAAAABAAAAOAAAAFAAAACIAAAAOQAAAAAAAABSTlJYAQAAAAAAEAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAUAAAAAAAAAABAAAAYQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFJOUkYBAAAAAAAQAAEAAAABAAAAOQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAeA=="));rx_buf_free(&out);
+    size_t bad[]={0,2,SIZE_MAX};
+    for(size_t i=0;i<sizeof bad/sizeof *bad;i++) {
+        bindings[0].field=bad[i];assert(!rx_snippet_program_validate(&p));
+        rx_buf_str(&out,"unchanged");assert(rx_snippet_program_encode(&p,&out)<0);same(&out,"unchanged");rx_buf_free(&out);
+        rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+        rx_list_finish(&list,&out);same(&out,"1 0\n0 0 0 0 text 5 1 0 0\nlabela");rx_buf_free(&out);
+    }
+    bindings[0].field=1;rx_ext ext={0};strcpy(ext.features,"snippets");
+    assert(rx_insert_snippet_program(&ext,1,0,R(1,1,1,1),&p)<0&&!strncmp(rx_error(&ext),"unknown ",8));
+    s.text="a a";s.len=3;s.nfields=3;p.ntransforms=2;
+    assert(rx_snippet_program_encode(&p,&out)==0);rx_buf sorted=out;memset(&out,0,sizeof out);
+    rx_snippet_field_transform swap=bindings[0];bindings[0]=bindings[1];bindings[1]=swap;
+    assert(rx_snippet_program_encode(&p,&out)==0);same(&out,sorted.data);assert(bindings[0].field==2);rx_buf_free(&out);rx_buf_free(&sorted);
+    bindings[0].field=1;assert(!rx_snippet_program_validate(&p));bindings[0].field=3;assert(!rx_snippet_program_validate(&p));
+    p.ntransforms=513;assert(!rx_snippet_program_validate(&p));p.ntransforms=1;bindings[0]=bindings[1];
+    s.nfields=1;
+    size_t extra=rx_snippet_program_extra_size(&p);size_t length=(1u<<20)-128-5-extra;
+    char *large=(char *)malloc(length+1);assert(large);memset(large,'z',length+1);s.text=large;s.len=length;
+    assert(rx_snippet_program_validate(&p));rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+    assert(list.n==1&&!list.more);rx_list_finish(&list,&out);rx_buf_free(&out);
+    s.len++;assert(rx_snippet_program_validate(&p));rx_list_item_snippet_program(&list,R(0,0,0,0),"text","label",&p,NULL,NULL,NULL,NULL,0);
+    rx_list_finish(&list,&out);same(&out,"0 1\n");rx_buf_free(&out);free(large);
+}
+static void on_transform_ready(rx_ext *ext,const char *project,void *user) {
+    (void)project;(void)user;
+    static const unsigned char regex[]={82,78,82,88,1,0,0,0,0,0,16,0,0,0,0,0,0,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,80,0,0,0,0,0,0,0,1,0,0,0,97,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}, format[]={82,78,82,70,1,0,0,0,0,0,16,0,1,0,0,0,1,0,0,0,57,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,120};
+    rx_snippet_field field={1,0,1,0};rx_snippet snippet={"a",1,&field,1};
+    rx_snippet_field_transform transform={1,{regex,sizeof regex,format,sizeof format}};
+    rx_snippet_program p={&snippet,NULL,0,NULL,0,&transform,1};
+    if(rx_has(ext,"snippets")&&rx_has(ext,"snippet-transforms")) assert(rx_insert_snippet_program(ext,7,9,R(1,1,1,1),&p)==10);
+    else assert(rx_insert_snippet_program(ext,7,9,R(1,1,1,1),&p)==-1&&!strncmp(rx_error(ext),"unknown ",8));
+    rx_toast(ext,"after");
+}
+static void transform_requests(void) {
+    const char *agreed[]={"","snippets","snippet-transforms","snippets snippet-transforms"};
+    rx_handlers h={0};h.ready=on_transform_ready;
+    for(size_t i=0;i<4;i++) {
+        rx_buf input={0},out={0};rx_buf_fmt(&input,"0 features %s\n0 ready -\n",agreed[i]);
+        if(i==3) rx_buf_str(&input,"ok 1 10\n");
+        rx_buf_str(&input,"0 bye\n");
+        run("snippets snippet-transforms",&h,input.data,&out);
+        if(i==3) {assert(strstr(out.data,"1 snippet 7 9 1 1 1 1 "));assert(strstr(out.data,"transforms 0 260\n"));assert(strstr(out.data,"2 toast 5\nafter"));}
+        else same(&out,"hello 1 snippets snippet-transforms\n1 toast 5\nafter");
+        rx_buf_free(&out);rx_buf_free(&input);
+    }
+}
 int main(void) {
+    snippet_transform_wire();
+    snippet_transform_programs();
+    snippet_snapshot_decoder();
+    prepared_snippets();
+    snippet_programs();
+    snippet_variants();
+    command_removal_guards();
     cursors();
     old_tests();
     locations();
@@ -575,6 +963,10 @@ int main(void) {
     actions();
     cuts();
     dispatch();                 /* last: standard output goes to a file from here on */
+    save_actions();
+    snippet_requests();
+    transform_requests();
+    snippet_snapshot_requests();
     event_lengths();
     fclose(stdout);
     remove("rhunext-test.in");

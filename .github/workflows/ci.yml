@@ -19,6 +19,10 @@ jobs:
           go-version: "1.25"
       - name: Go SDK and the checker
         run: go vet ./... && go test ./... && go build ./conformance/ext
+      - name: Unicode generator unit checks
+        run: |
+          python3 tools/test_snippet_unicode.py
+          python3 tools/test_snippet_emoji.py
       - name: Rust SDK
         working-directory: rust/rhun-ext
         run: cargo clippy --all-targets -- -D warnings && cargo test

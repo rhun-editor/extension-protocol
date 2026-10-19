@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 use rhun_ext::{
-    run_on, CompleteRequest, CompletionItem, CompletionList, Ext, Feature, Handler, Kind, Picture, Pos, Range,
-    SignatureHelp, SignatureRequest, View, ViewEvent,
+    run_on, CompleteRequest, CompletionItem, CompletionList, Ext, Feature, Handler, Kind, Picture,
+    Pos, Range, SignatureHelp, SignatureRequest, View, ViewEvent,
 };
 
 struct ChanReader {
@@ -52,13 +52,20 @@ struct Probe(Arc<Mutex<Seen>>);
 
 impl Handler for Probe {
     fn ready(&mut self, ext: &Ext, project: Option<&str>) {
-        self.0.lock().unwrap().events.push(format!("ready {project:?} views={}", ext.has(Feature::Views)));
+        self.0.lock().unwrap().events.push(format!(
+            "ready {project:?} views={}",
+            ext.has(Feature::Views)
+        ));
         let v = ext.view("Chart").unwrap();
         let mut p = Picture::new();
         p.rect(0.0, 0.0, 10.0, 10.0, rhun_ext::Color::Accent);
         ext.draw(v, &p).unwrap();
         let err = ext.unview(99).unwrap_err();
-        self.0.lock().unwrap().events.push(format!("view {v} unview99 {}", err.code));
+        self.0
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("view {v} unview99 {}", err.code));
     }
     fn view(&mut self, _ext: &Ext, view: View, ev: ViewEvent) {
         self.0.lock().unwrap().events.push(format!("{view} {ev:?}"));
@@ -98,6 +105,69 @@ impl Host {
 }
 
 #[test]
+fn runtime_command_removal_requires_negotiation_and_preserves_errors() {
+    struct Commands(Sender<Vec<String>>);
+    impl Handler for Commands {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            let mut results = Vec::new();
+            results.push(
+                ext.unregister("old")
+                    .map(|_| "ok".to_string())
+                    .unwrap_or_else(|e| e.code),
+            );
+            if ext.has(Feature::Commands) {
+                results.push(ext.unregister("x\n2 unregister other").unwrap_err().code);
+                results.push(ext.unregister("manifest").unwrap_err().code);
+            }
+            self.0.send(results).unwrap();
+        }
+    }
+    for agreed in [false, true] {
+        let (to_ext, ext_in) = channel();
+        let (ext_out, from_ext) = channel();
+        let (seen, results) = channel();
+        let done = thread::spawn(move || {
+            run_on(
+                ChanReader {
+                    rx: ext_in,
+                    buf: Vec::new(),
+                },
+                ChanWriter(ext_out),
+                &[Feature::Commands],
+                Commands(seen),
+            )
+        });
+        let mut host = Host {
+            from_ext: BufReader::new(ChanReader {
+                rx: from_ext,
+                buf: Vec::new(),
+            }),
+            to_ext,
+        };
+        assert_eq!(host.line(), "hello 1 commands");
+        if agreed {
+            host.send("0 features commands\n0 ready -\n");
+            assert_eq!(host.line(), "1 unregister old");
+            host.send("ok 1\n");
+            assert_eq!(host.line(), "2 unregister manifest");
+            host.send("error 2 refused not a runtime command\n");
+            assert_eq!(
+                results.recv_timeout(Duration::from_secs(2)).unwrap(),
+                ["ok", "syntax", "refused"]
+            );
+        } else {
+            host.send("0 ready -\n");
+            assert_eq!(
+                results.recv_timeout(Duration::from_secs(2)).unwrap(),
+                ["unknown"]
+            );
+        }
+        host.send("0 bye\n");
+        done.join().unwrap().unwrap();
+    }
+}
+
+#[test]
 fn a_session_from_hello_to_bye() {
     let (to_ext, ext_in) = channel();
     let (ext_out, from_ext) = channel();
@@ -105,13 +175,22 @@ fn a_session_from_hello_to_bye() {
     let probe = Probe(seen.clone());
     let done = thread::spawn(move || {
         run_on(
-            ChanReader { rx: ext_in, buf: Vec::new() },
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
             ChanWriter(ext_out),
             &[Feature::Views, Feature::Complete],
             probe,
         )
     });
-    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
 
     assert_eq!(host.line(), "hello 1 views complete");
     host.send("0 features views\n0 ready /tmp/my project\n");
@@ -157,8 +236,24 @@ fn rhun_going_away_fails_waiting_requests() {
     }
     let got = Arc::new(Mutex::new(None));
     let w = Waits(got.clone());
-    let done = thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &[], w));
-    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[],
+            w,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
     assert_eq!(host.line(), "hello 1");
     host.send("0 ready -\n");
     assert_eq!(host.line(), "1 toast 2");
@@ -181,8 +276,24 @@ fn a_request_after_rhun_went_away_fails_at_once() {
     }
     let got = Arc::new(Mutex::new(None));
     let l = Late(got.clone());
-    let done = thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &[], l));
-    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[],
+            l,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
     assert_eq!(host.line(), "hello 1");
     host.send("0 ready -\n");
     drop(host);
@@ -193,8 +304,8 @@ fn a_request_after_rhun_went_away_fails_at_once() {
 #[test]
 fn language_requests_and_the_action_event() {
     use rhun_ext::{
-        ActionsRequest, CodeAction, FormatRequest, Location, PosRequest, RenameRequest, Symbol, SymbolKind, Target,
-        TextEdit, WorkspaceEdit,
+        ActionsRequest, CodeAction, FormatRequest, Location, PosRequest, RenameRequest, Symbol,
+        SymbolKind, Target, TextEdit, WorkspaceEdit,
     };
     struct Lang(Arc<Mutex<Vec<String>>>);
     impl Handler for Lang {
@@ -202,14 +313,26 @@ fn language_requests_and_the_action_event() {
             vec![Location::new(Target::Doc(req.doc), Range::new(req.at, req.at)).text("x")]
         }
         fn symbols(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Symbol> {
-            vec![Symbol::new(Range::default(), SymbolKind::Function, 0, "main")]
+            vec![Symbol::new(
+                Range::default(),
+                SymbolKind::Function,
+                0,
+                "main",
+            )]
         }
         fn actions(&mut self, _ext: &Ext, _req: &ActionsRequest) -> Vec<CodeAction> {
             vec![CodeAction::new("source", "Go").data(b"a b\nc")]
         }
         fn action(&mut self, ext: &Ext, data: &[u8]) {
-            self.0.lock().unwrap().push(String::from_utf8_lossy(data).into_owned());
-            let edit = WorkspaceEdit::new().file("/p/a.rs", None, vec![TextEdit::new(Range::default(), "x")]);
+            self.0
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(data).into_owned());
+            let edit = WorkspaceEdit::new().file(
+                "/p/a.rs",
+                None,
+                vec![TextEdit::new(Range::default(), "x")],
+            );
             let res = ext.apply(&edit).map_err(|e| e.code);
             self.0.lock().unwrap().push(format!("{res:?}"));
         }
@@ -217,28 +340,60 @@ fn language_requests_and_the_action_event() {
             if req.name == "bad" {
                 return Err("not a name\nhere".into());
             }
-            Ok(WorkspaceEdit::new().doc(req.doc, req.version, vec![TextEdit::new(Range::new(req.at, req.at), &req.name)]))
+            Ok(WorkspaceEdit::new().doc(
+                req.doc,
+                req.version,
+                vec![TextEdit::new(Range::new(req.at, req.at), &req.name)],
+            ))
         }
         fn format(&mut self, _ext: &Ext, req: &FormatRequest) -> WorkspaceEdit {
             if !req.spaces {
                 return WorkspaceEdit::new();
             }
-            WorkspaceEdit::new().doc(req.doc, req.version, vec![TextEdit::new(Range::default(), "")])
+            WorkspaceEdit::new().doc(
+                req.doc,
+                req.version,
+                vec![TextEdit::new(Range::default(), "")],
+            )
         }
     }
     let (to_ext, ext_in) = channel();
     let (ext_out, from_ext) = channel();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let lang = Lang(seen.clone());
-    let feats = [Feature::Definition, Feature::Symbols, Feature::Actions, Feature::Rename, Feature::Format];
-    let done =
-        thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &feats, lang));
+    let feats = [
+        Feature::Definition,
+        Feature::Symbols,
+        Feature::Actions,
+        Feature::Rename,
+        Feature::Format,
+    ];
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &feats,
+            lang,
+        )
+    });
     fn answer(host: &mut Host, id: u32, body: &str) {
         assert_eq!(host.line(), format!("ok {id} {}", body.len()));
         assert_eq!(host.body(body.len()), body);
     }
-    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
-    assert_eq!(host.line(), "hello 1 definition symbols actions rename format");
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(
+        host.line(),
+        "hello 1 definition symbols actions rename format"
+    );
     host.send("0 features definition symbols actions rename format\n0 ready -\n");
 
     host.send("1 definition 4 9 2 3 invoked -\n");
@@ -264,7 +419,10 @@ fn language_requests_and_the_action_event() {
     assert!(host.line().starts_with("error 8 unknown"));
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
-    assert_eq!(*seen.lock().unwrap(), vec!["a b\nc".to_string(), "Err(\"stale\")".to_string()]);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["a b\nc".to_string(), "Err(\"stale\")".to_string()]
+    );
 }
 
 #[test]
@@ -273,10 +431,345 @@ fn an_action_length_rhun_never_sends_ends_the_session() {
     let (ext_out, from_ext) = channel();
     struct Quiet;
     impl Handler for Quiet {}
-    let done = thread::spawn(move || run_on(ChanReader { rx: ext_in, buf: Vec::new() }, ChanWriter(ext_out), &[], Quiet));
-    let mut host = Host { from_ext: BufReader::new(ChanReader { rx: from_ext, buf: Vec::new() }), to_ext };
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[],
+            Quiet,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
     assert_eq!(host.line(), "hello 1");
     host.send("0 action 18446744073709551615\n");
     // the session ends without allocating, while rhun's end is still open
     done.join().unwrap().unwrap();
+}
+
+#[test]
+fn source_actions_validate_identity_and_credit_intermediate_edits() {
+    use rhun_ext::{SaveActionsRequest, WorkspaceEdit};
+    let fields = |kind: &str| vec!["7".into(), "9".into(), kind.into()];
+    assert!(SaveActionsRequest::parse(24, &fields("source.fixAll")).is_some());
+    for kind in ["quickfix", "source.", "source..x", "source.x.", "source.é"] {
+        assert!(SaveActionsRequest::parse(24, &fields(kind)).is_none());
+    }
+    assert!(SaveActionsRequest::parse(2147483648, &fields("source")).is_none());
+    assert!(SaveActionsRequest::parse(24, &["0".into(), "9".into(), "source".into()]).is_none());
+    struct Save;
+    impl Handler for Save {
+        fn save_actions(
+            &mut self,
+            ext: &Ext,
+            req: &SaveActionsRequest,
+        ) -> Result<WorkspaceEdit, String> {
+            assert_eq!(
+                (req.id, req.doc, req.version, req.kind.as_str()),
+                (24, 7, 9, "source.fixAll")
+            );
+            assert_eq!(
+                ext.save_apply(0, 7, 9, &WorkspaceEdit::default())
+                    .unwrap_err()
+                    .code,
+                "syntax"
+            );
+            assert_eq!(
+                ext.save_apply(24, 7, 9, &WorkspaceEdit::default()).unwrap(),
+                10
+            );
+            Ok(WorkspaceEdit::default())
+        }
+    }
+    for agreed in [false, true] {
+        let (to_ext, ext_in) = channel();
+        let (ext_out, from_ext) = channel();
+        let done = thread::spawn(move || {
+            run_on(
+                ChanReader {
+                    rx: ext_in,
+                    buf: Vec::new(),
+                },
+                ChanWriter(ext_out),
+                &[Feature::SaveActions],
+                Save,
+            )
+        });
+        let mut host = Host {
+            from_ext: BufReader::new(ChanReader {
+                rx: from_ext,
+                buf: Vec::new(),
+            }),
+            to_ext,
+        };
+        assert_eq!(host.line(), "hello 1 save-actions");
+        if agreed {
+            host.send("0 features save-actions\n");
+        }
+        host.send("24 save-actions 7 9 source.fixAll\n");
+        if agreed {
+            assert_eq!(host.line(), "1 save-apply 24 7 9 2");
+            assert_eq!(host.body(2), "0\n");
+            host.send("ok 1 10\n");
+            assert_eq!(host.line(), "ok 24 2");
+            assert_eq!(host.body(2), "0\n");
+            host.send("25 save-actions 7 9 source.\n");
+            assert_eq!(host.line(), "error 25 unknown no such request");
+        } else {
+            assert_eq!(host.line(), "error 24 unknown no such request");
+        }
+        host.send("0 bye\n");
+        done.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn prepared_snippet_requests_frame_empty_text_and_validate_reply() {
+    use rhun_ext::PreparedSnippet;
+    struct Snippet;
+    impl Handler for Snippet {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            let s = PreparedSnippet::default();
+            let range = Range::new(Pos::new(1, 1), Pos::new(1, 1));
+            assert_eq!(
+                ext.insert_snippet(0, 9, range, &s).unwrap_err().code,
+                "syntax"
+            );
+            assert_eq!(ext.insert_snippet(7, 9, range, &s).unwrap(), 10);
+            for _ in 0..4 {
+                assert_eq!(
+                    ext.insert_snippet(7, 9, range, &s).unwrap_err().code,
+                    "syntax"
+                );
+            }
+            let mut program = rhun_ext::SnippetProgram {
+                initial_variants: vec![],
+                transforms: vec![],
+                snippet: PreparedSnippet {
+                    text: String::new(),
+                    fields: vec![rhun_ext::Field {
+                        group: 1,
+                        ..rhun_ext::Field::default()
+                    }],
+                },
+                choices: vec![rhun_ext::SnippetChoice {
+                    group: 2,
+                    options: vec![String::new(), "x".into()],
+                }],
+            };
+            assert_eq!(
+                ext.insert_snippet_program(7, 10, range, &program)
+                    .unwrap_err()
+                    .code,
+                "syntax"
+            );
+            program.choices[0].group = 1;
+            assert_eq!(
+                ext.insert_snippet_program(7, 10, range, &program).unwrap(),
+                11
+            );
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Snippets],
+            Snippet,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 snippets");
+    host.send("0 features snippets\n0 ready -\n");
+    let body = "0 0 0 0 snippet 0 0 0 0\n";
+    for (i, reply) in ["10", "8", "+10", "9223372036854775808", "10 extra"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            host.line(),
+            format!("{} snippet 7 9 1 1 1 1 {}", i + 1, body.len())
+        );
+        assert_eq!(host.body(body.len()), body);
+        host.send(&format!("ok {} {}\n", i + 1, reply));
+    }
+    let program = "0 0 0 0 snippet 0 0 0 34\nfield 1 0 0 0 0\nchoice 1 2 5\n0\n1\nx";
+    assert_eq!(
+        host.line(),
+        format!("6 snippet 7 10 1 1 1 1 {}", program.len())
+    );
+    assert_eq!(host.body(program.len()), program);
+    host.send("ok 6 11\n");
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn snippet_snapshot_body_framing_guards_and_transport_cap() {
+    struct Snapshot(Sender<()>);
+    impl Handler for Snapshot {
+        fn ready(&mut self, ext: &Ext, _: Option<&str>) {
+            let range = Range::new(Pos::new(1, 3), Pos::new(1, 3));
+            assert_eq!(
+                ext.snippet_snapshot(0, 9, range).unwrap_err().code,
+                "syntax"
+            );
+            let s = ext.snippet_snapshot(7, 9, range).unwrap();
+            assert_eq!(s.current_line, "  😀");
+            assert_eq!(s.indent, "  ");
+            assert_eq!(s.path, "/p/a");
+            assert_eq!(s.version, 9);
+            assert!(ext.snippet_snapshot(7, 9, range).is_err());
+            self.0.send(()).unwrap();
+        }
+    }
+    for len in ["4194305", "+0", "-1", "wat", "9223372036854775808"] {
+        let (to_ext, ext_in) = channel();
+        let (ext_out, from_ext) = channel();
+        let (tx, rx) = channel();
+        let done = thread::spawn(move || {
+            run_on(
+                ChanReader {
+                    rx: ext_in,
+                    buf: Vec::new(),
+                },
+                ChanWriter(ext_out),
+                &[Feature::Snippets],
+                Snapshot(tx),
+            )
+        });
+        let mut host = Host {
+            from_ext: BufReader::new(ChanReader {
+                rx: from_ext,
+                buf: Vec::new(),
+            }),
+            to_ext,
+        };
+        assert_eq!(host.line(), "hello 1 snippets");
+        host.send("0 features snippets\n0 ready -\n");
+        assert_eq!(host.line(), "1 snippet-context 7 9 1 3 1 3");
+        let body = "context 1 1 3 4 1 0 0 6 4 2 2 0\n  😀/p/a/p  ";
+        host.send(&format!("0 active 7\nok 1 9 {}\n{body}", body.len()));
+        assert_eq!(host.line(), "2 snippet-context 7 9 1 3 1 3");
+        host.send(&format!("ok 2 9 {len}\n"));
+        // No body/EOF is supplied. The reader must reject its length immediately.
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        done.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn compiled_transform_negotiation_and_framing() {
+    struct Transform;
+    impl Handler for Transform {
+        fn ready(&mut self, ext: &Ext, _: Option<&str>) {
+            let compiled = rhun_ext::CompiledSnippetTransform::from_programs(
+                &[
+                    82, 78, 82, 88, 1, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 80, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+                    0, 97, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0,
+                ],
+                &[
+                    82, 78, 82, 70, 1, 0, 0, 0, 0, 0, 16, 0, 1, 0, 0, 0, 1, 0, 0, 0, 57, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 120,
+                ],
+            )
+            .unwrap();
+            let p = rhun_ext::SnippetProgram {
+                snippet: rhun_ext::PreparedSnippet {
+                    text: "a".into(),
+                    fields: vec![rhun_ext::Field {
+                        group: 1,
+                        start: 0,
+                        end: 1,
+                        parent: 0,
+                    }],
+                },
+                transforms: vec![rhun_ext::SnippetFieldTransform {
+                    field: 1,
+                    transform: compiled,
+                }],
+                ..rhun_ext::SnippetProgram::default()
+            };
+            let result =
+                ext.insert_snippet_program(7, 9, Range::new(Pos::new(1, 1), Pos::new(1, 1)), &p);
+            if ext.has(Feature::Snippets) && ext.has(Feature::SnippetTransforms) {
+                assert_eq!(result.unwrap(), 10);
+            } else {
+                assert_eq!(result.unwrap_err().code, "unknown");
+            }
+            ext.toast("after").unwrap();
+        }
+    }
+    for agreed in [
+        "",
+        "snippets",
+        "snippet-transforms",
+        "snippets snippet-transforms",
+    ] {
+        let (to_ext, ext_in) = channel();
+        let (ext_out, from_ext) = channel();
+        let done = thread::spawn(move || {
+            run_on(
+                ChanReader {
+                    rx: ext_in,
+                    buf: Vec::new(),
+                },
+                ChanWriter(ext_out),
+                &[Feature::Snippets, Feature::SnippetTransforms],
+                Transform,
+            )
+        });
+        let mut host = Host {
+            from_ext: BufReader::new(ChanReader {
+                rx: from_ext,
+                buf: Vec::new(),
+            }),
+            to_ext,
+        };
+        assert_eq!(host.line(), "hello 1 snippets snippet-transforms");
+        host.send(&format!("0 features {agreed}\n0 ready -\n"));
+        if agreed == "snippets snippet-transforms" {
+            let header = host.line();
+            let len: usize = header.split_whitespace().last().unwrap().parse().unwrap();
+            assert_eq!(header, format!("1 snippet 7 9 1 1 1 1 {len}"));
+            let body = host.body(len);
+            assert!(body.contains("transforms 0 260\n"));
+            assert_eq!(len, body.len());
+            host.send("ok 1 10\n");
+            assert_eq!(host.line(), "2 toast 5");
+        } else {
+            assert_eq!(host.line(), "1 toast 5");
+        }
+        assert_eq!(host.body(5), "after");
+        host.send(if agreed == "snippets snippet-transforms" {
+            "ok 2\n"
+        } else {
+            "ok 1\n"
+        });
+        host.send("0 bye\n");
+        drop(host);
+        assert!(done.join().unwrap().is_ok());
+    }
 }

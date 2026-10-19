@@ -36,6 +36,10 @@ pub mod chart;
 pub mod complete;
 pub mod lang;
 pub mod picture;
+pub mod snippet;
+pub mod snippet_context;
+pub mod snippet_transform;
+pub mod watch;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -44,12 +48,20 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-pub use complete::{CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest};
+pub use complete::{
+    CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
+};
 pub use lang::{
-    ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest, Symbol, SymbolKind, Target,
-    TextEdit, WorkspaceEdit,
+    ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest,
+    SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
 };
 pub use picture::{Color, Picture};
+pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
+pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
+pub use snippet_context::SnippetSnapshot;
+pub use snippet_transform::{
+    CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
+};
 
 #[cfg(test)]
 mod tests {
@@ -57,8 +69,14 @@ mod tests {
 
     #[test]
     fn whole_ranges() {
-        assert_eq!(whole_range(b"ab\ncd"), Range::new(Pos::new(1, 1), Pos::new(2, 3)));
-        assert_eq!(whole_range(b"ab\n"), Range::new(Pos::new(1, 1), Pos::new(2, 1)));
+        assert_eq!(
+            whole_range(b"ab\ncd"),
+            Range::new(Pos::new(1, 1), Pos::new(2, 3))
+        );
+        assert_eq!(
+            whole_range(b"ab\n"),
+            Range::new(Pos::new(1, 1), Pos::new(2, 1))
+        );
         assert_eq!(whole_range(b""), Range::new(Pos::new(1, 1), Pos::new(1, 1)));
     }
 }
@@ -116,6 +134,17 @@ pub enum Feature {
     Rename,
     /// Format a document: [`Handler::format`].
     Format,
+    /// Remove runtime commands: [`Ext::unregister`] (protocol 1.1).
+    Commands,
+    /// Source actions before saving: [`Handler::save_actions`] and [`Ext::save_apply`].
+    SaveActions,
+    /// Native editable fields in completions and explicit insertion (protocol 1.1).
+    Snippets,
+    SnippetVariants,
+    /// Compiled transforms when navigating native snippet fields.
+    SnippetTransforms,
+    /// Coalesced workspace filesystem invalidations.
+    WorkspaceWatch,
 }
 
 impl Feature {
@@ -130,6 +159,12 @@ impl Feature {
             Feature::Actions => "actions",
             Feature::Rename => "rename",
             Feature::Format => "format",
+            Feature::Commands => "commands",
+            Feature::SaveActions => "save-actions",
+            Feature::Snippets => "snippets",
+            Feature::SnippetVariants => "snippet-variants",
+            Feature::SnippetTransforms => "snippet-transforms",
+            Feature::WorkspaceWatch => "workspace_watch",
         }
     }
 }
@@ -174,7 +209,12 @@ impl Opened {
         let version = parts.next()?.parse().ok()?;
         let lang = parts.next()?.to_string();
         let path = parts.next()?.to_string();
-        Some(Opened { doc, version, lang, path })
+        Some(Opened {
+            doc,
+            version,
+            lang,
+            path,
+        })
     }
 }
 
@@ -191,7 +231,11 @@ pub fn parse_edits(body: &[u8]) -> Result<Vec<Edit>, String> {
     let mut out = Vec::new();
     let mut pos = 0;
     while pos < body.len() {
-        let nl = body[pos..].iter().position(|&b| b == b'\n').ok_or("an edit header without LF")? + pos;
+        let nl = body[pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or("an edit header without LF")?
+            + pos;
         let head = std::str::from_utf8(&body[pos..nl]).map_err(|_| "a header that is not UTF-8")?;
         let f: Vec<&str> = head.split(' ').collect();
         if f.len() != 3 {
@@ -202,7 +246,11 @@ pub fn parse_edits(body: &[u8]) -> Result<Vec<Edit>, String> {
         if len > body.len() - (nl + 1) {
             return Err("an edit longer than the body".into());
         }
-        out.push(Edit { start, del, ins: body[nl + 1..nl + 1 + len].to_vec() });
+        out.push(Edit {
+            start,
+            del,
+            ins: body[nl + 1..nl + 1 + len].to_vec(),
+        });
         pos = nl + 1 + len;
     }
     Ok(out)
@@ -211,7 +259,10 @@ pub fn parse_edits(body: &[u8]) -> Result<Vec<Edit>, String> {
 /// Applies edit records to the text they were made against.
 pub fn apply_edits(text: &mut Vec<u8>, edits: &[Edit]) -> Result<(), String> {
     for e in edits {
-        if e.start.checked_add(e.del).map_or(true, |end| end > text.len()) {
+        if e.start
+            .checked_add(e.del)
+            .map_or(true, |end| end > text.len())
+        {
             return Err("an edit outside the text".into());
         }
         text.splice(e.start..e.start + e.del, e.ins.iter().copied());
@@ -222,8 +273,15 @@ pub fn apply_edits(text: &mut Vec<u8>, edits: &[Edit]) -> Result<(), String> {
 /// The range that covers all of a text: from 1:1 to the end of its last line.
 pub fn whole_range(text: &[u8]) -> Range {
     let line = text.iter().filter(|&&b| b == b'\n').count() as u32 + 1;
-    let last = text.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
-    Range::new(Pos::new(1, 1), Pos::new(line, (text.len() - last) as u32 + 1))
+    let last = text
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    Range::new(
+        Pos::new(1, 1),
+        Pos::new(line, (text.len() - last) as u32 + 1),
+    )
 }
 
 /// The severity of a diagnostic.
@@ -259,16 +317,38 @@ pub struct Diagnostic {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ViewEvent {
     /// The drawable size in logical pixels: draw again for it.
-    Size { width: f32, height: f32 },
+    Size {
+        width: f32,
+        height: f32,
+    },
     /// Text sizes: character advance and line height, logical pixels.
     Metrics(Metrics),
-    Hover { x: f32, y: f32 },
-    Down { x: f32, y: f32 },
-    Drag { x: f32, y: f32 },
-    Up { x: f32, y: f32 },
-    Click { x: f32, y: f32 },
+    Hover {
+        x: f32,
+        y: f32,
+    },
+    Down {
+        x: f32,
+        y: f32,
+    },
+    Drag {
+        x: f32,
+        y: f32,
+    },
+    Up {
+        x: f32,
+        y: f32,
+    },
+    Click {
+        x: f32,
+        y: f32,
+    },
     Leave,
-    Wheel { x: f32, y: f32, dy: f32 },
+    Wheel {
+        x: f32,
+        y: f32,
+        dy: f32,
+    },
     /// The user closed the tab; the id is not used again.
     Closed,
 }
@@ -295,10 +375,22 @@ impl Default for Metrics {
     /// A guess at scale 1, for drawing before the first `metrics` event.
     fn default() -> Metrics {
         Metrics {
-            small: TextMetric { advance: 6.0, line_height: 16.0 },
-            normal: TextMetric { advance: 7.0, line_height: 18.0 },
-            large: TextMetric { advance: 10.0, line_height: 26.0 },
-            mono: TextMetric { advance: 7.0, line_height: 19.0 },
+            small: TextMetric {
+                advance: 6.0,
+                line_height: 16.0,
+            },
+            normal: TextMetric {
+                advance: 7.0,
+                line_height: 18.0,
+            },
+            large: TextMetric {
+                advance: 10.0,
+                line_height: 26.0,
+            },
+            mono: TextMetric {
+                advance: 7.0,
+                line_height: 19.0,
+            },
         }
     }
 }
@@ -344,7 +436,10 @@ impl Metrics {
         let mut m = Metrics::default();
         let mut i = 0;
         while i + 2 < fields.len() {
-            let tm = TextMetric { advance: fields[i + 1].parse().ok()?, line_height: fields[i + 2].parse().ok()? };
+            let tm = TextMetric {
+                advance: fields[i + 1].parse().ok()?,
+                line_height: fields[i + 2].parse().ok()?,
+            };
             match fields[i].as_str() {
                 "small" => m.small = tm,
                 "normal" => m.normal = tm,
@@ -440,13 +535,27 @@ pub trait Handler: Send {
     fn format(&mut self, _ext: &Ext, _req: &FormatRequest) -> WorkspaceEdit {
         WorkspaceEdit::default()
     }
+    /// Source actions before saving. Intermediate command edits use [`Ext::save_apply`].
+    /// A `cancel` event names `req.id`. Handlers run serially, so long work must be bounded;
+    /// custom asynchronous dispatchers must revoke that invocation when cancellation arrives.
+    fn save_actions(
+        &mut self,
+        _ext: &Ext,
+        _req: &SaveActionsRequest,
+    ) -> Result<WorkspaceEdit, String> {
+        Ok(WorkspaceEdit::default())
+    }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
 }
 
 enum Msg {
     Event(Event),
-    HostRequest { id: u64, verb: String, fields: Vec<String> },
+    HostRequest {
+        id: u64,
+        verb: String,
+        fields: Vec<String>,
+    },
     End,
 }
 
@@ -460,7 +569,10 @@ struct Pending {
 }
 
 fn closed_error() -> Error {
-    Error { code: "closed".into(), text: "rhun went away".into() }
+    Error {
+        code: "closed".into(),
+        text: "rhun went away".into(),
+    }
 }
 
 struct Shared {
@@ -490,7 +602,10 @@ where
     H: Handler + 'static,
 {
     let ext = Ext {
-        shared: Arc::new(Mutex::new(Shared { out: Box::new(output), next_id: 1 })),
+        shared: Arc::new(Mutex::new(Shared {
+            out: Box::new(output),
+            next_id: 1,
+        })),
         pending: Arc::new(Mutex::new(Pending::default())),
         features: Arc::new(Mutex::new(Vec::new())),
     };
@@ -551,7 +666,10 @@ impl Ext {
         };
         if let Err(e) = self.write(&line, body.unwrap_or(&[])) {
             self.pending.lock().unwrap().waiters.remove(&id);
-            return Err(Error { code: "io".into(), text: e.to_string() });
+            return Err(Error {
+                code: "io".into(),
+                text: e.to_string(),
+            });
         }
         rx.recv().unwrap_or_else(|_| Err(closed_error()))
     }
@@ -561,22 +679,34 @@ impl Ext {
     /// The document's text and its version.
     pub fn text(&self, doc: Doc) -> Result<(Vec<u8>, i64), Error> {
         let r = self.request(&format!("text {doc}"), None)?;
-        Ok((r.body, r.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0)))
+        Ok((
+            r.body,
+            r.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0),
+        ))
     }
 
     /// A range's text and the document's version.
     pub fn range_text(&self, doc: Doc, r: Range) -> Result<(Vec<u8>, i64), Error> {
         let rep = self.request(
-            &format!("range {doc} {} {} {} {}", r.start.line, r.start.col, r.end.line, r.end.col),
+            &format!(
+                "range {doc} {} {} {} {}",
+                r.start.line, r.start.col, r.end.line, r.end.col
+            ),
             None,
         )?;
-        Ok((rep.body, rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0)))
+        Ok((
+            rep.body,
+            rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0),
+        ))
     }
 
     /// Replaces a range at a version (one undo step); the new version.
     pub fn replace(&self, doc: Doc, version: i64, r: Range, text: &str) -> Result<i64, Error> {
         let rep = self.request(
-            &format!("replace {doc} {version} {} {} {} {}", r.start.line, r.start.col, r.end.line, r.end.col),
+            &format!(
+                "replace {doc} {version} {} {} {} {}",
+                r.start.line, r.start.col, r.end.line, r.end.col
+            ),
             Some(text.as_bytes()),
         )?;
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
@@ -593,14 +723,23 @@ impl Ext {
     /// `badpos`, `nodoc`, `nofile`, …). Needs `documents = write`. For a language server's
     /// `workspace/applyEdit`.
     pub fn apply(&self, edit: &WorkspaceEdit) -> Result<(), Error> {
-        let body = edit.encode().map_err(|text| Error { code: "toobig".into(), text })?;
+        let body = edit.encode().map_err(|text| Error {
+            code: "toobig".into(),
+            text,
+        })?;
         self.request("apply", Some(&body)).map(|_| ())
     }
 
     /// Selects a range (the cursor at its end).
     pub fn select(&self, doc: Doc, r: Range) -> Result<(), Error> {
-        self.request(&format!("select {doc} {} {} {} {}", r.start.line, r.start.col, r.end.line, r.end.col), None)
-            .map(|_| ())
+        self.request(
+            &format!(
+                "select {doc} {} {} {} {}",
+                r.start.line, r.start.col, r.end.line, r.end.col
+            ),
+            None,
+        )
+        .map(|_| ())
     }
 
     /// Opens a file (absolute, or relative to the project) at a position; its document id.
@@ -613,25 +752,47 @@ impl Ext {
     pub fn diagnostics(&self, doc: Doc, version: i64, marks: &[Diagnostic]) -> Result<(), Error> {
         let mut body = String::new();
         for d in marks {
-            let msg: String = d.message.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
-            let src = if d.source.is_empty() { "-".to_string() } else { d.source.replace(' ', "_") };
+            let msg: String = d
+                .message
+                .chars()
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
+            let src = if d.source.is_empty() {
+                "-".to_string()
+            } else {
+                d.source.replace(' ', "_")
+            };
             body.push_str(&format!(
                 "{} {} {} {} {} {} {}\n",
-                d.range.start.line, d.range.start.col, d.range.end.line, d.range.end.col,
-                d.severity.word(), src, msg
+                d.range.start.line,
+                d.range.start.col,
+                d.range.end.line,
+                d.range.end.col,
+                d.severity.word(),
+                src,
+                msg
             ));
         }
-        self.request(&format!("diagnostics {doc} {version} {}", marks.len()), Some(body.as_bytes())).map(|_| ())
+        self.request(
+            &format!("diagnostics {doc} {version} {}", marks.len()),
+            Some(body.as_bytes()),
+        )
+        .map(|_| ())
     }
 
     /// The text to show for the position a `hover` event named.
     pub fn hover(&self, doc: Doc, at: Pos, text: &str) -> Result<(), Error> {
-        self.request(&format!("hover {doc} {} {}", at.line, at.col), Some(text.as_bytes())).map(|_| ())
+        self.request(
+            &format!("hover {doc} {} {}", at.line, at.col),
+            Some(text.as_bytes()),
+        )
+        .map(|_| ())
     }
 
     /// A per-document option (`tab_width`, `insert_spaces`, …), or `-` to drop it.
     pub fn option(&self, doc: Doc, key: &str, value: &str) -> Result<(), Error> {
-        self.request(&format!("option {doc} {key} {value}"), None).map(|_| ())
+        self.request(&format!("option {doc} {key} {value}"), None)
+            .map(|_| ())
     }
 
     // ---- the editor ----
@@ -650,7 +811,159 @@ impl Ext {
     /// empty) and its title.
     pub fn register(&self, name: &str, keys: &str, title: &str) -> Result<(), Error> {
         let keys = if keys.is_empty() { "-" } else { keys };
-        self.request(&format!("register {name} {keys} {title}"), None).map(|_| ())
+        self.request(&format!("register {name} {keys} {title}"), None)
+            .map(|_| ())
+    }
+
+    /// Remove an own runtime command and its shortcut. Requires agreed `commands`.
+    pub fn unregister(&self, name: &str) -> Result<(), Error> {
+        if !self.has(Feature::Commands) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "commands feature was not agreed".into(),
+            });
+        }
+        if name.is_empty()
+            || name.len() > 40
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(Error {
+                code: "syntax".into(),
+                text: "invalid command name".into(),
+            });
+        }
+        self.request(&format!("unregister {name}"), None)
+            .map(|_| ())
+    }
+
+    /// Apply an intermediate edit for an active save invocation and return the native version.
+    /// The host restricts edits to the saving document and rejects stale or retired invocations.
+    pub fn save_apply(
+        &self,
+        request_id: u64,
+        doc: Doc,
+        version: i64,
+        edit: &WorkspaceEdit,
+    ) -> Result<i64, Error> {
+        if !self.has(Feature::SaveActions) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "save-actions feature was not agreed".into(),
+            });
+        }
+        if request_id == 0 || request_id > 2147483647 || doc <= 0 || version < 0 {
+            return Err(Error {
+                code: "syntax".into(),
+                text: "invalid save-action identity".into(),
+            });
+        }
+        let body = edit.encode().map_err(|text| Error {
+            code: "toobig".into(),
+            text,
+        })?;
+        let reply = self.request(
+            &format!("save-apply {request_id} {doc} {version}"),
+            Some(&body),
+        )?;
+        let current = if reply.fields.len() == 1
+            && !reply.fields[0].is_empty()
+            && reply.fields[0].bytes().all(|b| b.is_ascii_digit())
+        {
+            reply.fields[0].parse::<i64>().ok()
+        } else {
+            None
+        };
+        current.filter(|v| *v >= version).ok_or_else(|| Error {
+            code: "syntax".into(),
+            text: "invalid save-apply reply".into(),
+        })
+    }
+
+    /// Replace a range and start a native snippet session without switching tabs.
+    pub fn insert_snippet(
+        &self,
+        doc: Doc,
+        version: i64,
+        span: Range,
+        snippet: &PreparedSnippet,
+    ) -> Result<i64, Error> {
+        self.insert_snippet_record(doc, version, span, || snippet.encode())
+    }
+
+    /// Replace a range with a prepared native program, including literal choices.
+    pub fn insert_snippet_program(
+        &self,
+        doc: Doc,
+        version: i64,
+        span: Range,
+        program: &SnippetProgram,
+    ) -> Result<i64, Error> {
+        if !program.initial_variants.is_empty() && !self.has(Feature::SnippetVariants) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "snippet-variants feature was not agreed".into(),
+            });
+        }
+        if !program.transforms.is_empty() && !self.has(Feature::SnippetTransforms) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "snippet-transforms feature was not agreed".into(),
+            });
+        }
+        self.insert_snippet_record(doc, version, span, || program.encode())
+    }
+
+    fn insert_snippet_record(
+        &self,
+        doc: Doc,
+        version: i64,
+        span: Range,
+        encode: impl FnOnce() -> Result<Vec<u8>, String>,
+    ) -> Result<i64, Error> {
+        if !self.has(Feature::Snippets) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "snippets feature was not agreed".into(),
+            });
+        }
+        if doc <= 0
+            || version < 0
+            || span.start.line == 0
+            || span.start.col == 0
+            || span.end.line == 0
+            || span.end.col == 0
+            || span.end < span.start
+        {
+            return Err(Error {
+                code: "syntax".into(),
+                text: "invalid snippet target or range".into(),
+            });
+        }
+        let body = encode().map_err(|text| Error {
+            code: "syntax".into(),
+            text,
+        })?;
+        let reply = self.request(
+            &format!(
+                "snippet {doc} {version} {} {} {} {}",
+                span.start.line, span.start.col, span.end.line, span.end.col
+            ),
+            Some(&body),
+        )?;
+        let current = if reply.fields.len() == 1
+            && !reply.fields[0].is_empty()
+            && reply.fields[0].bytes().all(|b| b.is_ascii_digit())
+        {
+            reply.fields[0].parse::<i64>().ok()
+        } else {
+            None
+        };
+        current.filter(|v| *v >= version).ok_or_else(|| Error {
+            code: "syntax".into(),
+            text: "invalid snippet reply".into(),
+        })
     }
 
     /// A pick list; the index of the item chosen, `None` when cancelled.
@@ -661,7 +974,11 @@ impl Ext {
             body.push_str(i);
         }
         match self.request("choose", Some(body.as_bytes())) {
-            Ok(r) => Ok(r.fields.first().and_then(|v| v.parse::<usize>().ok()).map(|n| n.saturating_sub(1))),
+            Ok(r) => Ok(r
+                .fields
+                .first()
+                .and_then(|v| v.parse::<usize>().ok())
+                .map(|n| n.saturating_sub(1))),
             Err(e) if e.code == "cancelled" => Ok(None),
             Err(e) => Err(e),
         }
@@ -696,7 +1013,8 @@ impl Ext {
 
     /// The view's picture, replacing the last one.
     pub fn draw(&self, view: View, picture: &Picture) -> Result<(), Error> {
-        self.request(&format!("draw {view}"), Some(picture.body().as_bytes())).map(|_| ())
+        self.request(&format!("draw {view}"), Some(picture.body().as_bytes()))
+            .map(|_| ())
     }
 
     /// Closes a view's tab.
@@ -728,15 +1046,31 @@ impl Ext {
                     let waiter = self.pending.lock().unwrap().waiters.remove(&id);
                     let verb = waiter.as_ref().map(|w| w.0.as_str()).unwrap_or("");
                     let mut body = Vec::new();
-                    if fields[0] == "ok" && matches!(verb, "text" | "range" | "ask") {
-                        let len: usize = fields.last().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    if fields[0] == "ok"
+                        && matches!(verb, "text" | "range" | "ask" | "snippet-context")
+                    {
+                        let len: usize = if verb == "snippet-context" {
+                            match fields
+                                .last()
+                                .and_then(|s| snippet_context::decimal(s))
+                                .and_then(|v| usize::try_from(v).ok())
+                            {
+                                Some(n) if n <= snippet::MAX_BODY => n,
+                                _ => break,
+                            }
+                        } else {
+                            fields.last().and_then(|v| v.parse().ok()).unwrap_or(0)
+                        };
                         body = vec![0; len];
                         if input.read_exact(&mut body).is_err() {
                             break;
                         }
                     }
                     let res = if fields[0] == "ok" {
-                        Ok(Reply { fields: fields[2..].to_vec(), body })
+                        Ok(Reply {
+                            fields: fields[2..].to_vec(),
+                            body,
+                        })
                     } else {
                         Err(Error {
                             code: fields.get(2).cloned().unwrap_or_default(),
@@ -750,7 +1084,12 @@ impl Ext {
                 "0" => {
                     let name = fields.get(1).cloned().unwrap_or_default();
                     let rest = text.splitn(3, ' ').nth(2).unwrap_or("").to_string();
-                    let mut ev = Event { name, fields: fields[2.min(fields.len())..].to_vec(), rest, body: Vec::new() };
+                    let mut ev = Event {
+                        name,
+                        fields: fields[2.min(fields.len())..].to_vec(),
+                        rest,
+                        body: Vec::new(),
+                    };
                     if ev.name == "edits" || ev.name == "action" {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
@@ -775,7 +1114,14 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
-                        if tx.send(Msg::HostRequest { id, verb, fields: rest }).is_err() {
+                        if tx
+                            .send(Msg::HostRequest {
+                                id,
+                                verb,
+                                fields: rest,
+                            })
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -801,11 +1147,22 @@ impl Ext {
                     match ev.name.as_str() {
                         "ready" => {
                             let p = ev.rest.as_str();
-                            h.ready(self, if p == "-" || p.is_empty() { None } else { Some(p) });
+                            h.ready(
+                                self,
+                                if p == "-" || p.is_empty() {
+                                    None
+                                } else {
+                                    Some(p)
+                                },
+                            );
                         }
                         "run" => {
                             let full = ev.fields.first().cloned().unwrap_or_default();
-                            let short = full.split_once('.').map(|(_, c)| c).unwrap_or(&full).to_string();
+                            let short = full
+                                .split_once('.')
+                                .map(|(_, c)| c)
+                                .unwrap_or(&full)
+                                .to_string();
                             h.command(self, &short, ev.num(1));
                         }
                         "setting" => {
@@ -829,19 +1186,37 @@ impl Ext {
                 }
                 Msg::HostRequest { id, verb, fields } => {
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
-                        "complete" => CompleteRequest::parse(&fields).map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
-                        "signature" => SignatureRequest::parse(&fields)
-                            .map(|r| Ok(h.signature(self, &r).map(|s| s.encode()).unwrap_or_default().into_bytes())),
-                        "definition" => PosRequest::parse(&fields).map(|r| Ok(lang::encode_locations(&h.definition(self, &r)))),
-                        "references" => PosRequest::parse(&fields).map(|r| Ok(lang::encode_locations(&h.references(self, &r)))),
-                        "symbols" => PosRequest::parse(&fields).map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
-                        "actions" => ActionsRequest::parse(&fields).map(|r| Ok(lang::encode_actions(&h.actions(self, &r)))),
-                        "rename" => RenameRequest::parse(&fields).map(|r| match h.rename(self, &r) {
-                            Ok(e) => e.encode().map_err(|why| ("toobig", why)),
-                            Err(why) => Err(("refused", why)),
+                        "complete" => CompleteRequest::parse(&fields)
+                            .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
+                        "signature" => SignatureRequest::parse(&fields).map(|r| {
+                            Ok(h.signature(self, &r)
+                                .map(|s| s.encode())
+                                .unwrap_or_default()
+                                .into_bytes())
                         }),
-                        "format" => {
-                            FormatRequest::parse(&fields).map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why)))
+                        "definition" => PosRequest::parse(&fields)
+                            .map(|r| Ok(lang::encode_locations(&h.definition(self, &r)))),
+                        "references" => PosRequest::parse(&fields)
+                            .map(|r| Ok(lang::encode_locations(&h.references(self, &r)))),
+                        "symbols" => PosRequest::parse(&fields)
+                            .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
+                        "actions" => ActionsRequest::parse(&fields)
+                            .map(|r| Ok(lang::encode_actions(&h.actions(self, &r)))),
+                        "rename" => {
+                            RenameRequest::parse(&fields).map(|r| match h.rename(self, &r) {
+                                Ok(e) => e.encode().map_err(|why| ("toobig", why)),
+                                Err(why) => Err(("refused", why)),
+                            })
+                        }
+                        "format" => FormatRequest::parse(&fields)
+                            .map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why))),
+                        "save-actions" if self.has(Feature::SaveActions) => {
+                            SaveActionsRequest::parse(id, &fields).map(|r| {
+                                match h.save_actions(self, &r) {
+                                    Ok(e) => e.encode().map_err(|why| ("toobig", why)),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
                         }
                         _ => None,
                     };
@@ -849,8 +1224,11 @@ impl Ext {
                         Some(Ok(b)) => self.write(&format!("ok {id} {}", b.len()), &b),
                         Some(Err((code, why))) => {
                             // one line, at most 1000 bytes: rhun shows a sentence
-                            let mut why: String =
-                                why.trim().chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+                            let mut why: String = why
+                                .trim()
+                                .chars()
+                                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                                .collect();
                             if why.len() > 1000 {
                                 let mut cut = 1000;
                                 while !why.is_char_boundary(cut) {
@@ -858,7 +1236,11 @@ impl Ext {
                                 }
                                 why.truncate(cut);
                             }
-                            let line = if why.is_empty() { format!("error {id} {code}") } else { format!("error {id} {code} {why}") };
+                            let line = if why.is_empty() {
+                                format!("error {id} {code}")
+                            } else {
+                                format!("error {id} {code} {why}")
+                            };
                             self.write(&line, &[])
                         }
                         None => self.write(&format!("error {id} unknown no such request"), &[]),
@@ -872,9 +1254,17 @@ impl Ext {
 fn parse_view_event(ev: &Event) -> Option<(View, ViewEvent)> {
     let view: View = ev.fields.first()?.parse().ok()?;
     let kind = ev.fields.get(1)?.as_str();
-    let f = |i: usize| ev.fields.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+    let f = |i: usize| {
+        ev.fields
+            .get(i)
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+    };
     let vev = match kind {
-        "size" => ViewEvent::Size { width: f(2), height: f(3) },
+        "size" => ViewEvent::Size {
+            width: f(2),
+            height: f(3),
+        },
         "metrics" => ViewEvent::Metrics(Metrics::parse(&ev.fields[2..])?),
         "hover" => ViewEvent::Hover { x: f(2), y: f(3) },
         "down" => ViewEvent::Down { x: f(2), y: f(3) },
@@ -882,7 +1272,11 @@ fn parse_view_event(ev: &Event) -> Option<(View, ViewEvent)> {
         "up" => ViewEvent::Up { x: f(2), y: f(3) },
         "click" => ViewEvent::Click { x: f(2), y: f(3) },
         "leave" => ViewEvent::Leave,
-        "wheel" => ViewEvent::Wheel { x: f(2), y: f(3), dy: f(4) },
+        "wheel" => ViewEvent::Wheel {
+            x: f(2),
+            y: f(3),
+            dy: f(4),
+        },
         "closed" => ViewEvent::Closed,
         _ => return None,
     };
@@ -902,7 +1296,10 @@ impl Settings {
     }
 
     pub fn string(&self, key: &str, default: &str) -> String {
-        self.values.get(key).cloned().unwrap_or_else(|| default.to_string())
+        self.values
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| default.to_string())
     }
 
     pub fn bool(&self, key: &str, default: bool) -> bool {
@@ -914,6 +1311,9 @@ impl Settings {
     }
 
     pub fn int(&self, key: &str, default: i64) -> i64 {
-        self.values.get(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+        self.values
+            .get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 }

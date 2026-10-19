@@ -1,0 +1,1377 @@
+[
+  {
+    "Source": "${NAME/(.*)/${1:/upcase}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "É HELLO-WORLD",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/upcase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:/downcase}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "é hello-world",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/downcase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:/capitalize}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "É hello-World",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/capitalize}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:/camelcase}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "éHelloWorld",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/camelcase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:/pascalcase}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "ÉHelloWorld",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/pascalcase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:/snakecase}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "é_hello_world",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/snakecase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:/kebabcase}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "é-hello-world",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:/kebabcase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:+yes}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "yes",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:+yes}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:-fallback}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "é hello-World",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:-fallback}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "fallback",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(.*)/${1:?yes:no}/}",
+    "Variables": {
+      "NAME": "é hello-World"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "yes",
+    "Fields": []
+  },
+  {
+    "Source": "${MISSING/(.*)/${1:?yes:no}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "no",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/^$/empty/}",
+    "Variables": {
+      "NAME": ""
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "empty",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/a/x/g}",
+    "Variables": {
+      "NAME": "aa\na"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "xx\nx",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/(?=a)/x/g}",
+    "Variables": {
+      "NAME": "aa"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "xaxa",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/a/x/y}",
+    "Variables": {
+      "NAME": "baa"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "baa",
+    "Fields": []
+  },
+  {
+    "Source": "${NAME/z/${1:-fallback}/}",
+    "Variables": {
+      "NAME": "a"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "fallback",
+    "Fields": []
+  },
+  {
+    "Source": "${1:a} ${1/(.*)/${1:/upcase}/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "a a",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 1,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 2,
+        "End": 3,
+        "Transform": true
+      }
+    ]
+  },
+  {
+    "Source": "${1/(.*)/${1:/upcase}/} ${1:a}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "a a",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 1,
+        "Transform": true
+      },
+      {
+        "Group": 1,
+        "Start": 2,
+        "End": 3,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:${NAME/(.*)/${1:/upcase}/}} $1",
+    "Variables": {
+      "NAME": "abc"
+    },
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "ABC ABC",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 3,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:a} ${1/a/x/} ${1/a/long/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "a a a",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 1,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 2,
+        "End": 3,
+        "Transform": true
+      },
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 5,
+        "Transform": true
+      }
+    ]
+  },
+  {
+    "Source": "${1:${2:a} ${2/a/x/}} $1",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "a a a a",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 3,
+        "Transform": false
+      },
+      {
+        "Group": 2,
+        "Start": 0,
+        "End": 1,
+        "Transform": false
+      },
+      {
+        "Group": 2,
+        "Start": 2,
+        "End": 3,
+        "Transform": true
+      },
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1|a,b|} ${1/a/x/}",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "a a",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 1,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 2,
+        "End": 3,
+        "Transform": true
+      }
+    ]
+  },
+  {
+    "Source": "\t${SELECTION/(.*)/${1:/upcase}/}",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    A\n    b\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\t${SELECTION/(.*)/${1:/upcase}/}",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "",
+    "Text": "    ",
+    "Fields": []
+  },
+  {
+    "Source": "\t${SELECTION/(.*)/${1:/upcase}/}",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\r\n b\rc\n",
+    "Text": "    A\r\n   b\r  c\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\t${1:z${SELECTION/^/x/}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    zxa\n  b\n\n  zxa\n  b\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 12,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 15,
+        "End": 23,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 23,
+        "End": 23,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:z${SELECTION/^/x/}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "",
+    "Text": "    zx\n  zx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 6,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 9,
+        "End": 11,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 11,
+        "End": 11,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:z${SELECTION/^/x/}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\r\n b\rc\n",
+    "Text": "    zxa\r\n b\rc\n\n  zxa\r\n b\rc\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 14,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 17,
+        "End": 27,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 27,
+        "End": 27,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:z${SELECTION/^/x/}} $1",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "zxa\n  b\n zxa\n  b\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 8,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 9,
+        "End": 17,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:z${SELECTION/^/x/}} $1",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "",
+    "Text": "zx zx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 2,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 5,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:z${SELECTION/^/x/}} $1",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\r\n b\rc\n",
+    "Text": "zxa\r\n b\rc\n zxa\r\n b\rc\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 11,
+        "End": 21,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:${SELECTION/^.*$/x/gm}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\nx\nx\n  x\nx\nx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 9,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 12,
+        "End": 17,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 17,
+        "End": 17,
+        "Transform": false
+      }
+    ],
+    "UpstreamText": "    x\nx\nx\n  a\n  b\n",
+    "RetainAllFlags": true
+  },
+  {
+    "Source": "\t${1:${SELECTION/^.*$/x/gm}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "",
+    "Text": "    x\n  x",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 9,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 9,
+        "End": 9,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:${SELECTION/^.*$/x/gm}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\r\n b\rc\n",
+    "Text": "    x\rx\nx\rx\nx\n  x\rx\nx\rx\nx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 13,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 16,
+        "End": 25,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 25,
+        "End": 25,
+        "Transform": false
+      }
+    ],
+    "UpstreamText": "    x\rx\nx\rx\nx\n  a\r\n b\rc\n",
+    "RetainAllFlags": true
+  },
+  {
+    "Source": "\t${1:${SELECTION/^[a\n ]*$/x/}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  \n  a\n  b\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 14,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 17,
+        "End": 23,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 23,
+        "End": 23,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:${SELECTION/^[a\n ]*$/x/}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "",
+    "Text": "    x\n  x",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 9,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 9,
+        "End": 9,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:${SELECTION/^[a\n ]*$/x/}}\n$1$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\r\n b\rc\n",
+    "Text": "    a\r\n   b\r  c\n  \n  a\r\n b\rc\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 18,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 21,
+        "End": 29,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 29,
+        "End": 29,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${SELECTION/(.*)/${1:/upcase}/}",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": true,
+    "Selected": "a\n  b\n",
+    "Text": "\tA\n\t  b\n\t",
+    "Fields": []
+  },
+  {
+    "Source": "\t${SELECTION/^/x/}",
+    "Variables": {
+      "SELECTION": "a\n b"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    xa\n b",
+    "Fields": []
+  },
+  {
+    "Source": "${1:\tx}\n${1/a/x/}$0",
+    "Variables": {},
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \tx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": true
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 10,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\tfoo\r\n\tbar\rbaz\n",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    foo\n    bar\n  baz\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\tfoo\r\n\tbar\rbaz\n",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    foo\n    bar\n  baz\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\tfoo\r\n\tbar\rbaz\n",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    foo\n    bar\n  baz\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\n${1:}\tfoo$0",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "\n  \tfoo",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 3,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 7,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\n${1:}\tfoo$0",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "\n  \tfoo",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 3,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 7,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\n${1:}\tfoo$0",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "\n  \tfoo",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 3,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 7,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\n${1:\tfoo}$0",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "\n  \tfoo",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 7,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 7,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\n${1:\tfoo}$0",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "\n  \tfoo",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 7,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 7,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\n${1:\tfoo}$0",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "\n  \tfoo",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 3,
+        "End": 7,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 7,
+        "End": 7,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "$X\tfoo",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "x\n    foo",
+    "Fields": []
+  },
+  {
+    "Source": "$X\tfoo",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "x    foo",
+    "Fields": []
+  },
+  {
+    "Source": "$X\tfoo",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    foo",
+    "Fields": []
+  },
+  {
+    "Source": "${1:\tx}\n$1$0",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \tx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 10,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:\tx}\n$1$0",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \tx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 10,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${1:\tx}\n$1$0",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \tx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 10,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "$1\n${1:\t${2:x}}${0:done}",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \txdone",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 2,
+        "Start": 4,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 14,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "$1\n${1:\t${2:x}}${0:done}",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \txdone",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 2,
+        "Start": 4,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 14,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "$1\n${1:\t${2:x}}${0:done}",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    x\n  \txdone",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 2,
+        "Start": 4,
+        "End": 5,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 8,
+        "End": 10,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 10,
+        "End": 14,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:$SELECTION}\n$1$0",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  \n  a\n  b\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 14,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 17,
+        "End": 23,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 23,
+        "End": 23,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:$SELECTION}\n$1$0",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  \n  a\n  b\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 14,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 17,
+        "End": 23,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 23,
+        "End": 23,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t${1:$SELECTION}\n$1$0",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  \n  a\n  b\n",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 4,
+        "End": 14,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 17,
+        "End": 23,
+        "Transform": false
+      },
+      {
+        "Group": 0,
+        "Start": 23,
+        "End": 23,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "\t$SELECTION",
+    "Variables": {
+      "X": "x\n"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\t$SELECTION",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "\t$SELECTION",
+    "Variables": {
+      "X": ""
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "    a\n    b\n  ",
+    "Fields": []
+  },
+  {
+    "Source": "${2:x}$2",
+    "Variables": {},
+    "Snapshot": false,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "xx",
+    "Fields": [
+      {
+        "Group": 1,
+        "Start": 0,
+        "End": 1,
+        "Transform": false
+      },
+      {
+        "Group": 1,
+        "Start": 1,
+        "End": 2,
+        "Transform": false
+      }
+    ]
+  },
+  {
+    "Source": "${X:${1:a}}${2:b}",
+    "Variables": {
+      "X": "x"
+    },
+    "Snapshot": true,
+    "Keep": false,
+    "Selected": "a\n  b\n",
+    "Text": "xb",
+    "Fields": [
+      {
+        "Group": 2,
+        "Start": 1,
+        "End": 2,
+        "Transform": false
+      }
+    ]
+  }
+]

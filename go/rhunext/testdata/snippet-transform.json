@@ -1,0 +1,415 @@
+[
+  {
+    "Source": "a",
+    "Flags": "",
+    "Format": "x",
+    "Input": "aba",
+    "Output": "xba"
+  },
+  {
+    "Source": "a",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "aba",
+    "Output": "xbx"
+  },
+  {
+    "Source": "a",
+    "Flags": "g",
+    "Format": "<$0>",
+    "Input": "aba",
+    "Output": "<a>b<a>"
+  },
+  {
+    "Source": "a",
+    "Flags": "y",
+    "Format": "x",
+    "Input": "ba",
+    "Output": "ba"
+  },
+  {
+    "Source": "a",
+    "Flags": "gy",
+    "Format": "x",
+    "Input": "aaba",
+    "Output": "xxba"
+  },
+  {
+    "Source": "a",
+    "Flags": "y",
+    "Format": "x",
+    "Input": "aaba",
+    "Output": "xaba"
+  },
+  {
+    "Source": "a",
+    "Flags": "dg",
+    "Format": "x",
+    "Input": "aba",
+    "Output": "xbx"
+  },
+  {
+    "Source": "(a)|(b)",
+    "Flags": "g",
+    "Format": "${1:+A}${2:+B}",
+    "Input": "abba",
+    "Output": "ABBA"
+  },
+  {
+    "Source": "(a)?b",
+    "Flags": "",
+    "Format": "[${1:-missing}]",
+    "Input": "b",
+    "Output": "[missing]"
+  },
+  {
+    "Source": "(a*)b",
+    "Flags": "",
+    "Format": "[${1:-missing}]",
+    "Input": "b",
+    "Output": "[missing]"
+  },
+  {
+    "Source": "(a*)b",
+    "Flags": "",
+    "Format": "${1:?yes:no}",
+    "Input": "ab",
+    "Output": "yes"
+  },
+  {
+    "Source": "(a*)b",
+    "Flags": "",
+    "Format": "${1:?yes:no}",
+    "Input": "b",
+    "Output": "no"
+  },
+  {
+    "Source": "(a*)b",
+    "Flags": "",
+    "Format": "${1:+yes}",
+    "Input": "b",
+    "Output": ""
+  },
+  {
+    "Source": "(a*)b",
+    "Flags": "",
+    "Format": "${1:-missing}",
+    "Input": "aab",
+    "Output": "aa"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "before-${1:-fallback}-after",
+    "Input": "abc",
+    "Output": "before-fallback-after"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${0}|${1:+yes}|${1:-fallback}|${2:?a:b}",
+    "Input": "abc",
+    "Output": "||fallback|b"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "literal",
+    "Input": "abc",
+    "Output": "abc"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${1:-}",
+    "Input": "abc",
+    "Output": "abc"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${1:?a:}",
+    "Input": "abc",
+    "Output": "abc"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${1:?a:fallback}",
+    "Input": "abc",
+    "Output": "fallback"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${1:+a}",
+    "Input": "abc",
+    "Output": "abc"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${2147483647:-fallback}",
+    "Input": "abc",
+    "Output": "fallback"
+  },
+  {
+    "Source": "a",
+    "Flags": "",
+    "Format": "${99:-absent}",
+    "Input": "a",
+    "Output": "absent"
+  },
+  {
+    "Source": "",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "ab",
+    "Output": "xaxbx"
+  },
+  {
+    "Source": "",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "𐐨a",
+    "Output": "x𐐨xax"
+  },
+  {
+    "Source": "",
+    "Flags": "",
+    "Format": "x",
+    "Input": "ab",
+    "Output": "xab"
+  },
+  {
+    "Source": "$",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "abc",
+    "Output": "abcx"
+  },
+  {
+    "Source": "^|$",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "ab",
+    "Output": "xabx"
+  },
+  {
+    "Source": "(?=a)",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "aa",
+    "Output": "xaxa"
+  },
+  {
+    "Source": "a*",
+    "Flags": "g",
+    "Format": "x",
+    "Input": "ab",
+    "Output": "xxbx"
+  },
+  {
+    "Source": "",
+    "Flags": "gy",
+    "Format": "x",
+    "Input": "",
+    "Output": "x"
+  },
+  {
+    "Source": "",
+    "Flags": "gy",
+    "Format": "x",
+    "Input": "ab",
+    "Output": "xaxbx"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/upcase}",
+    "Input": "straße",
+    "Output": "STRASSE"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/downcase}",
+    "Input": "ΑΣͅ",
+    "Output": "αςͅ"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/capitalize}",
+    "Input": "ßfoo",
+    "Output": "SSfoo"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/camelcase}",
+    "Input": "FOO bar",
+    "Output": "fOOBar"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/pascalcase}",
+    "Input": "foo bar",
+    "Output": "FooBar"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/snakecase}",
+    "Input": "fooBAR",
+    "Output": "foo_bar"
+  },
+  {
+    "Source": "(.+)",
+    "Flags": "",
+    "Format": "${1:/kebabcase}",
+    "Input": "XMLHttpRequest",
+    "Output": "xml-http-request"
+  },
+  {
+    "Source": "(a)?b",
+    "Flags": "",
+    "Format": "${1:/upcase}-$0",
+    "Input": "b",
+    "Output": "-b"
+  },
+  {
+    "Source": "(.)",
+    "Flags": "g",
+    "Format": "${1:/upcase}",
+    "Input": "a\nb",
+    "Output": "A\nB"
+  },
+  {
+    "Source": "^",
+    "Flags": "gm",
+    "Format": ">",
+    "Input": "a\r\nb",
+    "Output": ">a\r>\n>b"
+  },
+  {
+    "Source": "a",
+    "Flags": "g",
+    "Format": "",
+    "Input": "baac",
+    "Output": "bc"
+  },
+  {
+    "Source": "(?<x>a)",
+    "Flags": "",
+    "Format": "[${1}]",
+    "Input": "a",
+    "Output": "[a]"
+  },
+  {
+    "Source": "(?<=a)b",
+    "Flags": "",
+    "Format": "[${0}]",
+    "Input": "ab",
+    "Output": "a[b]"
+  },
+  {
+    "Source": "(a)\\1",
+    "Flags": "",
+    "Format": "${1:/upcase}",
+    "Input": "aa",
+    "Output": "A"
+  },
+  {
+    "Source": "a",
+    "Flags": "",
+    "Format": "${1:?$0:${2}}",
+    "Input": "a",
+    "Output": "${2}"
+  },
+  {
+    "Source": "z",
+    "Flags": "",
+    "Format": "${0:/upcase}${1:-fallback}",
+    "Input": "abc",
+    "Output": "fallback"
+  },
+  {
+    "Source": "[\\q{ab|abc|a|}]",
+    "Flags": "gv",
+    "Format": "<${0:/upcase}>",
+    "Input": "abc ab x",
+    "Output": "<ABC><> <AB><> <>x<>"
+  },
+  {
+    "Source": "\\p{RGI_Emoji}",
+    "Flags": "gv",
+    "Format": "X",
+    "Input": "🏳️‍🌈a😀",
+    "Output": "XaX"
+  },
+  {
+    "Source": "(?<=([\\q{ab|abc}]))c",
+    "Flags": "v",
+    "Format": "<$1>",
+    "Input": "abc",
+    "Output": "ab<ab>"
+  },
+  {
+    "Source": "(?:(?<é>a)|(?<\\u00e9>b))\\k<é>",
+    "Flags": "gv",
+    "Format": "${0:/upcase}",
+    "Input": "aa bb ab",
+    "Output": "AA BB ab"
+  },
+  {
+    "Source": "(?:(?<字>a)|(?<字>b))+\\k<字>",
+    "Flags": "u",
+    "Format": "<$1:$2>",
+    "Input": "abbaa",
+    "Output": "<a:>"
+  },
+  {
+    "Source": "(\\141+)",
+    "Flags": "g",
+    "Format": "${1:/upcase}",
+    "Input": "aa ba",
+    "Output": "AA bA"
+  },
+  {
+    "Source": "(?=(a))?a",
+    "Flags": "g",
+    "Format": "<$1>",
+    "Input": "aa",
+    "Output": "<><>"
+  },
+  {
+    "Source": "[a-\\d]",
+    "Flags": "g",
+    "Format": "X",
+    "Input": "a-1b",
+    "Output": "XXXb"
+  },
+  {
+    "Source": "(?i:(a)\\1)",
+    "Flags": "gu",
+    "Format": "${0:/upcase}",
+    "Input": "aA Aa",
+    "Output": "AA AA"
+  },
+  {
+    "Source": "(?m:^a$)",
+    "Flags": "g",
+    "Format": "X",
+    "Input": "a\na\nA",
+    "Output": "X\nX\nA"
+  },
+  {
+    "Source": "(?s:.)",
+    "Flags": "g",
+    "Format": "X",
+    "Input": "a\nb",
+    "Output": "XXX"
+  }
+]

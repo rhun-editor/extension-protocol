@@ -416,6 +416,9 @@ class Ext:
         elif name == 'exit':
             finish('requested', op[1])
         elif name == 'close':
+            # The host can kill the process as soon as close returns. Record the start of the
+            # operation first so an immediate successful termination cannot erase its marker.
+            log('X', 'closing %s' % op[1])
             os.close(1 if op[1] == 'stdout' else 0)
             log('X', 'closed %s' % op[1])
         elif name == 'spawn':

@@ -699,7 +699,7 @@ def chk_env(r):
     def same(name, got, want):
         r.ok(name, got is not None and os.path.realpath(got) == os.path.realpath(want), 'got %r, want %r' % (got, want))
 
-    r.eq('RHUN_PROTOCOL', E('RHUN_PROTOCOL'), '1')
+    r.eq('RHUN_PROTOCOL', E('RHUN_PROTOCOL'), '1.1')
     r.eq('RHUN_EXTENSION', E('RHUN_EXTENSION'), 'conf/full')
     r.eq('RHUN_TARGET', E('RHUN_TARGET'), host_target())
     ver = rhun_version(RHUN['path'])
@@ -1358,7 +1358,8 @@ NEEDS_STEPS = [
     ('toast-needs-nothing', ["toast", "hi"], ('ok',)),
     ('status-needs-nothing', ["status", "st"], ('ok',)),
     ('cancel-needs-nothing', ["cancel", 999], ('ok',)),
-    ('open-needs-nothing', ["open", 0, 0, "{PROJECT}/main.go"], ('okv',)),
+    ('open-closed-file-needs-disk-read', ["open", 0, 0, "{PROJECT}/main.go"], ('errx', 'error %(id)d needs file=read')),
+    ('open-existing-tab-needs-nothing', ["open", 0, 0, "{PROJECT}/a.txt"], ('okv',)),
     DONE,
 ]
 N_OPS, N_CASES = split_steps(NEEDS_STEPS)
@@ -1811,7 +1812,7 @@ notread_scn('tr.not-reading-full-queue-stops-it-after-10-seconds', 2, 'not readi
 def chk_close(r):
     e = r.ext('e', 'conf/full')
     r.ok('stopped-when-the-program-closes-its-pipe', e is not None and e['state'] != 'running', 'got %r' % (e and e['raw']))
-    closed = r.notes_with('closed ')
+    closed = r.notes_with('closing ')
     alive = [n.ts for n in r.notes if n.text == 'alive' and closed and n.ts >= closed[0].ts]
     # no heartbeat after the close is the best outcome: rhun ended it before the next beat
     dt = (max(alive) - closed[0].ts) if alive else (0.0 if closed else None)
@@ -1849,7 +1850,7 @@ def chk_quit_stubborn(r):
 plain('life.quit-stops-a-program-that-ignores-bye', ['conf/full'], ops=[["ignore", "bye"], ["spawn"], DONE], env=HB,
       script=std(wait=800), check=chk_quit_stubborn)
 
-# ================================================================ section 4: sixteen at a time
+# ================================================================ section 4: concurrent activation (protocol 1.1)
 
 
 def chk_slots(r):
@@ -1858,12 +1859,13 @@ def chk_slots(r):
     run_a = sorted(k for k, v in slots_a.items() if v['state'] == 'running')
     wait_a = sorted(k for k, v in slots_a.items() if v['state'] != 'running')
     r.eq('17-extensions-listed', len(slots_a), 17)
-    r.eq('16-run-at-once', len(run_a), 16)
-    r.eq('the-seventeenth-waits-idle', [(k, v['pid']) for k, v in slots_a.items() if v['state'] != 'running'] and len(wait_a), 1)
-    r.ok('the-waiting-one-has-no-process', all(slots_a[k]['pid'] in (None, '0') for k in wait_a), 'got %r' % [slots_a[k]['raw'] for k in wait_a])
+    r.eq('17-run-at-once', len(run_a), 17)
+    r.eq('no-extension-waits-for-an-idle-slot', len(wait_a), 0)
+    r.ok('all-running-extensions-have-processes', all(v['pid'] not in (None, '0') for v in slots_a.values()),
+         'got %r' % [v['raw'] for v in slots_a.values()])
     slots_b = {k: v for k, v in b.items() if k.startswith('conf/slot')}
     run_b = sorted(k for k, v in slots_b.items() if v['state'] == 'running')
-    r.ok('freed-slot-starts-the-waiting-one', len(run_b) == 16 and slots_b.get('conf/slot01', {}).get('state') == 'crashed' and
+    r.ok('one-exit-leaves-the-other-sixteen-running', len(run_b) == 16 and slots_b.get('conf/slot01', {}).get('state') == 'crashed' and
          all(v['state'] == 'running' for k, v in slots_b.items() if k != 'conf/slot01'),
          'running %d, slot01 %r, states %r' % (len(run_b), slots_b.get('conf/slot01', {}).get('state'),
                                                   sorted(set(v['state'] for v in slots_b.values()))))
@@ -1871,7 +1873,7 @@ def chk_slots(r):
 
 
 SLOTS = ['conf/slot%02d' % i for i in range(1, 18)]
-plain('life.sixteen-at-a-time', SLOTS, env={'CONF_SCENARIO': 'slot', 'CONF_SLOT_EXIT': 'slot01'}, timeout=60,
+plain('life.seventeen-at-once', SLOTS, env={'CONF_SCENARIO': 'slot', 'CONF_SLOT_EXIT': 'slot01'}, timeout=60,
       script=['wait 1300'] + pe('a') + ['wait 4000'] + pe('b') + ['quit'], check=chk_slots)
 
 # ================================================================ section 2: [subscribe]

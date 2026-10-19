@@ -96,6 +96,15 @@ typedef struct {
     int tab_width, spaces;
 } rx_format_ask;
 
+/* Source actions before saving (1.1). A cancel event names id. Serial handlers must bound
+ * their work; custom asynchronous dispatchers must revoke that invocation on cancellation. */
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;
+    const char *kind;
+} rx_save_actions_ask;
+
 /* answers to 12d to 12h, built with rx_location, rx_symbol, rx_action and rx_wedit_file (below);
  * the fields are the builders' own */
 typedef struct { rx_buf recs; int n, full; } rx_locations;
@@ -133,6 +142,7 @@ typedef struct {
      * rx_refuse(out, why). An edit past the limits is answered toobig. */
     int (*rename)(rx_ext *ext, const rx_rename_ask *req, rx_wedit *out, void *user);
     int (*format)(rx_ext *ext, const rx_format_ask *req, rx_wedit *out, void *user);
+    int (*save_actions)(rx_ext *ext, const rx_save_actions_ask *req, rx_wedit *out, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -153,6 +163,14 @@ int64_t rx_replace(rx_ext *ext, rx_doc doc, int64_t version, rx_range r, const c
 int rx_select(rx_ext *ext, rx_doc doc, rx_range r);
 rx_doc rx_open(rx_ext *ext, const char *path, rx_pos at);
 int rx_register(rx_ext *ext, const char *name, const char *keys, const char *title);
+/* Protocol 1.1, negotiated "commands": remove an own runtime command and its shortcut. */
+int rx_unregister(rx_ext *ext, const char *name);
+/* Declarations after rx_unregister. Coalesced invalidations always need a rescan. */
+int64_t rx_watch_workspace(rx_ext *ext);
+int rx_unwatch_workspace(rx_ext *ext, int64_t watch);
+int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan);
+
+
 int rx_cmd(rx_ext *ext, const char *name);
 int64_t rx_view(rx_ext *ext, const char *title);        /* feature views: a tab; its id */
 int rx_draw(rx_ext *ext, int64_t view, const rx_buf *picture);
@@ -162,6 +180,65 @@ int rx_unview(rx_ext *ext, int64_t view);
  * nothing changes. The edit is used up; one that cannot be sent (past the limits) fails as toobig
  * without being sent. For a language server's workspace/applyEdit. */
 int rx_apply(rx_ext *ext, rx_wedit *edit);
+/* Negotiated save-actions: an intermediate edit for this active save invocation. The edit is
+ * used up on every path. Returns the credited native version, or -1 on failure. */
+int64_t rx_save_apply(rx_ext *ext, int64_t request_id, rx_doc doc, int64_t version, rx_wedit *edit);
+/* Prepared UTF-8 text, with byte offsets and an earlier primary parent (one-based, 0 root).
+ * First positive group occurrence is primary, repetitions are mirrors, group 0 the final selection (empty for a caret).
+ * Text/fields are borrowed only for the duration of each call. */
+typedef struct { int64_t group; size_t start, end, parent; } rx_snippet_field;
+typedef struct {
+    const char *text;
+    size_t len;
+    const rx_snippet_field *fields;
+    size_t nfields;
+} rx_snippet;
+/* Option bytes may be empty or contain newlines and NUL. Storage is borrowed until encoding. */
+typedef struct { const char *text; size_t len; } rx_snippet_option;
+typedef struct { int64_t group; const rx_snippet_option *options; size_t noptions; } rx_snippet_choice;
+/* Compiled program bytes are borrowed only during validation or encoding. */
+typedef struct {
+    const void *regex;
+    size_t regex_len;
+    const void *replacement;
+    size_t replacement_len;
+} rx_snippet_transform_program;
+typedef struct { size_t field; rx_snippet_transform_program transform; } rx_snippet_field_transform;
+typedef struct {
+    const rx_snippet *snippet;
+    const rx_snippet_choice *choices;
+    size_t nchoices;
+    /* Borrowed one-based nonprimary field indices with unequal initial text. */
+    const size_t *initial_variants;
+    size_t ninitial_variants;
+    const rx_snippet_field_transform *transforms;
+    size_t ntransforms;
+} rx_snippet_program;
+/* part: 0 arguments/combined size, 1 regex, 2 replacement. Outputs are optional.
+ * error_offset is program-local, zero on success or an argument/size error. */
+int rx_snippet_transform_program_validate(const rx_snippet_transform_program *program, int *part, size_t *error_offset);
+/* Validate canonical compiled SNTX bindings and nested programs without allocation or
+ * execution. Does not check field existence/ownership. error_offset is optional;
+ * it receives zero on success, otherwise the absolute first invalid byte. */
+int rx_snippet_transform_validate(const void *bytes, size_t len, size_t *error_offset);
+int rx_snippet_program_validate(const rx_snippet_program *program);
+int rx_snippet_program_encode(const rx_snippet_program *program, rx_buf *out);
+int64_t rx_insert_snippet_program(rx_ext *ext, rx_doc doc, int64_t version, rx_range range, const rx_snippet_program *program);
+
+/* Owned read-only insertion context. Free a successful result before reusing it.
+ * Strings preserve their byte lengths, including NUL. Never includes the clipboard. */
+typedef struct {
+    int64_t version;
+    rx_pos position;
+    int tab_width, insert_spaces, crlf;
+    rx_buf selected_text, current_line, path, workspace, indent, line_comment;
+} rx_snippet_snapshot;
+void rx_snippet_snapshot_free(rx_snippet_snapshot *snapshot);
+int rx_get_snippet_snapshot(rx_ext *ext, rx_doc doc, int64_t version, rx_range range, rx_snippet_snapshot *out);
+int rx_snippet_validate(const rx_snippet *snippet);
+/* Append an explicit snippet record, or return -1 without changing out for invalid input. */
+int rx_snippet_encode(const rx_snippet *snippet, rx_buf *out);
+int64_t rx_insert_snippet(rx_ext *ext, rx_doc doc, int64_t version, rx_range range, const rx_snippet *snippet);
 /* any request: "VERB ARGS" without the id (and with LEN last when there is a body); the reply's
  * fields after "ok ID" go to fields (NUL-terminated), a text/range/ask body to body */
 int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len, rx_buf *fields, rx_buf *body_out);
@@ -194,6 +271,14 @@ void rx_unclip(rx_buf *p);
  * keyword snippet constant value file folder. insert NULL is the label; detail and doc may be
  * NULL. */
 typedef struct { rx_buf items; int n; int more; } rx_list;
+/* Empty prepared text stays empty. Invalid field metadata falls back to plain prepared text.
+ * Additional edits and documentation follow the ordinary completion API. */
+void rx_list_item_snippet_program(rx_list *list, rx_range range, const char *kind, const char *label,
+                         const rx_snippet_program *program, const char *detail, const char *doc,
+                         const rx_range *edits, const char *const *texts, int nedits);
+void rx_list_item_snippet(rx_list *list, rx_range range, const char *kind, const char *label,
+                         const rx_snippet *snippet, const char *detail, const char *doc,
+                         const rx_range *edits, const char *const *texts, int nedits);
 void rx_list_item(rx_list *l, rx_range r, const char *kind, const char *label, const char *insert,
                   const char *detail, const char *doc);
 /* the same with extra edits made with it (an import), not overlapping r or each other */
@@ -472,8 +557,9 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
     rx_buf_str(&line, verb_args);
     rx_write(line.data, body, len);
     rx_buf_free(&line);
+    int context_body = strncmp(verb_args, "snippet-context ", 16) == 0;
     int wants_body = strncmp(verb_args, "text ", 5) == 0 || strncmp(verb_args, "range ", 6) == 0 ||
-                     strncmp(verb_args, "ask ", 4) == 0;
+                     strncmp(verb_args, "ask ", 4) == 0 || context_body;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {
@@ -495,7 +581,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                 }
                 if (fields) rx_buf_str(fields, rest);
                 if (wants_body) {
-                    long long blen = rx_body_len(l, RX_BODY_MAX);
+                    long long blen = rx_body_len(l, context_body ? (4u << 20) : RX_BODY_MAX);
                     unsigned char *b = blen >= 0 ? rx_read_body((size_t)blen) : NULL;
                     if (!b) {
                         rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
@@ -599,6 +685,73 @@ int rx_register(rx_ext *ext, const char *name, const char *keys, const char *tit
     return r;
 }
 
+int rx_unregister(rx_ext *ext, const char *name) {
+    if (!rx_has(ext, "commands")) {
+        snprintf(ext->error, sizeof ext->error, "unknown commands feature was not agreed");
+        return -1;
+    }
+    size_t n = name ? strlen(name) : 0;
+    if (!n || n > 40 || strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != n) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid command name");
+        return -1;
+    }
+    char line[64];
+    snprintf(line, sizeof line, "unregister %s", name);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+static int64_t rx_watch_id(const char *raw) {
+    if (!raw || !*raw) return 0;
+    uint64_t value = 0;
+    size_t count = 0;
+    while (*raw) {
+        unsigned char c = (unsigned char)*raw++;
+        if (c < '0' || c > '9' || ++count > 10) return 0;
+        value = value * 10 + c - '0';
+        if (value > 2147483647u) return 0;
+    }
+    return (int64_t)value;
+}
+
+int64_t rx_watch_workspace(rx_ext *ext) {
+    if (!rx_has(ext, "workspace_watch")) {
+        snprintf(ext->error, sizeof ext->error, "unknown workspace_watch was not negotiated");
+        return -1;
+    }
+    rx_buf fields = {NULL, 0, 0};
+    int result = rx_request(ext, "watch-workspace", NULL, 0, &fields, NULL);
+    int64_t watch = result < 0 ? 0 : rx_watch_id(fields.data);
+    rx_buf_free(&fields);
+    if (result < 0) return -1;
+    if (!watch) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid workspace watch handle");
+        return -1;
+    }
+    return watch;
+}
+
+int rx_unwatch_workspace(rx_ext *ext, int64_t watch) {
+    if (!rx_has(ext, "workspace_watch") || watch <= 0 || watch > 2147483647) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid workspace watch");
+        return -1;
+    }
+    char line[64];
+    snprintf(line, sizeof line, "unwatch-workspace %lld", (long long)watch);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+int rx_parse_workspace_watch(const rx_event *event, int64_t *watch, int *rescan) {
+    if (!event || !event->name || strcmp(event->name, "watch") || event->argc != 2 ||
+        !event->argv || !event->argv[1] || !watch || !rescan) return 0;
+    int64_t id = rx_watch_id(event->argv[0]);
+    if (!id) return 0;
+    if (!strcmp(event->argv[1], "changed")) *rescan = 0;
+    else if (!strcmp(event->argv[1], "rescan")) *rescan = 1;
+    else return 0;
+    *watch = id;
+    return 1;
+}
+
 int rx_cmd(rx_ext *ext, const char *name) {
     rx_buf line = {NULL, 0, 0};
     rx_buf_fmt(&line, "cmd %s", name);
@@ -640,6 +793,642 @@ int rx_apply(rx_ext *ext, rx_wedit *edit) {
     int r = rx_request(ext, line, body.data, body.len, NULL, NULL);
     rx_buf_free(&body);
     return r;
+}
+
+/* Decimal fields with overflow checks, including identities received from the host. */
+static int rx_positive_num(const char *s, int64_t max, int64_t *out) {
+    int64_t value = 0;
+    if (!s || !*s) return 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9' || value > (max - (*s - '0')) / 10) return 0;
+        value = value * 10 + (*s - '0');
+    }
+    *out = value;
+    return 1;
+}
+
+int64_t rx_save_apply(rx_ext *ext, int64_t request_id, rx_doc doc, int64_t version, rx_wedit *edit) {
+    rx_buf body = {NULL, 0, 0}, fields = {NULL, 0, 0};
+    int64_t result = -1;
+    const char *code = NULL, *why = NULL;
+    if (!rx_has(ext, "save-actions")) { code = "unknown"; why = "save-actions feature was not agreed"; }
+    else if (request_id <= 0 || request_id > 2147483647 || doc <= 0 || version < 0) {
+        code = "syntax"; why = "invalid save-action identity";
+    }
+    if (code) {
+        snprintf(ext->error, sizeof ext->error, "%s %s", code, why);
+        rx_wedit_free(edit);
+        return -1;
+    }
+    if (rx_wedit_finish(edit, &body) < 0) {
+        snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
+        rx_wedit_free(edit);
+    } else {
+        char line[128];
+        snprintf(line, sizeof line, "save-apply %lld %lld %lld %zu", (long long)request_id, (long long)doc, (long long)version, body.len);
+        if (rx_request(ext, line, body.data, body.len, &fields, NULL) == 0 &&
+            (!rx_positive_num(fields.data, INT64_MAX, &result) || result < version)) {
+            snprintf(ext->error, sizeof ext->error, "syntax invalid save-apply reply");
+            result = -1;
+        }
+    }
+    rx_buf_free(&body);
+    rx_buf_free(&fields);
+    return result;
+}
+
+static int rx_snippet_utf8(const unsigned char *s, size_t n) {
+    size_t at = 0;
+    while (at < n) {
+        unsigned char c = s[at++];
+        size_t more;
+        if (c < 0x80) continue;
+        if (c >= 0xc2 && c <= 0xdf) more = 1;
+        else if (c >= 0xe0 && c <= 0xef) more = 2;
+        else if (c >= 0xf0 && c <= 0xf4) more = 3;
+        else return 0;
+        if (more > n - at) return 0;
+        if ((c == 0xe0 && s[at] < 0xa0) || (c == 0xed && s[at] >= 0xa0) ||
+            (c == 0xf0 && s[at] < 0x90) || (c == 0xf4 && s[at] >= 0x90)) return 0;
+        for (size_t j = 0; j < more; j++) if ((s[at++] & 0xc0) != 0x80) return 0;
+    }
+    return 1;
+}
+
+/* Portable compiled programs. SIZE_MAX denotes success for private readers. */
+static uint32_t rx_st_word(const unsigned char *p, size_t at) {
+    return (uint32_t)p[at] | ((uint32_t)p[at+1] << 8) |
+        ((uint32_t)p[at+2] << 16) | ((uint32_t)p[at+3] << 24);
+}
+static int rx_st_scalar(uint32_t n) { return n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff); }
+static size_t rx_st_regex(const unsigned char *p, size_t len) {
+    size_t code, classes, ranges, repeats, class_at, range_at, repeat_at, size, next;
+    uint32_t captures, slots;
+    if (len < 48) return len;
+    if (len > 262144) return 40;
+    if (!p || rx_st_word(p,0) != 0x58524e52) return 0;
+    if (rx_st_word(p,4) != 1) return 4;
+    if (rx_st_word(p,8) != 0x00100000) return 8;
+    if (rx_st_word(p,44) != 0) return 44;
+    code=rx_st_word(p,20); classes=rx_st_word(p,24); ranges=rx_st_word(p,28); repeats=rx_st_word(p,32);
+    if (!code || code>8192) return 20;
+    if (classes>256) return 24;
+    if (ranges>8192) return 28;
+    if (repeats>256) return 32;
+    class_at=48+code*16; range_at=class_at+classes*8; repeat_at=range_at+ranges*8; size=repeat_at+repeats*16;
+    if (size>262144 || size!=len || rx_st_word(p,40)!=size) return 40;
+    if (rx_st_word(p,12)&~127u) return 12;
+    captures=rx_st_word(p,16);
+    if (captures>64) return 16;
+    if (rx_st_word(p,36)>=code) return 36;
+    slots=2*(captures+1);
+    for (size_t i=0; i<code; i++) {
+        size_t at=48+i*16;
+        uint32_t op=rx_st_word(p,at), x=rx_st_word(p,at+4), y=rx_st_word(p,at+8), z=rx_st_word(p,at+12);
+        int valid;
+        switch (op) {
+        case 0: case 2:
+            if (x|y|z) return at+4;
+            break;
+        case 1: case 3: case 4: case 5: case 9: case 10:
+            if (op==1) valid=rx_st_scalar(x);
+            else if (op==3) valid=x<classes;
+            else if (op==4) valid=x>=1 && x<=4;
+            else if (op==5) valid=x>=2 && x<slots;
+            else if (op==9) valid=x>=1 && x<=captures;
+            else valid=x<repeats;
+            if (!valid) return at+4;
+            if (y|z) return at+8;
+            break;
+        case 6:
+            if (x<2 || (x&1) || !y || (y&1) || (uint64_t)x+y>slots) return at+4;
+            if (z) return at+12;
+            break;
+        case 14: case 15:
+            if (op==14 ? (x<1 || x>4) : (x<1 || x>captures)) return at+4;
+            if (y & ~(op==14 ? 6u : 2u)) return at+8;
+            if (z) return at+12;
+            break;
+        case 7: case 8: case 11: case 12: case 13:
+            if ((op==11 || op==12) ? x>=repeats : x>=code) return at+4;
+            if (op==8) {
+                if (y|z) return at+8;
+            } else {
+                if (y>=code) return at+8;
+                if (op==11) { if (z>=code) return at+12; }
+                else if ((op==13 && (z&~3u)) || (op!=13 && z)) return at+12;
+            }
+            break;
+        default: return at;
+        }
+        if (((op>=1 && op<=6) || op==9 || op==10 || op==14 || op==15) && i+1==code) return at;
+    }
+    next=0;
+    for (size_t i=0; i<classes; i++) {
+        size_t at=class_at+i*8, count=rx_st_word(p,at+4);
+        uint32_t previous=0;
+        if (rx_st_word(p,at)!=next || count>ranges-next) return at;
+        for (size_t j=0; j<count; j++) {
+            size_t r=range_at+(next+j)*8;
+            uint32_t lo=rx_st_word(p,r), hi=rx_st_word(p,r+4);
+            if (!rx_st_scalar(lo) || !rx_st_scalar(hi) || lo>hi || (lo<0xd800 && hi>0xdfff)) return r;
+            if (j && previous+1>=lo) return r;
+            previous=hi;
+        }
+        next+=count;
+    }
+    if (next!=ranges) return range_at+next*8;
+    for (size_t i=0; i<repeats; i++) {
+        size_t at=repeat_at+i*16;
+        uint32_t min=rx_st_word(p,at), max=rx_st_word(p,at+4);
+        if (min>0x7fffffff) return at;
+        if (max!=0xffffffff && (max>0x7fffffff || max<min)) return at+4;
+        if (rx_st_word(p,at+8)&~1u) return at+8;
+        if (rx_st_word(p,at+12)) return at+12;
+    }
+    return SIZE_MAX;
+}
+static size_t rx_st_utf8_error(const unsigned char *s, size_t n) {
+    size_t at=0;
+    while (at<n) {
+        size_t start=at, more;
+        unsigned char c=s[at++];
+        if (c<0x80) continue;
+        if (c>=0xc2 && c<=0xdf) more=1;
+        else if (c>=0xe0 && c<=0xef) more=2;
+        else if (c>=0xf0 && c<=0xf4) more=3;
+        else return start;
+        if (more>n-at) return start;
+        if ((c==0xe0 && s[at]<0xa0) || (c==0xed && s[at]>=0xa0) ||
+            (c==0xf0 && s[at]<0x90) || (c==0xf4 && s[at]>=0x90)) return start;
+        for (size_t j=0; j<more; j++) if ((s[at++]&0xc0)!=0x80) return start;
+    }
+    return SIZE_MAX;
+}
+static size_t rx_st_span(const unsigned char *p, size_t at, int used,
+                         const unsigned char *text, size_t n, size_t *cursor) {
+    size_t offset=rx_st_word(p,at), len=rx_st_word(p,at+4);
+    if (!used) return (offset|len) ? at : SIZE_MAX;
+    if (offset!=*cursor) return at;
+    if (len>n-*cursor) return at+4;
+    if (*cursor!=n && (text[*cursor]&0xc0)==0x80) return at;
+    if (*cursor+len!=n && (text[*cursor+len]&0xc0)==0x80) return at+4;
+    *cursor+=len;
+    return SIZE_MAX;
+}
+static size_t rx_st_replacement(const unsigned char *p, size_t len) {
+    size_t count, blob, cursor=0, error;
+    uint64_t size;
+    if (len<32) return len;
+    if (len>(4u<<20)) return 20;
+    if (!p || rx_st_word(p,0)!=0x46524e52) return 0;
+    if (rx_st_word(p,4)!=1) return 4;
+    if (rx_st_word(p,8)!=0x00100000) return 8;
+    if (rx_st_word(p,24)) return 24;
+    if (rx_st_word(p,28)) return 28;
+    count=rx_st_word(p,12);
+    if (count>8192) return 12;
+    blob=32+count*24;
+    size=(uint64_t)blob+rx_st_word(p,16);
+    if (size>(4u<<20) || size!=len || rx_st_word(p,20)!=size) return 20;
+    error=rx_st_utf8_error(p+blob,len-blob);
+    if (error!=SIZE_MAX) return blob+error;
+    for (size_t i=0; i<count; i++) {
+        size_t at=32+i*24;
+        uint32_t op=rx_st_word(p,at), index=rx_st_word(p,at+4);
+        if (op>11) return at;
+        if (index>0x7fffffff || (!op && index)) return at+4;
+        error=rx_st_span(p,at+8,!op || op>=9,p+blob,len-blob,&cursor);
+        if (error!=SIZE_MAX) return error;
+        error=rx_st_span(p,at+16,op==11,p+blob,len-blob,&cursor);
+        if (error!=SIZE_MAX) return error;
+    }
+    return cursor!=len-blob ? blob+cursor : SIZE_MAX;
+}
+static size_t rx_st_payload(const unsigned char *p, size_t len) {
+    size_t count, cursor;
+    uint32_t previous=0;
+    if (len<32) return len;
+    if (len>(4u<<20)) return 16;
+    if (!p || rx_st_word(p,0)!=0x58544e53) return 0;
+    if (rx_st_word(p,4)!=1) return 4;
+    if (rx_st_word(p,8)!=0x00100000) return 8;
+    if (rx_st_word(p,20)) return 20;
+    if (rx_st_word(p,24)) return 24;
+    if (rx_st_word(p,28)) return 28;
+    count=rx_st_word(p,12);
+    if (count>512) return 12;
+    cursor=32+count*24;
+    if (rx_st_word(p,16)!=len || cursor>len) return 16;
+    for (size_t i=0; i<count; i++) {
+        size_t at=32+i*24, rlen, roff, flen, foff, error;
+        uint32_t field=rx_st_word(p,at);
+        if (field<=previous || field>512) return at;
+        if (rx_st_word(p,at+20)) return at+20;
+        if (rx_st_word(p,at+4)!=cursor) return at+4;
+        rlen=rx_st_word(p,at+8);
+        if (rlen>len-cursor) return at+8;
+        roff=cursor; cursor+=rlen;
+        if (rx_st_word(p,at+12)!=cursor) return at+12;
+        flen=rx_st_word(p,at+16);
+        if (flen>len-cursor) return at+16;
+        foff=cursor; cursor+=flen;
+        error=rx_st_regex(p+roff,rlen);
+        if (error!=SIZE_MAX) return roff+error;
+        error=rx_st_replacement(p+foff,flen);
+        if (error!=SIZE_MAX) return foff+error;
+        previous=field;
+    }
+    return cursor!=len ? 16 : SIZE_MAX;
+}
+int rx_snippet_transform_validate(const void *bytes, size_t len, size_t *error_offset) {
+    size_t error=rx_st_payload((const unsigned char *)bytes,len);
+    if (error_offset) *error_offset=error==SIZE_MAX ? 0 : error;
+    return error==SIZE_MAX;
+}
+
+int rx_snippet_transform_program_validate(const rx_snippet_transform_program *p, int *part, size_t *error_offset) {
+    size_t error=0;
+    int which=0;
+    if (p) {
+        if (p->regex_len>262144) { which=1; error=40; }
+        else if (p->replacement_len>(4u<<20)) { which=2; error=20; }
+        else if (p->replacement_len>(4u<<20)-56-p->regex_len) { error=0; }
+        else {
+            error=rx_st_regex((const unsigned char *)p->regex,p->regex_len);
+            if (error!=SIZE_MAX) which=1;
+            else {
+                error=rx_st_replacement((const unsigned char *)p->replacement,p->replacement_len);
+                if (error!=SIZE_MAX) which=2;
+            }
+        }
+    }
+    if (part) *part=which;
+    if (error_offset) *error_offset=error==SIZE_MAX ? 0 : error;
+    return error==SIZE_MAX;
+}
+
+static int rx_snippet_ancestor(const rx_snippet *s, size_t parent, size_t child) {
+    for (size_t p = s->fields[child].parent; p; p = s->fields[p - 1].parent)
+        if (p - 1 == parent) return 1;
+    return 0;
+}
+
+static size_t rx_snippet_extra_size(const rx_snippet *s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s->nfields; i++) {
+        rx_snippet_field f = s->fields[i];
+        n += (size_t)snprintf(NULL, 0, "field %lld %zu %zu %zu 0\n", (long long)f.group, f.start, f.end, f.parent);
+    }
+    return n;
+}
+
+static int rx_snippet_validate_variants(const rx_snippet *s, const unsigned char variants[512]) {
+    int64_t groups[256];
+    size_t primary[256], depths[512], group_index[512], n = 0;
+    unsigned char edges[256][256] = {{0}};
+    size_t indegree[256] = {0}, queue[256], nq = 0;
+    int final_seen = 0;
+    if (!s || s->len > (4u << 20) || s->nfields > 512 ||
+        (s->len && !s->text) || (s->nfields && !s->fields) ||
+        !rx_snippet_utf8((const unsigned char *)s->text, s->len)) return 0;
+    for (size_t i = 0; i < s->nfields; i++) {
+        rx_snippet_field f = s->fields[i];
+        if (f.group < 0 || f.group > 2147483647 || f.start > f.end || f.end > s->len || f.parent > i ||
+            (f.start < s->len && ((unsigned char)s->text[f.start] & 0xc0) == 0x80) ||
+            (f.end < s->len && ((unsigned char)s->text[f.end] & 0xc0) == 0x80)) return 0;
+        depths[i] = 1;
+        if (f.parent) {
+            rx_snippet_field p = s->fields[f.parent - 1];
+            if (p.group == 0 || primary[group_index[f.parent - 1]] != f.parent - 1 ||
+                p.group == f.group || f.start < p.start || f.end > p.end) return 0;
+            depths[i] = depths[f.parent - 1] + 1;
+        }
+        if (depths[i] > 32) return 0;
+        if (!f.group) {
+            if (final_seen || (variants && variants[i])) return 0;
+            final_seen = 1;
+            group_index[i] = 0;
+            continue;
+        }
+        size_t g;
+        for (g = 0; g < n && groups[g] != f.group; g++) {}
+        if (g == n) {
+            if (n == 256 || (variants && variants[i])) return 0;
+            groups[n] = f.group;
+            primary[n++] = i;
+        } else {
+            rx_snippet_field p = s->fields[primary[g]];
+            int unequal = p.end - p.start != f.end - f.start ||
+                (f.end > f.start && memcmp(s->text + p.start, s->text + f.start, f.end - f.start));
+            if (!!unequal != !!(variants && variants[i])) return 0;
+        }
+        group_index[i] = g;
+    }
+    for (size_t i = 0; i < s->nfields; i++) {
+        rx_snippet_field a = s->fields[i];
+        for (size_t j = 0; j < i; j++) {
+            rx_snippet_field b = s->fields[j];
+            if (a.group && b.group && a.start < b.end && b.start < a.end &&
+                (a.group == b.group || (!rx_snippet_ancestor(s, i, j) && !rx_snippet_ancestor(s, j, i)))) return 0;
+        }
+        if (!a.group) continue;
+        size_t from = group_index[i];
+        for (size_t p = a.parent; p; p = s->fields[p - 1].parent) {
+            size_t to = group_index[p - 1];
+            if (!edges[from][to]) { edges[from][to] = 1; indegree[to]++; }
+        }
+    }
+    for (size_t i = 0; i < n; i++) if (!indegree[i]) queue[nq++] = i;
+    for (size_t i = 0; i < nq; i++) {
+        for (size_t to = 0; to < n; to++) {
+            if (edges[queue[i]][to] && --indegree[to] == 0) queue[nq++] = to;
+        }
+    }
+    if (nq != n) return 0;
+    size_t extra = rx_snippet_extra_size(s);
+    size_t header = (size_t)snprintf(NULL, 0, "0 0 0 0 snippet 0 %zu 0 %zu\n", s->len, extra);
+    return header + s->len + extra <= (4u << 20);
+}
+
+int rx_snippet_validate(const rx_snippet *s) { return rx_snippet_validate_variants(s, NULL); }
+
+static void rx_snippet_extra(const rx_snippet *s, rx_buf *out) {
+    for (size_t i = 0; i < s->nfields; i++) {
+        rx_snippet_field f = s->fields[i];
+        rx_buf_fmt(out, "field %lld %zu %zu %zu 0\n", (long long)f.group, f.start, f.end, f.parent);
+    }
+}
+
+static size_t rx_snippet_choice_size(const rx_snippet_choice *c) {
+    size_t n = 0;
+    for (size_t i = 0; i < c->noptions; i++)
+        n += c->options[i].len + (size_t)snprintf(NULL, 0, "%zu\n", c->options[i].len);
+    return n;
+}
+
+/* Length and identity preflight before any program bytes are inspected. */
+static int rx_snippet_transforms_size(const rx_snippet_program *p, size_t *raw, size_t order[512]) {
+    *raw=0;
+    if (p->ntransforms>512 || (p->ntransforms && !p->transforms)) return 0;
+    for (size_t i=0;i<512;i++) order[i]=SIZE_MAX;
+    if (!p->ntransforms) return 1;
+    size_t n=32+24*p->ntransforms;
+    for (size_t i=0;i<p->ntransforms;i++) {
+        const rx_snippet_field_transform *t=&p->transforms[i];
+        if (!t->field || t->field>512 || t->field>p->snippet->nfields ||
+            p->snippet->fields[t->field-1].group<=0 || order[t->field-1]!=SIZE_MAX) return 0;
+        order[t->field-1]=i;
+        if (t->transform.regex_len>262144 || t->transform.replacement_len>(4u<<20) ||
+            t->transform.regex_len>(4u<<20)-n) return 0;
+        n+=t->transform.regex_len;
+        if (t->transform.replacement_len>(4u<<20)-n) return 0;
+        n+=t->transform.replacement_len;
+    }
+    *raw=n;
+    return 1;
+}
+static size_t rx_snippet_transforms_extra_size(size_t raw) {
+    if (!raw) return 0;
+    size_t encoded=4*((raw+2)/3);
+    return encoded+(size_t)snprintf(NULL,0,"transforms 0 %zu\n",encoded);
+}
+static void rx_st_put(unsigned char *p, size_t at, size_t value) {
+    for (size_t i=0;i<4;i++) p[at+i]=(unsigned char)(value>>(8*i));
+}
+/* Called only after validation and whole-body size checks. */
+static void rx_snippet_transforms_extra(const rx_snippet_program *p, rx_buf *out) {
+    if (!p->ntransforms) return;
+    size_t raw,order[512];
+    if (!rx_snippet_transforms_size(p,&raw,order)) abort();
+    unsigned char *bytes=(unsigned char *)calloc(raw,1);
+    if (!bytes) abort();
+    rx_st_put(bytes,0,0x58544e53);rx_st_put(bytes,4,1);rx_st_put(bytes,8,0x00100000);
+    rx_st_put(bytes,12,p->ntransforms);rx_st_put(bytes,16,raw);
+    size_t row=32,cursor=32+24*p->ntransforms;
+    for (size_t i=0;i<512;i++) {
+        if (order[i]==SIZE_MAX) continue;
+        const rx_snippet_transform_program *t=&p->transforms[order[i]].transform;
+        rx_st_put(bytes,row,i+1);rx_st_put(bytes,row+4,cursor);rx_st_put(bytes,row+8,t->regex_len);
+        memcpy(bytes+cursor,t->regex,t->regex_len);cursor+=t->regex_len;
+        rx_st_put(bytes,row+12,cursor);rx_st_put(bytes,row+16,t->replacement_len);
+        memcpy(bytes+cursor,t->replacement,t->replacement_len);cursor+=t->replacement_len;row+=24;
+    }
+    static const char alphabet[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    rx_buf_fmt(out,"transforms 0 %zu\n",4*((raw+2)/3));
+    for (size_t i=0;i<raw;i+=3) {
+        unsigned int a=bytes[i],b=i+1<raw?bytes[i+1]:0,c=i+2<raw?bytes[i+2]:0;
+        char quartet[4]={alphabet[a>>2],alphabet[((a&3)<<4)|(b>>4)],
+            i+1<raw?alphabet[((b&15)<<2)|(c>>6)]:'=',i+2<raw?alphabet[c&63]:'='};
+        rx_buf_add(out,quartet,4);
+    }
+    free(bytes);
+}
+
+/* Only called after validation; each intermediate sum is bounded by the frame cap. */
+static size_t rx_snippet_program_extra_size(const rx_snippet_program *p) {
+    size_t n = rx_snippet_extra_size(p->snippet);
+    for (size_t i=0; i<p->ninitial_variants; i++)
+        n += (size_t)snprintf(NULL, 0, "variant %zu 0\n", p->initial_variants[i]);
+    for (size_t i = 0; i < p->nchoices; i++) {
+        const rx_snippet_choice *c = &p->choices[i];
+        size_t size = rx_snippet_choice_size(c);
+        n += size + (size_t)snprintf(NULL, 0, "choice %lld %zu %zu\n", (long long)c->group, c->noptions, size);
+    }
+    size_t raw,order[512];
+    if (!rx_snippet_transforms_size(p,&raw,order)) abort();
+    return n+rx_snippet_transforms_extra_size(raw);
+}
+
+int rx_snippet_program_validate(const rx_snippet_program *p) {
+    if (!p || !p->snippet || p->ninitial_variants > 512 ||
+        (p->ninitial_variants && !p->initial_variants) || p->nchoices > 256 || (p->nchoices && !p->choices)) return 0;
+    unsigned char variants[512] = {0};
+    for (size_t i=0; i<p->ninitial_variants; i++) {
+        size_t index = p->initial_variants[i];
+        if (!index || index > 512 || index > p->snippet->nfields || variants[index-1]) return 0;
+        variants[index-1] = 1;
+    }
+    if (!rx_snippet_validate_variants(p->snippet, variants)) return 0;
+    const rx_snippet *s = p->snippet;
+    size_t raw,order[512];
+    if (!rx_snippet_transforms_size(p,&raw,order)) return 0;
+    size_t total = rx_snippet_extra_size(s);
+    for (size_t i=0; i<p->ninitial_variants; i++)
+        total += (size_t)snprintf(NULL, 0, "variant %zu 0\n", p->initial_variants[i]);
+    for (size_t i = 0; i < p->nchoices; i++) {
+        const rx_snippet_choice *c = &p->choices[i];
+        if (c->group <= 0 || !c->noptions || c->noptions > 256 || !c->options) return 0;
+        for (size_t j = 0; j < i; j++) if (p->choices[j].group == c->group) return 0;
+        size_t primary;
+        for (primary = 0; primary < s->nfields && s->fields[primary].group != c->group; primary++) {}
+        if (primary == s->nfields) return 0;
+        rx_snippet_field f = s->fields[primary];
+        if (c->options[0].len != f.end - f.start) return 0;
+        size_t size = 0;
+        for (size_t j = 0; j < c->noptions; j++) {
+            rx_snippet_option o = c->options[j];
+            if (o.len > (1u << 20) || (o.len && !o.text) || !rx_snippet_utf8((const unsigned char *)o.text, o.len)) return 0;
+            size += o.len + (size_t)snprintf(NULL, 0, "%zu\n", o.len);
+            if (size > (4u << 20)) return 0;
+        }
+        if (f.end > f.start && memcmp(c->options[0].text, s->text + f.start, f.end - f.start)) return 0;
+        total += size + (size_t)snprintf(NULL, 0, "choice %lld %zu %zu\n", (long long)c->group, c->noptions, size);
+        if (total > (4u << 20)) return 0;
+    }
+    total+=rx_snippet_transforms_extra_size(raw);
+    size_t header = (size_t)snprintf(NULL, 0, "0 0 0 0 snippet 0 %zu 0 %zu\n", s->len, total);
+    if (header+s->len+total>(4u<<20)) return 0;
+    for (size_t i=0;i<p->ntransforms;i++)
+        if (!rx_snippet_transform_program_validate(&p->transforms[i].transform,NULL,NULL)) return 0;
+    return 1;
+}
+
+static void rx_snippet_program_extra(const rx_snippet_program *p, rx_buf *out) {
+    rx_snippet_extra(p->snippet, out);
+    for (size_t i=0; i<p->ninitial_variants; i++)
+        rx_buf_fmt(out, "variant %zu 0\n", p->initial_variants[i]);
+    for (size_t i = 0; i < p->nchoices; i++) {
+        const rx_snippet_choice *c = &p->choices[i];
+        rx_buf_fmt(out, "choice %lld %zu %zu\n", (long long)c->group, c->noptions, rx_snippet_choice_size(c));
+        for (size_t j = 0; j < c->noptions; j++) {
+            rx_buf_fmt(out, "%zu\n", c->options[j].len);
+            rx_buf_add(out, c->options[j].text, c->options[j].len);
+        }
+    }
+    rx_snippet_transforms_extra(p,out);
+}
+
+int rx_snippet_program_encode(const rx_snippet_program *p, rx_buf *out) {
+    if (!out || !rx_snippet_program_validate(p)) return -1;
+    rx_buf_fmt(out, "0 0 0 0 snippet 0 %zu 0 %zu\n", p->snippet->len, rx_snippet_program_extra_size(p));
+    rx_buf_add(out, p->snippet->text, p->snippet->len);
+    rx_snippet_program_extra(p, out);
+    return 0;
+}
+
+int rx_snippet_encode(const rx_snippet *s, rx_buf *out) {
+    rx_snippet_program p = {s, NULL, 0, NULL, 0, NULL, 0};
+    return rx_snippet_program_encode(&p, out);
+}
+
+int64_t rx_insert_snippet(rx_ext *ext, rx_doc doc, int64_t version, rx_range r, const rx_snippet *s) {
+    rx_snippet_program p = {s, NULL, 0, NULL, 0, NULL, 0};
+    return rx_insert_snippet_program(ext, doc, version, r, &p);
+}
+
+int64_t rx_insert_snippet_program(rx_ext *ext, rx_doc doc, int64_t version, rx_range r, const rx_snippet_program *p) {
+    rx_buf body = {NULL, 0, 0}, fields = {NULL, 0, 0};
+    int64_t result = -1;
+    if (!rx_has(ext, "snippets") || (p && p->ninitial_variants && !rx_has(ext, "snippet-variants")) ||
+        (p && p->ntransforms && !rx_has(ext,"snippet-transforms"))) {
+        snprintf(ext->error, sizeof ext->error, "unknown snippets feature was not agreed");
+        return -1;
+    }
+    if (doc <= 0 || version < 0 || r.start.line <= 0 || r.start.col <= 0 || r.end.line <= 0 || r.end.col <= 0 ||
+        r.end.line < r.start.line || (r.end.line == r.start.line && r.end.col < r.start.col) ||
+        rx_snippet_program_encode(p, &body) < 0) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid snippet target, range or fields");
+        return -1;
+    }
+    char line[192];
+    snprintf(line, sizeof line, "snippet %lld %lld %d %d %d %d %zu", (long long)doc, (long long)version,
+             r.start.line, r.start.col, r.end.line, r.end.col, body.len);
+    if (rx_request(ext, line, body.data, body.len, &fields, NULL) == 0 &&
+        (!rx_positive_num(fields.data, INT64_MAX, &result) || result < version)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid snippet reply");
+        result = -1;
+    }
+    rx_buf_free(&body);
+    rx_buf_free(&fields);
+    return result;
+}
+
+void rx_snippet_snapshot_free(rx_snippet_snapshot *s) {
+    if (!s) return;
+    rx_buf_free(&s->selected_text); rx_buf_free(&s->current_line); rx_buf_free(&s->path);
+    rx_buf_free(&s->workspace); rx_buf_free(&s->indent); rx_buf_free(&s->line_comment);
+    memset(s, 0, sizeof *s);
+}
+
+static int rx_snapshot_numbers(char *s, int64_t *out, size_t count) {
+    for (size_t i=0; i<count; i++) {
+        char *next = strchr(s, ' ');
+        if ((i+1<count) != (next!=NULL)) return 0;
+        if (next) *next = 0;
+        if (!rx_positive_num(s, INT64_MAX, &out[i])) return 0;
+        if (next) s = next+1;
+    }
+    return 1;
+}
+
+static int rx_snapshot_decode(const rx_buf *fields, const rx_buf *body, int64_t version, rx_pos at,
+                              rx_snippet_snapshot *out) {
+    char reply[128], head[257];
+    int64_t r[2], n[11];
+    size_t end=0, off, lengths[6];
+    const char *parts[6];
+    memset(out, 0, sizeof *out);
+    if (!fields->data || fields->len>=sizeof reply || body->len>(4u<<20)) return 0;
+    memcpy(reply, fields->data, fields->len); reply[fields->len]=0;
+    if (!rx_snapshot_numbers(reply,r,2) || r[0]!=version || r[1]!=(int64_t)body->len) return 0;
+    while (end<body->len && end<=256 && body->data[end]!='\n') end++;
+    if (end>=body->len || end>256 || memchr(body->data,0,end)) return 0;
+    memcpy(head,body->data,end); head[end]=0;
+    if (strncmp(head,"context 1 ",10) || !rx_snapshot_numbers(head+10,n,11) || at.line<=0 || at.col<=0 ||
+        n[0]!=at.line || n[1]!=at.col || n[2]<1 || n[2]>16 || n[3]>1 || n[4]>1) return 0;
+    off=end+1;
+    for (size_t i=0; i<6; i++) {
+        if ((uint64_t)n[i+5]>body->len-off) return 0;
+        lengths[i]=(size_t)n[i+5]; parts[i]=body->data+off;
+        if (!rx_snippet_utf8((const unsigned char *)parts[i],lengths[i])) return 0;
+        off+=lengths[i];
+    }
+    size_t col=(size_t)at.col-1, indent=0;
+    if (off!=body->len || memchr(parts[1],'\n',lengths[1]) || col>lengths[1] ||
+        (col<lengths[1] && ((unsigned char)parts[1][col]&0xc0)==0x80)) return 0;
+    while (indent<col && (parts[1][indent]==' ' || parts[1][indent]=='\t')) indent++;
+    if (lengths[4]!=indent || (indent && memcmp(parts[4],parts[1],indent))) return 0;
+    out->version=version; out->position=at; out->tab_width=(int)n[2];
+    out->insert_spaces=(int)n[3]; out->crlf=(int)n[4];
+    rx_buf *buffers[6]={&out->selected_text,&out->current_line,&out->path,&out->workspace,&out->indent,&out->line_comment};
+    for (size_t i=0; i<6; i++) rx_buf_add(buffers[i],parts[i],lengths[i]);
+    return 1;
+}
+
+int rx_get_snippet_snapshot(rx_ext *ext, rx_doc doc, int64_t version, rx_range r, rx_snippet_snapshot *out) {
+    if (!out) { snprintf(ext->error,sizeof ext->error,"syntax missing snippet context output"); return -1; }
+    memset(out,0,sizeof *out);
+    if (!rx_has(ext,"snippets")) {
+        snprintf(ext->error,sizeof ext->error,"unknown snippets feature was not agreed"); return -1;
+    }
+    if (doc<=0 || version<0 || r.start.line<=0 || r.start.col<=0 || r.end.line<=0 || r.end.col<=0 ||
+        r.end.line<r.start.line || (r.end.line==r.start.line && r.end.col<r.start.col)) {
+        snprintf(ext->error,sizeof ext->error,"syntax invalid snippet target or range"); return -1;
+    }
+    char line[192]; rx_buf fields={NULL,0,0}, body={NULL,0,0};
+    snprintf(line,sizeof line,"snippet-context %lld %lld %d %d %d %d",(long long)doc,(long long)version,
+        r.start.line,r.start.col,r.end.line,r.end.col);
+    int result=rx_request(ext,line,NULL,0,&fields,&body);
+    if (result==0 && !rx_snapshot_decode(&fields,&body,version,r.start,out)) {
+        snprintf(ext->error,sizeof ext->error,"syntax invalid snippet context reply"); result=-1;
+    }
+    rx_buf_free(&fields); rx_buf_free(&body);
+    return result;
+}
+
+static int rx_source_kind(const char *s) {
+    int segment = 0;
+    if (!s || strlen(s) > 128) return 0;
+    if (strcmp(s, "source") == 0) return 1;
+    if (strncmp(s, "source.", 7) != 0) return 0;
+    for (s += 7; *s; s++) {
+        if (*s == '.') { if (!segment) return 0; segment = 0; }
+        else if ((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+                 (*s >= '0' && *s <= '9') || *s == '_' || *s == '-') segment = 1;
+        else return 0;
+    }
+    return segment;
 }
 
 /* ---- pictures */
@@ -805,6 +1594,49 @@ void rx_list_item_cursor(rx_list *l, rx_range r, const char *kind, const char *l
                kind && *kind ? kind : "text", ll, il, dl, extra.len);
     rx_buf_add(&l->items, label, ll);
     rx_buf_add(&l->items, insert, il);
+    rx_buf_add(&l->items, detail, dl);
+    rx_buf_add(&l->items, extra.data, extra.len);
+    l->n++;
+    rx_buf_free(&extra);
+}
+
+void rx_list_item_snippet(rx_list *l, rx_range r, const char *kind, const char *label,
+                         const rx_snippet *s, const char *detail, const char *doc,
+                         const rx_range *edits, const char *const *texts, int nedits) {
+    rx_snippet_program program = {s, NULL, 0, NULL, 0, NULL, 0};
+    rx_list_item_snippet_program(l, r, kind, label, &program, detail, doc, edits, texts, nedits);
+}
+
+void rx_list_item_snippet_program(rx_list *l, rx_range r, const char *kind, const char *label,
+                         const rx_snippet_program *p, const char *detail, const char *doc,
+                         const rx_range *edits, const char *const *texts, int nedits) {
+    rx_buf extra = {NULL, 0, 0};
+    const rx_snippet *s = p ? p->snippet : NULL;
+    if (!s || s->len > (1u << 20) || (s->len && !s->text)) { l->more = 1; return; }
+    for (int i = 0; i < nedits; i++) {
+        size_t n = strlen(texts[i]);
+        rx_buf_fmt(&extra, "edit %d %d %d %d %zu\n", edits[i].start.line, edits[i].start.col,
+                   edits[i].end.line, edits[i].end.col, n);
+        rx_buf_add(&extra, texts[i], n);
+    }
+    if (doc && *doc) {
+        rx_buf_fmt(&extra, "doc %zu\n", strlen(doc));
+        rx_buf_str(&extra, doc);
+    }
+    if (rx_snippet_program_validate(p)) rx_snippet_program_extra(p, &extra);
+    if (!label) label = "";
+    if (!detail) detail = "";
+    size_t ll = rx_one_line_len(label), dl = rx_one_line_len(detail);
+    if (l->n >= 4096 || ll > (1u << 20) || dl > (1u << 20) || extra.len > (1u << 20) ||
+        l->items.len + 64 + ll + s->len + dl + extra.len > (1u << 20) - 64) {
+        l->more = 1;
+        rx_buf_free(&extra);
+        return;
+    }
+    rx_buf_fmt(&l->items, "%d %d %d %d %s %zu %zu %zu %zu\n", r.start.line, r.start.col, r.end.line, r.end.col,
+               kind && *kind ? kind : "text", ll, s->len, dl, extra.len);
+    rx_buf_add(&l->items, label, ll);
+    rx_buf_add(&l->items, s->text, s->len);
     rx_buf_add(&l->items, detail, dl);
     rx_buf_add(&l->items, extra.data, extra.len);
     l->n++;
@@ -1200,6 +2032,14 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.tab_width = atoi(f[4]);
         req.spaces = strcmp(f[5], "yes") == 0;
         if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+    } else if (strcmp(verb, "save-actions") == 0 && n == 5 && h->save_actions && rx_has(ext, "save-actions")) {
+        rx_save_actions_ask req;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
+            rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
+            rx_positive_num(f[3], INT64_MAX, &req.version) && rx_source_kind(f[4])) {
+            req.kind = f[4];
+            if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+        }
     }
     if (ok && e.fail) {
         rx_buf_fmt(&line, "error %s %s %s", f[0], e.fail, e.why);     /* why is one line */

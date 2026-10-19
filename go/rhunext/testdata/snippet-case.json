@@ -1,0 +1,367 @@
+[
+  {
+    "Op": 2,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 2,
+    "Input": "straße",
+    "Output": "STRASSE"
+  },
+  {
+    "Op": 2,
+    "Input": "ﬃ",
+    "Output": "FFI"
+  },
+  {
+    "Op": 2,
+    "Input": "ıiİ",
+    "Output": "IIİ"
+  },
+  {
+    "Op": 2,
+    "Input": "ςσΣ",
+    "Output": "ΣΣΣ"
+  },
+  {
+    "Op": 2,
+    "Input": "𐐨",
+    "Output": "𐐀"
+  },
+  {
+    "Op": 2,
+    "Input": "𐵰",
+    "Output": "𐵐"
+  },
+  {
+    "Op": 2,
+    "Input": "ǅ",
+    "Output": "Ǆ"
+  },
+  {
+    "Op": 3,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 3,
+    "Input": "ẞ",
+    "Output": "ß"
+  },
+  {
+    "Op": 3,
+    "Input": "İ",
+    "Output": "i̇"
+  },
+  {
+    "Op": 3,
+    "Input": "ΟΣ",
+    "Output": "ος"
+  },
+  {
+    "Op": 3,
+    "Input": "ΟΣΑ",
+    "Output": "οσα"
+  },
+  {
+    "Op": 3,
+    "Input": "ΑΣͅ",
+    "Output": "αςͅ"
+  },
+  {
+    "Op": 3,
+    "Input": "ͅΣ",
+    "Output": "ͅσ"
+  },
+  {
+    "Op": 3,
+    "Input": "ʰΣ",
+    "Output": "ʰσ"
+  },
+  {
+    "Op": 3,
+    "Input": "ΑΣʰ",
+    "Output": "αςʰ"
+  },
+  {
+    "Op": 3,
+    "Input": "ΑΣ.Α",
+    "Output": "ασ.α"
+  },
+  {
+    "Op": 3,
+    "Input": "ΑΣ-Α",
+    "Output": "ας-α"
+  },
+  {
+    "Op": 3,
+    "Input": "𐐀",
+    "Output": "𐐨"
+  },
+  {
+    "Op": 3,
+    "Input": "𐵐",
+    "Output": "𐵰"
+  },
+  {
+    "Op": 4,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 4,
+    "Input": "ßfoo",
+    "Output": "SSfoo"
+  },
+  {
+    "Op": 4,
+    "Input": "ﬃoo",
+    "Output": "FFIoo"
+  },
+  {
+    "Op": 4,
+    "Input": "𐐨x",
+    "Output": "𐐀x"
+  },
+  {
+    "Op": 4,
+    "Input": " hello",
+    "Output": " hello"
+  },
+  {
+    "Op": 4,
+    "Input": "ǅfoo",
+    "Output": "Ǆfoo"
+  },
+  {
+    "Op": 4,
+    "Input": "éCLAIR",
+    "Output": "ÉCLAIR"
+  },
+  {
+    "Op": 5,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 5,
+    "Input": "foo BAR baz",
+    "Output": "fooBARBaz"
+  },
+  {
+    "Op": 5,
+    "Input": "éclair-test",
+    "Output": "éclairTest"
+  },
+  {
+    "Op": 5,
+    "Input": "123abc def",
+    "Output": "123abcDef"
+  },
+  {
+    "Op": 5,
+    "Input": "---",
+    "Output": "---"
+  },
+  {
+    "Op": 5,
+    "Input": "ǅABC x",
+    "Output": "ǆABCX"
+  },
+  {
+    "Op": 5,
+    "Input": "中 文",
+    "Output": "中文"
+  },
+  {
+    "Op": 5,
+    "Input": "𐐀foo-𐐨bar",
+    "Output": "𐐨foo𐐀bar"
+  },
+  {
+    "Op": 5,
+    "Input": "foóbar",
+    "Output": "fooBar"
+  },
+  {
+    "Op": 6,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 6,
+    "Input": "foo BAR baz",
+    "Output": "FooBARBaz"
+  },
+  {
+    "Op": 6,
+    "Input": "ßfoo-bar",
+    "Output": "SSfooBar"
+  },
+  {
+    "Op": 6,
+    "Input": "中 文",
+    "Output": "中文"
+  },
+  {
+    "Op": 6,
+    "Input": "---",
+    "Output": "---"
+  },
+  {
+    "Op": 6,
+    "Input": "foóbar",
+    "Output": "FooBar"
+  },
+  {
+    "Op": 7,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 7,
+    "Input": "fooBAR",
+    "Output": "foo_bar"
+  },
+  {
+    "Op": 7,
+    "Input": "XMLHttpRequest",
+    "Output": "xmlhttp_request"
+  },
+  {
+    "Op": 7,
+    "Input": "  foo--bar\n",
+    "Output": "_foo_bar_"
+  },
+  {
+    "Op": 7,
+    "Input": "a__B",
+    "Output": "a__b"
+  },
+  {
+    "Op": 7,
+    "Input": "ΑΣΑ",
+    "Output": "ασα"
+  },
+  {
+    "Op": 7,
+    "Input": "aΣ",
+    "Output": "a_σ"
+  },
+  {
+    "Op": 7,
+    "Input": "ΑΣͅ",
+    "Output": "αςͅ"
+  },
+  {
+    "Op": 7,
+    "Input": "A﻿B",
+    "Output": "a_b"
+  },
+  {
+    "Op": 7,
+    "Input": "éÉ",
+    "Output": "é_é"
+  },
+  {
+    "Op": 7,
+    "Input": "𐐨𐐀",
+    "Output": "𐐨_𐐨"
+  },
+  {
+    "Op": 8,
+    "Input": "",
+    "Output": ""
+  },
+  {
+    "Op": 8,
+    "Input": "---",
+    "Output": "---"
+  },
+  {
+    "Op": 8,
+    "Input": "fooBAR",
+    "Output": "foo-bar"
+  },
+  {
+    "Op": 8,
+    "Input": "XMLHttpRequest",
+    "Output": "xml-http-request"
+  },
+  {
+    "Op": 8,
+    "Input": "ABc",
+    "Output": "a-bc"
+  },
+  {
+    "Op": 8,
+    "Input": "XML2",
+    "Output": "2"
+  },
+  {
+    "Op": 8,
+    "Input": "A2B",
+    "Output": "2-b"
+  },
+  {
+    "Op": 8,
+    "Input": "  __foo_BAR__  ",
+    "Output": "foo-bar"
+  },
+  {
+    "Op": 8,
+    "Input": "_ foo _",
+    "Output": "foo"
+  },
+  {
+    "Op": 8,
+    "Input": "中 文",
+    "Output": "中-文"
+  },
+  {
+    "Op": 8,
+    "Input": "中foo文",
+    "Output": "foo"
+  },
+  {
+    "Op": 8,
+    "Input": "A!",
+    "Output": "a!"
+  },
+  {
+    "Op": 8,
+    "Input": "AB!",
+    "Output": "ab!"
+  },
+  {
+    "Op": 8,
+    "Input": "FOO",
+    "Output": "foo"
+  },
+  {
+    "Op": 8,
+    "Input": "foóBar",
+    "Output": "foo-bar"
+  },
+  {
+    "Op": 8,
+    "Input": "ΟΣ",
+    "Output": "ος"
+  },
+  {
+    "Op": 8,
+    "Input": "αΣα",
+    "Output": "α-σα"
+  },
+  {
+    "Op": 8,
+    "Input": "fooBAR",
+    "Output": "foo-bar"
+  },
+  {
+    "Op": 8,
+    "Input": "foo﻿BAR",
+    "Output": "foo-bar"
+  }
+]

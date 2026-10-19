@@ -10,6 +10,7 @@ package rhunext
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -142,17 +143,27 @@ type Reply struct {
 
 // Ext is the connection to rhun.
 type Ext struct {
-	w      io.Writer
-	wmu    sync.Mutex
-	nextID atomic.Int64
-	pmu    sync.Mutex
-	pend   map[int64]chan result
-	bodies map[int64]bool // request ids whose ok reply carries a body (text, range)
-	logw   io.Writer
-	done   chan struct{}
-	fmu    sync.Mutex
-	agreed map[string]bool // the features rhun agreed to (section 12), from the features event
-	closed error           // set (under pmu) once rhun's end of the pipe is gone: requests fail at once
+	w              io.Writer
+	wmu            sync.Mutex
+	writerOnce     sync.Once
+	stopOnce       sync.Once
+	writeQueue     chan *writeFrame
+	writeChanged   chan struct{}
+	writeBytes     int
+	readCloser     io.Closer
+	sourceMu       sync.Mutex
+	sourceRequests map[int64]*sourceRequest
+	nextID         atomic.Int64
+	pmu            sync.Mutex
+	pend           map[int64]chan result
+	bodies         map[int64]bool  // request ids whose ok reply carries a body
+	replyBodyCaps  map[int64]int64 // per-request limits, retained with canceled body tombstones
+	outstanding    map[int64]bool  // includes every sent cancellation until its reply is consumed
+	logw           io.Writer
+	done           chan struct{}
+	fmu            sync.Mutex
+	agreed         map[string]bool // the features rhun agreed to (section 12), from the features event
+	closed         error           // set (under pmu) once rhun's end of the pipe is gone: requests fail at once
 }
 
 type result struct {
@@ -181,12 +192,14 @@ func RunWith(features []string, h Handler) error {
 // RunOnWith is RunWith on explicit streams (tests).
 func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Handler) error {
 	ext := &Ext{w: w, pend: map[int64]chan result{}, bodies: map[int64]bool{}, logw: logw, done: make(chan struct{}),
-		agreed: map[string]bool{}}
+		agreed: map[string]bool{}, outstanding: map[int64]bool{}}
+	ext.readCloser, _ = r.(io.Closer)
+	defer ext.closeConnection(io.EOF)
 	hello := fmt.Sprintf("hello %d", Protocol)
 	for _, f := range features {
 		hello += " " + f
 	}
-	if _, err := io.WriteString(w, hello+"\n"); err != nil {
+	if err := ext.write(hello+"\n", nil); err != nil {
 		return err
 	}
 	br := bufio.NewReaderSize(r, 1<<16)
@@ -207,7 +220,11 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				return
 			}
 			if ev != nil {
-				raw <- *ev
+				select {
+				case raw <- *ev:
+				case <-ext.done:
+					return
+				}
 			}
 		}
 	}()
@@ -221,6 +238,8 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				out, next = events, queue[0]
 			}
 			select {
+			case <-ext.done:
+				return
 			case ev, ok := <-raw:
 				if !ok {
 					raw = nil
@@ -246,8 +265,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				h.Run(ext, ev.Args[0], Doc(d))
 			}
 		case "bye":
-			close(ext.done)
-			ext.failPending(errors.New("rhun said bye"))
+			ext.closeConnection(errors.New("rhun said bye"))
 			return nil
 		case "features":
 			ext.fmu.Lock()
@@ -276,9 +294,13 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			h.Event(ext, ev)
 		}
 	}
-	err := <-errc
-	close(ext.done)
-	ext.failPending(err)
+	var err error
+	select {
+	case err = <-errc:
+	default:
+		err = ext.connectionError()
+	}
+	ext.closeConnection(err)
 	if errors.Is(err, io.EOF) {
 		return io.EOF
 	}
@@ -314,24 +336,30 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		var res result
 		if fields[0] == "ok" {
 			res.reply.Args = fields[2:]
-			// a body follows when the request was text or range: the waiter says so
+			// Body classification and caps outlive cancellation until a reply is drained.
 			e.pmu.Lock()
-			ch, hasBody := e.pend[id], false
-			if ch != nil {
-				hasBody = e.bodies[id]
-				delete(e.bodies, id)
+			ch, hasBody := e.pend[id], e.bodies[id]
+			cap := int64(maxReplyBody)
+			if limit := e.replyBodyCaps[id]; limit != 0 {
+				cap = limit
 			}
 			e.pmu.Unlock()
 			if hasBody && len(res.reply.Args) >= 1 {
-				n, ok := bodyLen(res.reply.Args[len(res.reply.Args)-1], maxReplyBody)
+				n, ok := bodyLen(res.reply.Args[len(res.reply.Args)-1], cap)
 				if !ok {
 					return nil, fmt.Errorf("a reply's length %q", res.reply.Args[len(res.reply.Args)-1])
 				}
-				body := make([]byte, n)
-				if _, err := io.ReadFull(br, body); err != nil {
-					return nil, err
+				if ch == nil {
+					if _, err := io.CopyN(io.Discard, br, int64(n)); err != nil {
+						return nil, err
+					}
+				} else {
+					body := make([]byte, n)
+					if _, err := io.ReadFull(br, body); err != nil {
+						return nil, err
+					}
+					res.reply.Body = body
 				}
-				res.reply.Body = body
 			}
 			e.deliver(id, res, ch)
 			return nil, nil
@@ -346,7 +374,6 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		res.err = &Error{Code: code, Text: text}
 		e.pmu.Lock()
 		ch := e.pend[id]
-		delete(e.bodies, id)
 		e.pmu.Unlock()
 		e.deliver(id, res, ch)
 		return nil, nil
@@ -355,6 +382,14 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			return nil, nil
 		}
 		ev := &Event{Name: fields[1], Args: fields[2:]}
+		if ev.Name == "cancel" && len(ev.Args) == 1 {
+			if id, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil && id > 0 {
+				e.cancelSource(id)
+			}
+		}
+		if ev.Name == "bye" {
+			e.cancelSources(false)
+		}
 		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
 		lenAt := -1
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
@@ -380,7 +415,7 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			if len(ev.Args) > 4 {
 				ev.Args = append(ev.Args[:3], strings.Join(ev.Args[3:], " "))
 			}
-		case "project":
+		case "ready", "project":
 			if len(ev.Args) > 1 {
 				ev.Args = []string{strings.Join(ev.Args, " ")}
 			}
@@ -396,7 +431,13 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 	}
 	// a request from rhun (section 12): answered on the handler's goroutine, in order with events
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
-		return &Event{Name: hostRequest, Args: fields}, nil
+		ev := &Event{Name: hostRequest, Args: fields}
+		if len(fields) > 1 && fields[1] == "save-actions" {
+			if _, err := e.beginSource(id); err != nil {
+				return nil, err
+			}
+		}
+		return ev, nil
 	}
 	return nil, nil
 }
@@ -429,77 +470,60 @@ func bodyLen(s string, max int64) (int, bool) {
 
 func (e *Ext) deliver(id int64, res result, ch chan result) {
 	e.pmu.Lock()
-	delete(e.pend, id)
-	e.pmu.Unlock()
-	if ch != nil {
-		ch <- res
+	current := e.pend[id]
+	if current == ch || current == nil {
+		delete(e.bodies, id)
+		delete(e.replyBodyCaps, id)
+		delete(e.outstanding, id)
+		if ch != nil && current == ch {
+			delete(e.pend, id)
+			select {
+			case ch <- res:
+			default:
+			}
+		}
 	}
+	e.pmu.Unlock()
 }
 
 func (e *Ext) failPending(err error) {
 	e.pmu.Lock()
-	defer e.pmu.Unlock()
 	if e.closed == nil {
 		e.closed = err
 	}
 	for id, ch := range e.pend {
-		ch <- result{err: err}
+		select {
+		case ch <- result{err: err}:
+		default:
+		}
 		delete(e.pend, id)
 	}
+	clear(e.bodies)
+	clear(e.replyBodyCaps)
+	clear(e.outstanding)
+	e.pmu.Unlock()
+	e.cancelSources(false)
 }
 
 func (e *Ext) write(line string, body []byte) error {
-	e.wmu.Lock()
-	defer e.wmu.Unlock()
-	if _, err := io.WriteString(e.w, line); err != nil {
-		return err
-	}
-	if len(body) > 0 {
-		if _, err := e.w.Write(body); err != nil {
-			return err
-		}
-	}
-	return nil
+	_, err := e.writeContext(context.Background(), line, body)
+	return err
 }
 
 // Request sends "ID verb args…" (with the body, whose length the caller has put last in args
 // when there is one) and waits for the reply.
 func (e *Ext) Request(verb string, body []byte, args ...string) (Reply, error) {
-	id := e.nextID.Add(1)
-	if id > 2147483647 {
-		e.nextID.Store(0)
-		id = e.nextID.Add(1)
-	}
-	ch := make(chan result, 1)
-	e.pmu.Lock()
-	if e.closed != nil {
-		e.pmu.Unlock()
-		return Reply{}, e.closed
-	}
-	e.pend[id] = ch
-	if verb == "text" || verb == "range" || verb == "ask" {
-		e.bodies[id] = true
-	}
-	e.pmu.Unlock()
-	line := strconv.FormatInt(id, 10) + " " + verb
-	if len(args) > 0 {
-		line += " " + strings.Join(args, " ")
-	}
-	if err := e.write(line+"\n", body); err != nil {
-		e.deliver(id, result{}, nil)
-		return Reply{}, err
-	}
-	select {
-	case res := <-ch:
-		return res.reply, res.err
-	case <-e.done:
-		return Reply{}, errors.New("rhun went away")
-	}
+	return e.RequestContext(context.Background(), verb, body, args...)
 }
 
 // Text returns the document's text and version.
 func (e *Ext) Text(doc Doc) ([]byte, int64, error) {
-	r, err := e.Request("text", nil, itoa(int64(doc)))
+	return e.TextContext(context.Background(), doc)
+}
+
+// TextContext is Text with cancellation. A late body is drained before subsequent replies.
+func (e *Ext) TextContext(ctx context.Context, doc Doc) ([]byte, int64, error) {
+	r, err := e.RequestContext(ctx, "text", nil, itoa(int64(doc)))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -590,6 +614,19 @@ func (e *Ext) Register(name, keys, title string) error {
 		keys = "-"
 	}
 	_, err := e.Request("register", nil, name, keys, title)
+	return err
+}
+
+// Unregister removes one of this extension's runtime commands and its shortcut.
+// Manifest commands cannot be removed. Protocol 1.1's commands feature must be agreed.
+func (e *Ext) Unregister(name string) error {
+	if !e.Has(FeatureCommands) {
+		return &Error{Code: "unknown", Text: "commands feature was not agreed"}
+	}
+	if name == "" || len(name) > 40 || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+		return &Error{Code: "syntax", Text: "invalid command name"}
+	}
+	_, err := e.Request("unregister", nil, name)
 	return err
 }
 

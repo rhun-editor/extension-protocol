@@ -1,0 +1,1363 @@
+[
+  {
+    "source": "",
+    "flags": "",
+    "input": "",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "source": "a",
+    "flags": "",
+    "input": "ba",
+    "start": 0,
+    "captures": [
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "a",
+    "flags": "y",
+    "input": "ba",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "a",
+    "flags": "y",
+    "input": "ba",
+    "start": 1,
+    "captures": [
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "ab|a",
+    "flags": "",
+    "input": "ab",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(a|ab)c",
+    "flags": "",
+    "input": "abc",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        3
+      ],
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(a+)(a)",
+    "flags": "",
+    "input": "aaa",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        3
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        2,
+        3
+      ]
+    ]
+  },
+  {
+    "source": "(a+?)(a)",
+    "flags": "",
+    "input": "aaa",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(a?)*",
+    "flags": "",
+    "input": "a",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(a?){2}",
+    "flags": "",
+    "input": "a",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(a?){0}",
+    "flags": "",
+    "input": "a",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        0
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "source": "(a|(b))+",
+    "flags": "",
+    "input": "aba",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        3
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "source": "(?:|a)*b",
+    "flags": "y",
+    "input": "ab",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(?:|a)*?b",
+    "flags": "y",
+    "input": "ab",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(?:(())|a)*b",
+    "flags": "y",
+    "input": "ab",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "source": "(?:)*",
+    "flags": "",
+    "input": "x",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "source": "(?:){3,5}",
+    "flags": "",
+    "input": "x",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "source": "\\1(a)",
+    "flags": "",
+    "input": "a",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(a\\1)",
+    "flags": "",
+    "input": "a",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(a)?b\\1",
+    "flags": "",
+    "input": "b",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        1
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "source": "(?<x>a)\\k<x>",
+    "flags": "",
+    "input": "aa",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(a(?=b))b",
+    "flags": "",
+    "input": "ab",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(?=(a+))a*b\\1",
+    "flags": "",
+    "input": "baaabac",
+    "start": 0,
+    "captures": [
+      [
+        3,
+        6
+      ],
+      [
+        3,
+        4
+      ]
+    ]
+  },
+  {
+    "source": "(.*?)a(?!(a+)b\\2c)\\2(.*)",
+    "flags": "",
+    "input": "baaabaac",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        8
+      ],
+      [
+        0,
+        2
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        3,
+        8
+      ]
+    ]
+  },
+  {
+    "source": "(?!(a))b",
+    "flags": "",
+    "input": "b",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        1
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "source": "(?!(a))a",
+    "flags": "",
+    "input": "a",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "(?<=a(b))c",
+    "flags": "",
+    "input": "abc",
+    "start": 0,
+    "captures": [
+      [
+        2,
+        3
+      ],
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(?<!a)b",
+    "flags": "",
+    "input": "ab",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "(?<!a)b",
+    "flags": "",
+    "input": "cb",
+    "start": 0,
+    "captures": [
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(?<=a|bc)d",
+    "flags": "",
+    "input": "bcd",
+    "start": 0,
+    "captures": [
+      [
+        2,
+        3
+      ]
+    ]
+  },
+  {
+    "source": "(?<=([ab]+)([bc]+))$",
+    "flags": "",
+    "input": "abc",
+    "start": 0,
+    "captures": [
+      [
+        3,
+        3
+      ],
+      [
+        0,
+        1
+      ],
+      [
+        1,
+        3
+      ]
+    ]
+  },
+  {
+    "source": "(?<=((?=b)b))c",
+    "flags": "",
+    "input": "bc",
+    "start": 0,
+    "captures": [
+      [
+        1,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "source": "(?<=a(?<!x))b",
+    "flags": "",
+    "input": "ab",
+    "start": 0,
+    "captures": [
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "(?<=\\1(k))x",
+    "flags": "iu",
+    "input": "Kkx",
+    "start": 0,
+    "captures": [
+      [
+        4,
+        5
+      ],
+      [
+        3,
+        4
+      ]
+    ]
+  },
+  {
+    "source": "(k)\\1",
+    "flags": "iu",
+    "input": "Kk",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        4
+      ],
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "source": "(k)\\1",
+    "flags": "i",
+    "input": "Kk",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "[k]",
+    "flags": "iu",
+    "input": "K",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "source": "[k]",
+    "flags": "i",
+    "input": "K",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "\\bſ\\b",
+    "flags": "iu",
+    "input": "ſ",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "\\bſ\\b",
+    "flags": "i",
+    "input": "ſ",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "\\Bé\\B",
+    "flags": "",
+    "input": "é",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "\\W+",
+    "flags": "iu",
+    "input": "é-K",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "source": "^b$",
+    "flags": "m",
+    "input": "a\r\nb z",
+    "start": 0,
+    "captures": [
+      [
+        3,
+        4
+      ]
+    ]
+  },
+  {
+    "source": "^$",
+    "flags": "m",
+    "input": "\r\n",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "source": "a$",
+    "flags": "",
+    "input": "a\n",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": ".+",
+    "flags": "",
+    "input": "\r\n😀",
+    "start": 0,
+    "captures": [
+      [
+        2,
+        6
+      ]
+    ]
+  },
+  {
+    "source": ".+",
+    "flags": "s",
+    "input": "\r\n😀",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        6
+      ]
+    ]
+  },
+  {
+    "source": "\\p{scx=Greek}+",
+    "flags": "u",
+    "input": "aαΩz",
+    "start": 0,
+    "captures": [
+      [
+        1,
+        5
+      ]
+    ]
+  },
+  {
+    "source": "\\P{Lowercase_Letter}+",
+    "flags": "iu",
+    "input": "aA",
+    "start": 0,
+    "captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "source": "[^\\p{Lowercase_Letter}]+",
+    "flags": "iu",
+    "input": "aA",
+    "start": 0,
+    "captures": null
+  },
+  {
+    "source": "😀+",
+    "flags": "",
+    "input": "x😀😀",
+    "start": 0,
+    "captures": [
+      [
+        1,
+        9
+      ]
+    ]
+  },
+  {
+    "source": "$",
+    "flags": "",
+    "input": "😀",
+    "start": 4,
+    "captures": [
+      [
+        4,
+        4
+      ]
+    ]
+  },
+  {
+    "source": "b",
+    "flags": "y",
+    "input": "ab",
+    "start": 2,
+    "captures": null
+  },
+  {
+    "Source": "[\\q{ab|abc|a|}]c",
+    "Flags": "iv",
+    "Input": "abc",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "Source": "[\\q{ab|abc|a|}]",
+    "Flags": "v",
+    "Input": "abcd",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "Source": "[\\q{ab|}]",
+    "Flags": "v",
+    "Input": "x",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        0
+      ]
+    ]
+  },
+  {
+    "Source": "[\\q{Ab|Kſ}]",
+    "Flags": "iv",
+    "Input": "kS",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "Source": "[\\q{cd|ab}&&\\q{cd|ef}]",
+    "Flags": "v",
+    "Input": "abcd",
+    "Start": 0,
+    "Captures": [
+      [
+        2,
+        4
+      ]
+    ]
+  },
+  {
+    "Source": "[\\q{cd|ab}--\\q{cd|ef}]",
+    "Flags": "v",
+    "Input": "cdab",
+    "Start": 0,
+    "Captures": [
+      [
+        2,
+        4
+      ]
+    ]
+  },
+  {
+    "Source": "[^\\q{ab}&&a]",
+    "Flags": "v",
+    "Input": "a",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "[\\P{Lowercase_Letter}]",
+    "Flags": "iv",
+    "Input": "aA",
+    "Start": 0,
+    "Captures": null
+  },
+  {
+    "Source": "(?<=[\\q{ab|abc}])c",
+    "Flags": "v",
+    "Input": "abc",
+    "Start": 0,
+    "Captures": [
+      [
+        2,
+        3
+      ]
+    ]
+  },
+  {
+    "Source": "\\p{Emoji_Keycap_Sequence}",
+    "Flags": "v",
+    "Input": "x1️⃣",
+    "Start": 0,
+    "Captures": [
+      [
+        1,
+        8
+      ]
+    ]
+  },
+  {
+    "Source": "\\p{RGI_Emoji}",
+    "Flags": "v",
+    "Input": "🏳️‍🌈",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        14
+      ]
+    ]
+  },
+  {
+    "Source": "(?<=\\p{RGI_Emoji})",
+    "Flags": "v",
+    "Input": "👨‍👩‍👧‍👦",
+    "Start": 0,
+    "Captures": [
+      [
+        4,
+        4
+      ]
+    ]
+  },
+  {
+    "Source": "(?<é>a)\\k<\\u00e9>",
+    "Flags": "u",
+    "Input": "aa",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?:(?<x>a)|(?<x>b))\\k<x>",
+    "Flags": "v",
+    "Input": "bb",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?:(?<x>a)|(?<x>b))+\\k<x>",
+    "Flags": "v",
+    "Input": "abbaac",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        5
+      ],
+      [
+        3,
+        4
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "Source": "(?:(?<x>a)|(?<x>b)|c)\\k<x>",
+    "Flags": "iv",
+    "Input": "cc",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "Source": "(?<=(?:(?<x>a)|(?<x>b))\\k<x>)c",
+    "Flags": "v",
+    "Input": "bbc",
+    "Start": 0,
+    "Captures": [
+      [
+        2,
+        3
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "Source": "(?:(?<x>)|(?<x>b))\\k<x>",
+    "Flags": "",
+    "Input": "bb",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        0
+      ],
+      [
+        0,
+        0
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "Source": "(?<\\u{00000061}>a)\\k<a>",
+    "Flags": "v",
+    "Input": "aa",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "\\u{00000061}",
+    "Flags": "v",
+    "Input": "a",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(a)\\18*",
+    "Flags": "",
+    "Input": "a\u0001888",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        5
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "\\01(a)",
+    "Flags": "",
+    "Input": "\u0001a",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "Source": "\\08*(a)",
+    "Flags": "",
+    "Input": "\u000088a",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        4
+      ],
+      [
+        3,
+        4
+      ]
+    ]
+  },
+  {
+    "Source": "\\89+",
+    "Flags": "",
+    "Input": "899",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "Source": "[\\c1]",
+    "Flags": "",
+    "Input": "\u0011",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "\\c*",
+    "Flags": "",
+    "Input": "\\",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "[a-\\d]",
+    "Flags": "",
+    "Input": "1",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "[^\\d-a]",
+    "Flags": "i",
+    "Input": "B",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "\\é+",
+    "Flags": "",
+    "Input": "éé",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        4
+      ]
+    ]
+  },
+  {
+    "Source": "\\xZZ",
+    "Flags": "",
+    "Input": "xZZ",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  },
+  {
+    "Source": "a{,2}",
+    "Flags": "",
+    "Input": "a{,2}",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        5
+      ]
+    ]
+  },
+  {
+    "Source": "(?=(a))?a",
+    "Flags": "",
+    "Input": "a",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ],
+      [
+        -1,
+        -1
+      ]
+    ]
+  },
+  {
+    "Source": "(?=(a))+a",
+    "Flags": "",
+    "Input": "a",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "\\k<x>",
+    "Flags": "",
+    "Input": "k<x>",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        4
+      ]
+    ]
+  },
+  {
+    "Source": "(?i:(a)\\1)",
+    "Flags": "u",
+    "Input": "aA",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?-i:(a)\\1)",
+    "Flags": "iu",
+    "Input": "aA",
+    "Start": 0,
+    "Captures": null
+  },
+  {
+    "Source": "(?i:\\bſ\\b)",
+    "Flags": "u",
+    "Input": "ſ",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ]
+    ]
+  },
+  {
+    "Source": "(?-i:\\bſ\\b)",
+    "Flags": "iu",
+    "Input": "ſ",
+    "Start": 0,
+    "Captures": null
+  },
+  {
+    "Source": "(?m:^a$)",
+    "Flags": "u",
+    "Input": "\na\n",
+    "Start": 0,
+    "Captures": [
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "Source": "(?-m:^a$)",
+    "Flags": "mu",
+    "Input": "\na\n",
+    "Start": 0,
+    "Captures": null
+  },
+  {
+    "Source": "(?s:.)",
+    "Flags": "u",
+    "Input": "\n",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?-s:.)",
+    "Flags": "su",
+    "Input": "\n",
+    "Start": 0,
+    "Captures": null
+  },
+  {
+    "Source": "(?i:(?=(a))\\1)",
+    "Flags": "u",
+    "Input": "A",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?i:(?<=(a)\\1))b",
+    "Flags": "u",
+    "Input": "aAb",
+    "Start": 0,
+    "Captures": [
+      [
+        2,
+        3
+      ],
+      [
+        1,
+        2
+      ]
+    ]
+  },
+  {
+    "Source": "(?i:(?<=(a)))\\1",
+    "Flags": "u",
+    "Input": "AA",
+    "Start": 0,
+    "Captures": [
+      [
+        1,
+        2
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?i:(?:(?<x>a)|(?<x>b))\\k<x>)",
+    "Flags": "v",
+    "Input": "bB",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?i:(a)\\1)z|(a)\\2",
+    "Flags": "u",
+    "Input": "aA",
+    "Start": 0,
+    "Captures": null
+  },
+  {
+    "Source": "(?i:(a)\\1)z|(a)\\2",
+    "Flags": "u",
+    "Input": "aa",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        2
+      ],
+      [
+        -1,
+        -1
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  {
+    "Source": "(?i:[\\q{ab|abc}])c",
+    "Flags": "v",
+    "Input": "ABc",
+    "Start": 0,
+    "Captures": [
+      [
+        0,
+        3
+      ]
+    ]
+  }
+]

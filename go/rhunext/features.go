@@ -28,6 +28,7 @@ const (
 	FeatureActions    = "actions"
 	FeatureRename     = "rename"
 	FeatureFormat     = "format"
+	FeatureCommands   = "commands"
 )
 
 // hostRequest is the internal event name of a request from rhun.
@@ -349,8 +350,13 @@ type CompletionItem struct {
 	Doc    string
 	Edits  []TextEdit
 	// where the cursor goes (WithCursor); without it, after Insert
-	cursor    int
-	hasCursor bool
+	cursor          int
+	hasCursor       bool
+	prepared        bool
+	fields          []Field
+	choices         []SnippetChoice
+	initialVariants []int
+	transforms      []SnippetFieldTransform
 }
 
 // WithCursor puts the cursor offset bytes into Insert when the item is chosen (a snippet's $0,
@@ -387,8 +393,14 @@ func (l CompletionList) Encode() []byte {
 			extra.WriteString(it.Doc)
 		}
 		label, detail, insert := oneLine(it.Label), oneLine(it.Detail), it.Insert
-		if insert == "" {
+		if insert == "" && !it.prepared {
 			insert = it.Label
+		}
+		if it.prepared {
+			program := SnippetProgram{Snippet: PreparedSnippet{Text: insert, Fields: it.fields}, Choices: it.choices, InitialVariants: it.initialVariants, Transforms: it.transforms}
+			if program.Validate() == nil {
+				extra.Write(program.extra())
+			}
 		}
 		if it.hasCursor && it.cursor >= 0 && it.cursor <= len(insert) &&
 			(it.cursor == len(insert) || utf8.RuneStart(insert[it.cursor])) {
@@ -472,6 +484,30 @@ func (e *Ext) answer(h Handler, f []string) {
 	var rerr *Error
 	known := false
 	switch f[1] {
+	case "save-actions":
+		id, _ := strconv.ParseInt(f[0], 10, 64)
+		source := e.sourceFor(id)
+		if source != nil {
+			defer e.finishSource(source)
+		}
+		s, is := h.(SaveActionProvider)
+		if is && source != nil && e.Has(FeatureSaveActions) {
+			if req, ok := parseSaveActions(source.id, f[2:], source.ctx); ok {
+				known = true
+				if req.Context.Err() != nil {
+					rerr = &Error{Code: "cancelled", Text: "save was cancelled"}
+				} else {
+					edit, err := s.SaveActions(e, req)
+					if req.Context.Err() != nil {
+						rerr = &Error{Code: "cancelled", Text: "save was cancelled"}
+					} else if err != nil {
+						rerr = &Error{Code: "refused", Text: err.Error()}
+					} else {
+						body, rerr, known = encodeEdit(edit)
+					}
+				}
+			}
+		}
 	case "complete":
 		c, is := h.(Completer)
 		if req, ok := parseRequest(f[2:]); is && ok {

@@ -102,11 +102,19 @@ pub struct Picture {
 /// A number as the protocol writes it: at most two decimals, no trailing zeros, within the
 /// range rhun reads (7 digits before the point).
 pub fn num(v: f32) -> String {
-    let v = if v.is_finite() { v.clamp(-9_999_999.0, 9_999_999.0) } else { 0.0 };
+    let v = if v.is_finite() {
+        v.clamp(-9_999_999.0, 9_999_999.0)
+    } else {
+        0.0
+    };
     let r = (v * 100.0).round() / 100.0;
     let s = format!("{r:.2}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" { "0".to_string() } else { s.to_string() }
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 impl Picture {
@@ -137,20 +145,48 @@ impl Picture {
 
     /// A filled rectangle.
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32, c: Color) -> &mut Picture {
-        self.shape(format!("rect {} {} {} {} {}", num(x), num(y), num(w.max(0.0)), num(h.max(0.0)), c.word()))
+        self.shape(format!(
+            "rect {} {} {} {} {}",
+            num(x),
+            num(y),
+            num(w.max(0.0)),
+            num(h.max(0.0)),
+            c.word()
+        ))
     }
 
     /// A filled rectangle with rounded corners.
     pub fn rrect(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, c: Color) -> &mut Picture {
         self.shape(format!(
             "rrect {} {} {} {} {} {}",
-            num(x), num(y), num(w.max(0.0)), num(h.max(0.0)), num(r.max(0.0)), c.word()
+            num(x),
+            num(y),
+            num(w.max(0.0)),
+            num(h.max(0.0)),
+            num(r.max(0.0)),
+            c.word()
         ))
     }
 
     /// A line with round ends.
-    pub fn line(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, width: f32, c: Color) -> &mut Picture {
-        self.shape(format!("line {} {} {} {} {} {}", num(x1), num(y1), num(x2), num(y2), num(width.max(0.0)), c.word()))
+    pub fn line(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        width: f32,
+        c: Color,
+    ) -> &mut Picture {
+        self.shape(format!(
+            "line {} {} {} {} {} {}",
+            num(x1),
+            num(y1),
+            num(x2),
+            num(y2),
+            num(width.max(0.0)),
+            c.word()
+        ))
     }
 
     /// A polyline with round joins (2 to 10000 points); fewer than 2 points draw nothing.
@@ -179,28 +215,74 @@ impl Picture {
 
     /// A filled circle.
     pub fn circle(&mut self, x: f32, y: f32, r: f32, c: Color) -> &mut Picture {
-        self.shape(format!("circle {} {} {} {}", num(x), num(y), num(r.max(0.0)), c.word()))
+        self.shape(format!(
+            "circle {} {} {} {}",
+            num(x),
+            num(y),
+            num(r.max(0.0)),
+            c.word()
+        ))
     }
 
     /// A circle's outline.
     pub fn ring(&mut self, x: f32, y: f32, r: f32, width: f32, c: Color) -> &mut Picture {
-        self.shape(format!("ring {} {} {} {} {}", num(x), num(y), num(r.max(0.0)), num(width.max(0.0)), c.word()))
+        self.shape(format!(
+            "ring {} {} {} {} {}",
+            num(x),
+            num(y),
+            num(r.max(0.0)),
+            num(width.max(0.0)),
+            c.word()
+        ))
     }
 
     /// A filled wedge from `from` to `to` degrees, 0 at the top, clockwise.
     pub fn pie(&mut self, x: f32, y: f32, r: f32, from: f32, to: f32, c: Color) -> &mut Picture {
-        self.shape(format!("pie {} {} {} {} {} {}", num(x), num(y), num(r.max(0.0)), num(from), num(to), c.word()))
+        self.shape(format!(
+            "pie {} {} {} {} {} {}",
+            num(x),
+            num(y),
+            num(r.max(0.0)),
+            num(from),
+            num(to),
+            c.word()
+        ))
     }
 
     /// A line of text: `y` is the top of the line, `align` about `x`. Line breaks become spaces.
-    pub fn text(&mut self, x: f32, y: f32, size: TextSize, align: Align, c: Color, text: &str) -> &mut Picture {
-        let t: String = text.chars().map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch }).collect();
-        self.shape(format!("text {} {} {} {} {} {}", num(x), num(y), size.word(), align.word(), c.word(), t))
+    pub fn text(
+        &mut self,
+        x: f32,
+        y: f32,
+        size: TextSize,
+        align: Align,
+        c: Color,
+        text: &str,
+    ) -> &mut Picture {
+        let t: String = text
+            .chars()
+            .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+            .collect();
+        self.shape(format!(
+            "text {} {} {} {} {} {}",
+            num(x),
+            num(y),
+            size.word(),
+            align.word(),
+            c.word(),
+            t
+        ))
     }
 
     /// What follows is drawn only inside this rectangle, until [`Picture::unclip`] or the next clip.
     pub fn clip(&mut self, x: f32, y: f32, w: f32, h: f32) -> &mut Picture {
-        self.shape(format!("clip {} {} {} {}", num(x), num(y), num(w.max(0.0)), num(h.max(0.0))))
+        self.shape(format!(
+            "clip {} {} {} {}",
+            num(x),
+            num(y),
+            num(w.max(0.0)),
+            num(h.max(0.0))
+        ))
     }
 
     /// The whole view again.
@@ -236,13 +318,23 @@ mod tests {
         p.rect(1.0, 2.0, 3.0, 4.0, Color::Rgb(255, 0, 0))
             .poly(2.0, Color::Series(3), &[(0.0, 0.0), (5.0, 5.5)])
             .pie(10.0, 10.0, 5.0, 0.0, 90.0, Color::Accent)
-            .text(0.0, 0.0, TextSize::Small, Align::Right, Color::Muted, "a\nb");
+            .text(
+                0.0,
+                0.0,
+                TextSize::Small,
+                Align::Right,
+                Color::Muted,
+                "a\nb",
+            );
         assert_eq!(
             p.body(),
             "rect 1 2 3 4 #ff0000\npoly 2 c3 0 0 5 5.5\npie 10 10 5 0 90 accent\ntext 0 0 small right muted a b\n"
         );
         assert_eq!(p.len(), 4);
         assert_eq!(Color::Series(9).word(), "c1");
-        assert_eq!(Color::hex("#11223344"), Some(Color::Rgba(0x11, 0x22, 0x33, 0x44)));
+        assert_eq!(
+            Color::hex("#11223344"),
+            Some(Color::Rgba(0x11, 0x22, 0x33, 0x44))
+        );
     }
 }

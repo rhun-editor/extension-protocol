@@ -16,9 +16,11 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/rhun-editor/extension-protocol/go/rhunext"
 )
 
-var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format"}
+var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms"}
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -259,10 +261,23 @@ func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
 	h.hostSeq++
 	id := h.hostSeq
 	h.hostReqs[id] = line
+	if f := strings.Fields(line); len(f) == 4 && f[0] == "save-actions" {
+		docID, _ := strconv.ParseInt(f[1], 10, 64)
+		version, _ := strconv.ParseInt(f[2], 10, 64)
+		h.saveScope = &saveScope{id: id, doc: docID, version: version}
+		defer func() { h.saveScope = nil }()
+	}
 	h.write(fmt.Sprintf("%d %s\n", id, line))
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		if m, ok := h.hostAnswers[id]; ok {
+			delete(h.hostAnswers, id)
+			if s := h.saveScope; s != nil && s.id == id {
+				if d := h.docs[s.doc]; d == nil || d.version != s.version {
+					h.fail("save-actions", "document changed outside the credited save invocation")
+					return message{line: fmt.Sprintf("error %d stale document changed", id)}, true
+				}
+			}
 			return m, true
 		}
 		msg, err := h.readMessage(100 * time.Millisecond)
@@ -271,6 +286,7 @@ func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
 		}
 	}
 	delete(h.hostReqs, id)
+	h.write(fmt.Sprintf("0 cancel %d\n", id))
 	return message{}, false
 }
 
@@ -294,7 +310,7 @@ func (h *host) checkFeatures() {
 		case strings.HasPrefix(m.line, "error "):
 			h.fail("complete", "a completion request answered "+m.line)
 		default:
-			if why := checkCompletion(m, d); why != "" {
+			if why := checkCompletion(m, d, h.features); why != "" {
 				h.fail("complete", why)
 			} else {
 				h.ok("answers completion requests with a list rhun can read")
@@ -364,7 +380,7 @@ func (h *host) checkUnknownRequest(d *doc) {
 }
 
 // checkCompletion validates an answer against 12b and the document it was asked about
-func checkCompletion(m message, d *doc) string {
+func checkCompletion(m message, d *doc, features map[string]bool) string {
 	f := strings.Fields(m.line)
 	if len(f) != 3 || f[0] != "ok" {
 		return fmt.Sprintf("the answer is %q, not ok ID LEN", m.line)
@@ -432,7 +448,7 @@ func checkCompletion(m message, d *doc) string {
 		}
 		extra := b[pos+sizes[0]+sizes[1]+sizes[2] : pos+sizes[0]+sizes[1]+sizes[2]+sizes[3]]
 		insert := b[pos+sizes[0] : pos+sizes[0]+sizes[1]]
-		if why := checkExtra(extra, d, start, end, insert); why != "" {
+		if why := checkExtra(extra, d, start, end, insert, features); why != "" {
 			return fmt.Sprintf("item %d: %s", i+1, why)
 		}
 		pos += sizes[0] + sizes[1] + sizes[2] + sizes[3]
@@ -445,9 +461,14 @@ func checkCompletion(m message, d *doc) string {
 
 // checkExtra validates an item's EXTRA records: each a header line whose last word is its length,
 // then that many bytes; an edit's range in the document, overlapping neither the item nor another
-func checkExtra(x []byte, d *doc, istart, iend int, insert []byte) string {
+func checkExtra(x []byte, d *doc, istart, iend int, insert []byte, features map[string]bool) string {
 	type span struct{ a, b int }
 	taken := []span{{istart, iend}}
+	var fields []rhunext.Field
+	var choices []rhunext.SnippetChoice
+	var variants []int
+	var transforms []rhunext.SnippetFieldTransform
+	transformsSeen := false
 	for len(x) > 0 {
 		e := bytes.IndexByte(x, '\n')
 		if e < 0 {
@@ -460,6 +481,47 @@ func checkExtra(x []byte, d *doc, istart, iend int, insert []byte) string {
 		n, err := strconv.Atoi(w[len(w)-1])
 		if err != nil || n < 0 || n > len(x)-e-1 {
 			return fmt.Sprintf("the EXTRA record %q: its length is not within the item", x[:e])
+		}
+		if w[0] == "transforms" {
+			if transformsSeen || !features["snippets"] || !features["snippet-transforms"] {
+				return "duplicate or unnegotiated snippet transforms"
+			}
+			transformsSeen = true
+			bindings, err := snippetTransforms(w, x[e+1:e+1+n])
+			if err != nil {
+				return err.Error()
+			}
+			transforms = bindings
+		}
+		if w[0] == "variant" {
+			if !features["snippets"] || !features["snippet-variants"] {
+				return "initial variant features were not agreed"
+			}
+			if len(variants) == rhunext.MaxSnippetFields {
+				return "too many initial variants"
+			}
+			index, err := snippetVariant(w)
+			if err != nil {
+				return err.Error()
+			}
+			variants = append(variants, index)
+		}
+		if w[0] == "field" {
+			field, err := snippetField(w)
+			if err != nil || len(fields) == rhunext.MaxSnippetFields {
+				return "invalid snippet field header or count"
+			}
+			fields = append(fields, field)
+		}
+		if w[0] == "choice" {
+			if len(choices) == rhunext.MaxSnippetGroups {
+				return "too many snippet choices"
+			}
+			c, err := snippetChoice(w, x[e+1:e+1+n])
+			if err != nil {
+				return err.Error()
+			}
+			choices = append(choices, c)
 		}
 		if w[0] == "cursor" {
 			// cursor OFFSET 0: the cursor that far into INSERT, at a character
@@ -494,6 +556,11 @@ func checkExtra(x []byte, d *doc, istart, iend int, insert []byte) string {
 			taken = append(taken, span{a, b})
 		}
 		x = x[e+1+n:]
+	}
+	if len(fields) > 0 || len(choices) > 0 || len(variants) > 0 || transformsSeen {
+		if err := (rhunext.SnippetProgram{Snippet: rhunext.PreparedSnippet{Text: string(insert), Fields: fields}, Choices: choices, InitialVariants: variants, Transforms: transforms}).Validate(); err != nil {
+			return "invalid snippet fields: " + err.Error()
+		}
 	}
 	return ""
 }

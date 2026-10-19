@@ -54,7 +54,12 @@ pub struct CompleteRequest {
 impl CompleteRequest {
     pub fn parse(fields: &[String]) -> Option<CompleteRequest> {
         let (doc, version, at, trigger) = request(fields)?;
-        Some(CompleteRequest { doc, version, at, trigger })
+        Some(CompleteRequest {
+            doc,
+            version,
+            at,
+            trigger,
+        })
     }
 }
 
@@ -70,7 +75,12 @@ pub struct SignatureRequest {
 impl SignatureRequest {
     pub fn parse(fields: &[String]) -> Option<SignatureRequest> {
         let (doc, version, at, trigger) = request(fields)?;
-        Some(SignatureRequest { doc, version, at, trigger })
+        Some(SignatureRequest {
+            doc,
+            version,
+            at,
+            trigger,
+        })
     }
 }
 
@@ -141,16 +151,28 @@ pub struct CompletionItem {
     pub edits: Vec<(Range, String)>,
     /// Where the cursor goes, in bytes into `insert` (a snippet's `$0`); `None`: after it.
     pub cursor: Option<usize>,
+    /// Prepared fields. Prefer the `snippet` builder, which also assigns insertion text.
+    pub snippet: Option<crate::PreparedSnippet>,
+    /// Owned program metadata. Prefer the `snippet_program` builder.
+    pub snippet_program: Option<crate::SnippetProgram>,
 }
 
 fn one_line(s: &str) -> String {
-    s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
 }
 
 impl CompletionItem {
     /// An item that replaces `range` with `label`.
     pub fn new(range: Range, kind: Kind, label: &str) -> CompletionItem {
-        CompletionItem { range, kind, label: one_line(label), insert: label.to_string(), ..Default::default() }
+        CompletionItem {
+            range,
+            kind,
+            label: one_line(label),
+            insert: label.to_string(),
+            ..Default::default()
+        }
     }
 
     pub fn insert(mut self, text: &str) -> CompletionItem {
@@ -180,11 +202,35 @@ impl CompletionItem {
         self
     }
 
+    /// Insert prepared native fields. Invalid metadata is omitted as a whole; text remains.
+    pub fn snippet(mut self, snippet: crate::PreparedSnippet) -> CompletionItem {
+        self.insert = snippet.text.clone();
+        self.snippet = Some(snippet);
+        self.snippet_program = None;
+        self
+    }
+
+    /// Insert owned prepared fields and literal native choices.
+    pub fn snippet_program(mut self, program: crate::SnippetProgram) -> CompletionItem {
+        self.insert = program.snippet.text.clone();
+        self.snippet = None;
+        self.snippet_program = Some(program);
+        self
+    }
+
     fn encode(&self, out: &mut Vec<u8>) {
         let mut extra = Vec::new();
         for (r, t) in &self.edits {
             extra.extend_from_slice(
-                format!("edit {} {} {} {} {}\n", r.start.line, r.start.col, r.end.line, r.end.col, t.len()).as_bytes(),
+                format!(
+                    "edit {} {} {} {} {}\n",
+                    r.start.line,
+                    r.start.col,
+                    r.end.line,
+                    r.end.col,
+                    t.len()
+                )
+                .as_bytes(),
             );
             extra.extend_from_slice(t.as_bytes());
         }
@@ -195,6 +241,15 @@ impl CompletionItem {
         if let Some(c) = self.cursor {
             if c <= self.insert.len() && self.insert.is_char_boundary(c) {
                 extra.extend_from_slice(format!("cursor {c} 0\n").as_bytes());
+            }
+        }
+        if let Some(p) = &self.snippet_program {
+            if p.snippet.text == self.insert && p.validate().is_ok() {
+                extra.extend_from_slice(p.extra().as_bytes());
+            }
+        } else if let Some(s) = &self.snippet {
+            if s.text == self.insert && s.validate().is_ok() {
+                extra.extend_from_slice(s.extra().as_bytes());
             }
         }
         let label = one_line(&self.label);
@@ -236,7 +291,10 @@ pub struct CompletionList {
 
 impl CompletionList {
     pub fn new(items: Vec<CompletionItem>) -> CompletionList {
-        CompletionList { items, incomplete: false }
+        CompletionList {
+            items,
+            incomplete: false,
+        }
     }
 
     /// The body rhun reads. Items past [`MAX_ITEMS`] or [`MAX_BODY`] are left out and the list
@@ -275,7 +333,10 @@ pub struct SignatureHelp {
 
 impl SignatureHelp {
     pub fn new(signature: &str) -> SignatureHelp {
-        SignatureHelp { signature: one_line(signature), ..Default::default() }
+        SignatureHelp {
+            signature: one_line(signature),
+            ..Default::default()
+        }
     }
 
     /// Marks the parameter `param` (its text, found in the signature after the first `(`).
@@ -330,7 +391,10 @@ pub fn word_range(line: u32, line_text: &str, col: u32) -> Range {
     while !line_text.is_char_boundary(start) {
         start += 1;
     }
-    Range::new(Pos::new(line, start as u32 + 1), Pos::new(line, end as u32 + 1))
+    Range::new(
+        Pos::new(line, start as u32 + 1),
+        Pos::new(line, end as u32 + 1),
+    )
 }
 
 #[cfg(test)]
@@ -344,7 +408,10 @@ mod tests {
     #[test]
     fn requests_parse() {
         let r = CompleteRequest::parse(&fields("3 7 10 5 trigger .")).unwrap();
-        assert_eq!((r.doc, r.version, r.at, r.trigger), (3, 7, Pos::new(10, 5), Trigger::Char('.')));
+        assert_eq!(
+            (r.doc, r.version, r.at, r.trigger),
+            (3, 7, Pos::new(10, 5), Trigger::Char('.'))
+        );
         assert!(CompleteRequest::parse(&fields("3 7 10 5 sideways -")).is_none());
         let s = SignatureRequest::parse(&fields("1 2 3 4 update -")).unwrap();
         assert_eq!(s.trigger, Trigger::Update);
@@ -354,8 +421,12 @@ mod tests {
     fn a_list_is_framed_as_rhun_reads_it() {
         let r = Range::new(Pos::new(1, 1), Pos::new(1, 3));
         let list = CompletionList::new(vec![
-            CompletionItem::new(r, Kind::Function, "print").insert("print()").detail("fn"),
-            CompletionItem::new(r, Kind::Module, "fmt").doc("Formatting.").edit(Range::default(), "import fmt\n"),
+            CompletionItem::new(r, Kind::Function, "print")
+                .insert("print()")
+                .detail("fn"),
+            CompletionItem::new(r, Kind::Module, "fmt")
+                .doc("Formatting.")
+                .edit(Range::default(), "import fmt\n"),
         ]);
         assert_eq!(
             list.encode(),
@@ -368,23 +439,34 @@ mod tests {
     fn an_item_can_place_the_cursor() {
         let r = Range::default();
         let list = CompletionList::new(vec![
-            CompletionItem::new(r, Kind::Function, "f").insert("f()").cursor(2),
-            CompletionItem::new(r, Kind::Function, "g").insert("é").cursor(1),
+            CompletionItem::new(r, Kind::Function, "f")
+                .insert("f()")
+                .cursor(2),
+            CompletionItem::new(r, Kind::Function, "g")
+                .insert("é")
+                .cursor(1),
         ]);
-        assert_eq!(list.encode(), "2 0\n0 0 0 0 function 1 3 0 11\nff()cursor 2 0\n0 0 0 0 function 1 2 0 0\ngé");
+        assert_eq!(
+            list.encode(),
+            "2 0\n0 0 0 0 function 1 3 0 11\nff()cursor 2 0\n0 0 0 0 function 1 2 0 0\ngé"
+        );
     }
 
     #[test]
     fn a_long_list_is_cut_and_marked_incomplete() {
         let r = Range::default();
-        let items = (0..5000).map(|i| CompletionItem::new(r, Kind::Text, &format!("w{i}"))).collect();
+        let items = (0..5000)
+            .map(|i| CompletionItem::new(r, Kind::Text, &format!("w{i}")))
+            .collect();
         let body = CompletionList::new(items).encode();
         assert!(body.starts_with("4096 1\n"));
     }
 
     #[test]
     fn signature_help_marks_its_parameter() {
-        let s = SignatureHelp::new("fn add(a: i32, b: i32)").active_param("b: i32").doc("Adds.");
+        let s = SignatureHelp::new("fn add(a: i32, b: i32)")
+            .active_param("b: i32")
+            .doc("Adds.");
         assert_eq!(s.encode(), "15 21\nfn add(a: i32, b: i32)\nAdds.");
         assert_eq!(SignatureHelp::new("x").encode(), "-1 -1\nx\n");
         let long = SignatureHelp::new("f()").doc(&"é".repeat(40000)).encode();
@@ -394,7 +476,13 @@ mod tests {
 
     #[test]
     fn the_word_before_the_cursor() {
-        assert_eq!(word_range(4, "let foo_bar", 12), Range::new(Pos::new(4, 5), Pos::new(4, 12)));
-        assert_eq!(word_range(1, "a.", 3), Range::new(Pos::new(1, 3), Pos::new(1, 3)));
+        assert_eq!(
+            word_range(4, "let foo_bar", 12),
+            Range::new(Pos::new(4, 5), Pos::new(4, 12))
+        );
+        assert_eq!(
+            word_range(1, "a.", 3),
+            Range::new(Pos::new(1, 3), Pos::new(1, 3))
+        );
     }
 }

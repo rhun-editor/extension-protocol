@@ -35,7 +35,11 @@ pub struct Series {
 
 impl Series {
     pub fn new(name: &str, values: Vec<f64>) -> Series {
-        Series { name: name.to_string(), values, color: None }
+        Series {
+            name: name.to_string(),
+            values,
+            color: None,
+        }
     }
 
     pub fn color(mut self, c: Color) -> Series {
@@ -54,14 +58,26 @@ pub struct Hit {
 #[derive(Clone, Debug)]
 enum Area {
     Rect(f32, f32, f32, f32),
-    Wedge { cx: f32, cy: f32, r: f32, from: f32, to: f32 },
+    Wedge {
+        cx: f32,
+        cy: f32,
+        r: f32,
+        from: f32,
+        to: f32,
+    },
 }
 
 impl Area {
     fn contains(&self, x: f32, y: f32) -> bool {
         match *self {
             Area::Rect(ax, ay, w, h) => x >= ax && x < ax + w && y >= ay && y < ay + h,
-            Area::Wedge { cx, cy, r, from, to } => {
+            Area::Wedge {
+                cx,
+                cy,
+                r,
+                from,
+                to,
+            } => {
                 let (dx, dy) = (x - cx, y - cy);
                 if dx * dx + dy * dy > r * r {
                     return false;
@@ -85,7 +101,11 @@ pub struct Drawn {
 impl Drawn {
     /// The item at a point of the view.
     pub fn hit(&self, x: f32, y: f32) -> Option<Hit> {
-        self.areas.iter().rev().find(|(a, _)| a.contains(x, y)).map(|(_, h)| *h)
+        self.areas
+            .iter()
+            .rev()
+            .find(|(a, _)| a.contains(x, y))
+            .map(|(_, h)| *h)
     }
 }
 
@@ -131,7 +151,12 @@ impl Chart {
 
     /// A pie of one series' values, a wedge per label.
     pub fn pie(title: &str, labels: &[&str], values: Vec<f64>) -> Chart {
-        Chart::new(ChartKind::Pie, title, labels, vec![Series::new(title, values)])
+        Chart::new(
+            ChartKind::Pie,
+            title,
+            labels,
+            vec![Series::new(title, values)],
+        )
     }
 
     pub fn unit(mut self, unit: &str) -> Chart {
@@ -145,28 +170,48 @@ impl Chart {
     }
 
     fn color(&self, series: usize) -> Color {
-        self.series.get(series).and_then(|s| s.color).unwrap_or(Color::Series((series % 8) as u8 + 1))
+        self.series
+            .get(series)
+            .and_then(|s| s.color)
+            .unwrap_or(Color::Series((series % 8) as u8 + 1))
     }
 
     fn value(&self, series: usize, index: usize) -> f64 {
         // finite and within what a span can hold without overflowing
-        let v = self.series.get(series).and_then(|s| s.values.get(index)).copied().filter(|v| v.is_finite());
+        let v = self
+            .series
+            .get(series)
+            .and_then(|s| s.values.get(index))
+            .copied()
+            .filter(|v| v.is_finite());
         v.unwrap_or(0.0).clamp(-1e15, 1e15)
     }
 
     fn count(&self) -> usize {
-        self.series.iter().map(|s| s.values.len()).max().unwrap_or(0).max(self.labels.len())
+        self.series
+            .iter()
+            .map(|s| s.values.len())
+            .max()
+            .unwrap_or(0)
+            .max(self.labels.len())
     }
 
     fn label(&self, index: usize) -> String {
-        self.labels.get(index).cloned().unwrap_or_else(|| (index + 1).to_string())
+        self.labels
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| (index + 1).to_string())
     }
 
     /// The picture for a view of `width` × `height` logical pixels.
     pub fn draw(&self, width: f32, height: f32, m: &Metrics) -> Drawn {
         let plain = self.render(width, height, m, None);
-        let Some((px, py)) = self.pointer else { return plain };
-        let Some(hit) = plain.hit(px, py) else { return plain };
+        let Some((px, py)) = self.pointer else {
+            return plain;
+        };
+        let Some(hit) = plain.hit(px, py) else {
+            return plain;
+        };
         let mut d = self.render(width, height, m, Some(hit));
         d.hovered = Some(hit);
         self.tooltip(&mut d.picture, hit, px, py, width, height, m);
@@ -178,12 +223,24 @@ impl Chart {
         let mut top = PAD;
         if !self.title.is_empty() {
             let t = fit(m, TextSize::Large, &self.title, width - 2.0 * PAD);
-            d.picture.text(PAD, top, TextSize::Large, Align::Left, Color::Fg, &t);
+            d.picture
+                .text(PAD, top, TextSize::Large, Align::Left, Color::Fg, &t);
             top += m.large.line_height + 6.0;
         }
-        if self.count() == 0 || self.series.is_empty() || width < 4.0 * PAD || height < top + 4.0 * PAD {
+        if self.count() == 0
+            || self.series.is_empty()
+            || width < 4.0 * PAD
+            || height < top + 4.0 * PAD
+        {
             let y = (top + height) / 2.0 - m.normal.line_height / 2.0;
-            d.picture.text(width / 2.0, y, TextSize::Normal, Align::Center, Color::Muted, "No data");
+            d.picture.text(
+                width / 2.0,
+                y,
+                TextSize::Normal,
+                Align::Center,
+                Color::Muted,
+                "No data",
+            );
             return d;
         }
         match self.kind {
@@ -207,7 +264,14 @@ impl Chart {
                 y += lh;
             }
             p.rrect(x, y + (lh - 10.0) / 2.0, 10.0, 10.0, 2.0, self.color(i));
-            p.text(x + 14.0, y, TextSize::Small, Align::Left, Color::Muted, &s.name);
+            p.text(
+                x + 14.0,
+                y,
+                TextSize::Small,
+                Align::Left,
+                Color::Muted,
+                &s.name,
+            );
             x += ew;
         }
         y + lh + 6.0 - top
@@ -235,7 +299,10 @@ impl Chart {
         let hi = (hi / step).ceil() * step;
         let steps = ((hi - lo) / step).round().clamp(1.0, 100.0) as usize;
         let ticks: Vec<f64> = (0..=steps).map(|k| lo + k as f64 * step).collect();
-        let tick_w = ticks.iter().map(|t| m.width(TextSize::Small, &compact(*t))).fold(0.0, f32::max);
+        let tick_w = ticks
+            .iter()
+            .map(|t| m.width(TextSize::Small, &compact(*t)))
+            .fold(0.0, f32::max);
         let x0 = PAD + tick_w + 8.0;
         let x1 = w - PAD;
         if x1 - x0 < 8.0 || bottom - top < 8.0 {
@@ -246,26 +313,62 @@ impl Chart {
         for t in &ticks {
             let y = y_of(*t);
             p.line(x0, y, x1, y, 1.0, Color::Border);
-            p.text(x0 - 6.0, y - sl / 2.0, TextSize::Small, Align::Right, Color::Muted, &compact(*t));
+            p.text(
+                x0 - 6.0,
+                y - sl / 2.0,
+                TextSize::Small,
+                Align::Right,
+                Color::Muted,
+                &compact(*t),
+            );
         }
         let zero = y_of(0.0);
         p.line(x0, zero, x1, zero, 1.0, Color::Muted);
         let slot = (x1 - x0) / n as f32;
         if let Some(hit) = hl {
-            p.rect(x0 + slot * hit.index as f32, top, slot, bottom - top, Color::Panel);
+            p.rect(
+                x0 + slot * hit.index as f32,
+                top,
+                slot,
+                bottom - top,
+                Color::Panel,
+            );
             // the grid again over the band
             for t in &ticks {
                 let y = y_of(*t);
-                p.line(x0 + slot * hit.index as f32, y, x0 + slot * (hit.index + 1) as f32, y, 1.0, Color::Border);
+                p.line(
+                    x0 + slot * hit.index as f32,
+                    y,
+                    x0 + slot * (hit.index + 1) as f32,
+                    y,
+                    1.0,
+                    Color::Border,
+                );
             }
-            p.line(x0 + slot * hit.index as f32, zero, x0 + slot * (hit.index + 1) as f32, zero, 1.0, Color::Muted);
+            p.line(
+                x0 + slot * hit.index as f32,
+                zero,
+                x0 + slot * (hit.index + 1) as f32,
+                zero,
+                1.0,
+                Color::Muted,
+            );
         }
         // labels along the bottom, every k-th when they do not fit
-        let widest = (0..n).map(|i| m.width(TextSize::Small, &self.label(i))).fold(0.0, f32::max);
+        let widest = (0..n)
+            .map(|i| m.width(TextSize::Small, &self.label(i)))
+            .fold(0.0, f32::max);
         let k = ((widest + 8.0) / slot).ceil().max(1.0) as usize;
         for i in (0..n).step_by(k) {
             let t = fit(m, TextSize::Small, &self.label(i), slot * k as f32 - 4.0);
-            p.text(x0 + slot * (i as f32 + 0.5), bottom + 4.0, TextSize::Small, Align::Center, Color::Muted, &t);
+            p.text(
+                x0 + slot * (i as f32 + 0.5),
+                bottom + 4.0,
+                TextSize::Small,
+                Align::Center,
+                Color::Muted,
+                &t,
+            );
         }
         match self.kind {
             ChartKind::Bar => {
@@ -284,19 +387,36 @@ impl Chart {
                         } else {
                             self.color(s)
                         };
-                        p.rect(x + gap, ya, (bw - 2.0 * gap).max(0.5), (yb - ya).max(0.0), c);
-                        d.areas.push((Area::Rect(x, top, bw, bottom - top), Hit { series: s, index: i }));
+                        p.rect(
+                            x + gap,
+                            ya,
+                            (bw - 2.0 * gap).max(0.5),
+                            (yb - ya).max(0.0),
+                            c,
+                        );
+                        d.areas.push((
+                            Area::Rect(x, top, bw, bottom - top),
+                            Hit {
+                                series: s,
+                                index: i,
+                            },
+                        ));
                     }
                 }
             }
             ChartKind::Line => {
                 for s in 0..self.series.len() {
-                    let pts: Vec<(f32, f32)> =
-                        (0..n).map(|i| (x0 + slot * (i as f32 + 0.5), y_of(self.value(s, i)))).collect();
+                    let pts: Vec<(f32, f32)> = (0..n)
+                        .map(|i| (x0 + slot * (i as f32 + 0.5), y_of(self.value(s, i))))
+                        .collect();
                     p.poly(2.0, self.color(s), &pts);
                     // dots where there is room for them, and on the item under the pointer
                     for (i, (x, y)) in pts.iter().enumerate() {
-                        let big = hl == Some(Hit { series: s, index: i });
+                        let big = hl
+                            == Some(Hit {
+                                series: s,
+                                index: i,
+                            });
                         if big {
                             p.circle(*x, *y, 5.0, self.color(s));
                             p.circle(*x, *y, 2.0, Color::Bg);
@@ -308,12 +428,23 @@ impl Chart {
                 // a point is found by its column, then the nearest series
                 for i in 0..n {
                     let x = x0 + slot * i as f32;
-                    let mut ys: Vec<(f32, usize)> = (0..self.series.len()).map(|s| (y_of(self.value(s, i)), s)).collect();
+                    let mut ys: Vec<(f32, usize)> = (0..self.series.len())
+                        .map(|s| (y_of(self.value(s, i)), s))
+                        .collect();
                     ys.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                     let mut from = top;
                     for (j, (y, s)) in ys.iter().enumerate() {
-                        let to = ys.get(j + 1).map(|(y2, _)| (y + y2) / 2.0).unwrap_or(bottom);
-                        d.areas.push((Area::Rect(x, from, slot, to - from), Hit { series: *s, index: i }));
+                        let to = ys
+                            .get(j + 1)
+                            .map(|(y2, _)| (y + y2) / 2.0)
+                            .unwrap_or(bottom);
+                        d.areas.push((
+                            Area::Rect(x, from, slot, to - from),
+                            Hit {
+                                series: *s,
+                                index: i,
+                            },
+                        ));
                         from = to;
                     }
                 }
@@ -328,17 +459,39 @@ impl Chart {
         let total: f64 = values.iter().sum();
         let p = &mut d.picture;
         if total <= 0.0 {
-            p.text(w / 2.0, (top + h) / 2.0, TextSize::Normal, Align::Center, Color::Muted, "No data");
+            p.text(
+                w / 2.0,
+                (top + h) / 2.0,
+                TextSize::Normal,
+                Align::Center,
+                Color::Muted,
+                "No data",
+            );
             return;
         }
         // the legend on the right when there is room, the pie in what is left
         let sl = m.small.line_height;
         let entries: Vec<String> = (0..n)
-            .map(|i| format!("{}  {}  {:.0}%", self.label(i), self.fmt(values[i]), values[i] / total * 100.0))
+            .map(|i| {
+                format!(
+                    "{}  {}  {:.0}%",
+                    self.label(i),
+                    self.fmt(values[i]),
+                    values[i] / total * 100.0
+                )
+            })
             .collect();
-        let legend_w = entries.iter().map(|e| m.width(TextSize::Small, e)).fold(0.0, f32::max) + 14.0;
+        let legend_w = entries
+            .iter()
+            .map(|e| m.width(TextSize::Small, e))
+            .fold(0.0, f32::max)
+            + 14.0;
         let show_legend = w - 2.0 * PAD - legend_w > 120.0;
-        let area_w = if show_legend { w - 2.0 * PAD - legend_w - PAD } else { w - 2.0 * PAD };
+        let area_w = if show_legend {
+            w - 2.0 * PAD - legend_w - PAD
+        } else {
+            w - 2.0 * PAD
+        };
         let r = (area_w.min(h - top - PAD) / 2.0 - 6.0).max(4.0);
         let (cx, cy) = (PAD + area_w / 2.0, top + (h - top - PAD) / 2.0);
         let mut a = 0.0f32;
@@ -348,9 +501,25 @@ impl Chart {
                 continue;
             }
             let to = if i + 1 == n { 360.0 } else { a + sweep };
-            let rr = if hl.map(|h| h.index) == Some(i) { r + 5.0 } else { r };
+            let rr = if hl.map(|h| h.index) == Some(i) {
+                r + 5.0
+            } else {
+                r
+            };
             p.pie(cx, cy, rr, a, to, Color::Series((i % 8) as u8 + 1));
-            d.areas.push((Area::Wedge { cx, cy, r: r + 5.0, from: a, to }, Hit { series: 0, index: i }));
+            d.areas.push((
+                Area::Wedge {
+                    cx,
+                    cy,
+                    r: r + 5.0,
+                    from: a,
+                    to,
+                },
+                Hit {
+                    series: 0,
+                    index: i,
+                },
+            ));
             a = to;
         }
         if n > 1 {
@@ -358,7 +527,14 @@ impl Chart {
             let mut a = 0.0f32;
             for v in &values {
                 let (s, c) = a.to_radians().sin_cos();
-                p.line(cx, cy, cx + s * (r + 6.0), cy - c * (r + 6.0), 1.5, Color::Bg);
+                p.line(
+                    cx,
+                    cy,
+                    cx + s * (r + 6.0),
+                    cy - c * (r + 6.0),
+                    1.5,
+                    Color::Bg,
+                );
                 a += (v / total * 360.0) as f32;
             }
         }
@@ -366,10 +542,27 @@ impl Chart {
             let lx = w - PAD - legend_w;
             let mut y = cy - (n as f32 * sl) / 2.0;
             for (i, e) in entries.iter().enumerate() {
-                p.rrect(lx, y + (sl - 10.0) / 2.0, 10.0, 10.0, 2.0, Color::Series((i % 8) as u8 + 1));
-                let c = if hl.map(|h| h.index) == Some(i) { Color::Fg } else { Color::Muted };
+                p.rrect(
+                    lx,
+                    y + (sl - 10.0) / 2.0,
+                    10.0,
+                    10.0,
+                    2.0,
+                    Color::Series((i % 8) as u8 + 1),
+                );
+                let c = if hl.map(|h| h.index) == Some(i) {
+                    Color::Fg
+                } else {
+                    Color::Muted
+                };
                 p.text(lx + 14.0, y, TextSize::Small, Align::Left, c, e);
-                d.areas.push((Area::Rect(lx, y, legend_w, sl), Hit { series: 0, index: i }));
+                d.areas.push((
+                    Area::Rect(lx, y, legend_w, sl),
+                    Hit {
+                        series: 0,
+                        index: i,
+                    },
+                ));
                 y += sl;
             }
         }
@@ -377,7 +570,11 @@ impl Chart {
 
     #[allow(clippy::too_many_arguments)]
     fn tooltip(&self, p: &mut Picture, h: Hit, px: f32, py: f32, w: f32, ht: f32, m: &Metrics) {
-        let label = if self.item.is_empty() { self.label(h.index) } else { format!("{} {}", self.item, self.label(h.index)) };
+        let label = if self.item.is_empty() {
+            self.label(h.index)
+        } else {
+            format!("{} {}", self.item, self.label(h.index))
+        };
         let name = if self.kind == ChartKind::Pie || self.series.len() < 2 {
             label
         } else {
@@ -385,7 +582,10 @@ impl Chart {
         };
         let value = self.fmt(self.value(h.series, h.index));
         let nl = m.normal.line_height;
-        let tw = m.width(TextSize::Normal, &name).max(m.width(TextSize::Normal, &value)) + 16.0;
+        let tw = m
+            .width(TextSize::Normal, &name)
+            .max(m.width(TextSize::Normal, &value))
+            + 16.0;
         let th = nl * 2.0 + 10.0;
         let mut x = px + 14.0;
         let mut y = py + 14.0;
@@ -397,8 +597,22 @@ impl Chart {
         }
         p.rrect(x - 1.0, y - 1.0, tw + 2.0, th + 2.0, 6.0, Color::Border);
         p.rrect(x, y, tw, th, 5.0, Color::Panel);
-        p.text(x + 8.0, y + 5.0, TextSize::Normal, Align::Left, Color::Muted, &name);
-        p.text(x + 8.0, y + 5.0 + nl, TextSize::Normal, Align::Left, Color::Fg, &value);
+        p.text(
+            x + 8.0,
+            y + 5.0,
+            TextSize::Normal,
+            Align::Left,
+            Color::Muted,
+            &name,
+        );
+        p.text(
+            x + 8.0,
+            y + 5.0 + nl,
+            TextSize::Normal,
+            Align::Left,
+            Color::Fg,
+            &value,
+        );
     }
 
     /// A value as the chart writes it: `1.2k`, `3.5M`, `0.25`, with the unit.
@@ -419,8 +633,16 @@ pub fn compact(v: f64) -> String {
     } else {
         (v, "")
     };
-    let s = if suffix.is_empty() && a >= 100.0 { format!("{x:.0}") } else { format!("{x:.2}") };
-    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+    let s = if suffix.is_empty() && a >= 100.0 {
+        format!("{x:.0}")
+    } else {
+        format!("{x:.2}")
+    };
+    let s = if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    } else {
+        s
+    };
     let s = if s == "-0" { "0".to_string() } else { s };
     format!("{s}{suffix}")
 }
@@ -482,17 +704,42 @@ mod tests {
     #[test]
     fn bars_are_hit_and_highlighted() {
         let m = Metrics::default();
-        let mut c = Chart::bar("t", &["a", "b", "c"], vec![Series::new("s", vec![1.0, 5.0, 3.0])]);
+        let mut c = Chart::bar(
+            "t",
+            &["a", "b", "c"],
+            vec![Series::new("s", vec![1.0, 5.0, 3.0])],
+        );
         let d = c.draw(400.0, 300.0, &m);
         assert!(d.hovered.is_none());
         // the second bar (one series: the bars take c1, c2, …) is item 1
-        let bar: Vec<f32> = d.picture.body().lines().find(|l| l.starts_with("rect ") && l.ends_with(" c2")).unwrap()
-            .split(' ').skip(1).take(4).map(|v| v.parse().unwrap()).collect();
+        let bar: Vec<f32> = d
+            .picture
+            .body()
+            .lines()
+            .find(|l| l.starts_with("rect ") && l.ends_with(" c2"))
+            .unwrap()
+            .split(' ')
+            .skip(1)
+            .take(4)
+            .map(|v| v.parse().unwrap())
+            .collect();
         let (x, y) = (bar[0] + bar[2] / 2.0, bar[1] + bar[3] / 2.0);
-        assert_eq!(d.hit(x, y), Some(Hit { series: 0, index: 1 }));
+        assert_eq!(
+            d.hit(x, y),
+            Some(Hit {
+                series: 0,
+                index: 1
+            })
+        );
         c.pointer = Some((x, y));
         let d2 = c.draw(400.0, 300.0, &m);
-        assert_eq!(d2.hovered, Some(Hit { series: 0, index: 1 }));
+        assert_eq!(
+            d2.hovered,
+            Some(Hit {
+                series: 0,
+                index: 1
+            })
+        );
         assert!(d2.picture.body().contains(" panel\n"));
         assert!(d2.picture.body().contains("text") && d2.picture.body().contains(" 5\n"));
     }
@@ -506,15 +753,36 @@ mod tests {
         assert!(body.contains("pie ") && body.contains(" 0 90 c1"));
         // up from the center is the first wedge, left of it the second
         let line = body.lines().find(|l| l.starts_with("pie ")).unwrap();
-        let f: Vec<f32> = line.split(' ').skip(1).take(3).map(|v| v.parse().unwrap()).collect();
-        assert_eq!(d.hit(f[0] + 5.0, f[1] - 20.0), Some(Hit { series: 0, index: 0 }));
-        assert_eq!(d.hit(f[0] - 20.0, f[1]), Some(Hit { series: 0, index: 1 }));
+        let f: Vec<f32> = line
+            .split(' ')
+            .skip(1)
+            .take(3)
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(
+            d.hit(f[0] + 5.0, f[1] - 20.0),
+            Some(Hit {
+                series: 0,
+                index: 0
+            })
+        );
+        assert_eq!(
+            d.hit(f[0] - 20.0, f[1]),
+            Some(Hit {
+                series: 0,
+                index: 1
+            })
+        );
     }
 
     #[test]
     fn nothing_to_draw_says_so() {
         let c = Chart::line("", &[], vec![]);
-        assert!(c.draw(300.0, 200.0, &Metrics::default()).picture.body().contains("No data"));
+        assert!(c
+            .draw(300.0, 200.0, &Metrics::default())
+            .picture
+            .body()
+            .contains("No data"));
     }
 
     #[test]
@@ -528,8 +796,17 @@ mod tests {
     #[test]
     fn as_many_columns_as_items() {
         let c = Chart::bar("", &["a", "b"], vec![Series::new("s", vec![120000.0, 3.0])]);
-        let body = c.draw(800.0, 600.0, &Metrics::default()).picture.body().to_string();
-        assert_eq!(body.lines().filter(|l| l.starts_with("text") && l.contains(" center ")).count(), 2);
+        let body = c
+            .draw(800.0, 600.0, &Metrics::default())
+            .picture
+            .body()
+            .to_string();
+        assert_eq!(
+            body.lines()
+                .filter(|l| l.starts_with("text") && l.contains(" center "))
+                .count(),
+            2
+        );
     }
 
     #[test]

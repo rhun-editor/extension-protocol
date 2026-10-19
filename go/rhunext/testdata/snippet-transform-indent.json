@@ -1,0 +1,142 @@
+[
+  {
+    "Input": "",
+    "Prefix": "",
+    "Width": 4,
+    "Spaces": true,
+    "Output": ""
+  },
+  {
+    "Input": "a",
+    "Prefix": "\t",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a"
+  },
+  {
+    "Input": " \ta\nb",
+    "Prefix": "  ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": " \ta\n  b"
+  },
+  {
+    "Input": "a\r\nb\rc\nd",
+    "Prefix": " ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a\n b\n c\n d"
+  },
+  {
+    "Input": "\n",
+    "Prefix": "\t",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "\n    "
+  },
+  {
+    "Input": "a\r\n",
+    "Prefix": "  ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a\n  "
+  },
+  {
+    "Input": "a\n\n",
+    "Prefix": " ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a\n \n "
+  },
+  {
+    "Input": "a\n\tb",
+    "Prefix": "  ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a\n    b"
+  },
+  {
+    "Input": "a\n \tb",
+    "Prefix": "\t ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a\n        b"
+  },
+  {
+    "Input": "a\n \tb",
+    "Prefix": "\t ",
+    "Width": 4,
+    "Spaces": false,
+    "Output": "a\n\t\tb"
+  },
+  {
+    "Input": "a\n b",
+    "Prefix": "\t ",
+    "Width": 4,
+    "Spaces": false,
+    "Output": "a\n\t  b"
+  },
+  {
+    "Input": "a\n  b",
+    "Prefix": "   ",
+    "Width": 2,
+    "Spaces": false,
+    "Output": "a\n\t\t b"
+  },
+  {
+    "Input": "a\n\tb",
+    "Prefix": " ",
+    "Width": 1,
+    "Spaces": true,
+    "Output": "a\n  b"
+  },
+  {
+    "Input": "a\n\tb",
+    "Prefix": " ",
+    "Width": 16,
+    "Spaces": false,
+    "Output": "a\n\tb"
+  },
+  {
+    "Input": "\n \t𐐨",
+    "Prefix": " ",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "\n  \t𐐨"
+  },
+  {
+    "Input": "a b cd",
+    "Prefix": " ",
+    "Width": 4,
+    "Spaces": false,
+    "Output": "a b cd"
+  },
+  {
+    "Input": "a\n  b",
+    "Prefix": " ",
+    "Width": 4,
+    "Spaces": false,
+    "Output": "a\n   b"
+  },
+  {
+    "Input": "a\n\t",
+    "Prefix": "",
+    "Width": 4,
+    "Spaces": true,
+    "Output": "a\n    "
+  },
+  {
+    "Input": "a\n  ",
+    "Prefix": "",
+    "Width": 4,
+    "Spaces": false,
+    "Output": "a\n  "
+  },
+  {
+    "Input": "\r\n\r\n",
+    "Prefix": "",
+    "Width": 4,
+    "Spaces": false,
+    "Output": "\n\n"
+  }
+]

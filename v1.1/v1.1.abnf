@@ -1,0 +1,54 @@
+; Protocol 1.1 additions. Combine with ../v1/v1.abnf; existing v1 rules are unchanged.
+; The `commands` feature must be agreed before r-unregister is sent.
+feature      =/ "commands"
+request      =/ id SP r-unregister
+r-unregister = "unregister" SP name
+
+; Workspace invalidations require agreed workspace_watch and project read/write permission.
+feature      =/ "workspace_watch"
+request      =/ id SP r-watch-workspace / id SP r-unwatch-workspace
+r-watch-workspace = "watch-workspace"
+r-unwatch-workspace = "unwatch-workspace" SP id
+event        =/ "0" SP "watch" SP id SP ( "changed" / "rescan" )
+; Handles are runtime-owned, positive and at most 2147483647; events are coalesced.
+
+; save-actions must be agreed; save-apply has a workspace-edit body of LEN bytes.
+feature      =/ "save-actions"
+host-request =/ id SP "save-actions" SP doc SP version SP source-kind
+request      =/ id SP r-save-apply
+r-save-apply = "save-apply" SP id SP doc SP version SP len
+source-kind  = "source" *( "." 1*( ALPHA / DIGIT / "_" / "-" ) )
+              ; at most 128 bytes; DOC is positive; VERSION is nonnegative
+
+; Prepared native snippet fields. Agree snippets before the explicit request.
+feature      =/ "snippets"
+request      =/ id SP r-snippet
+r-snippet    = "snippet" SP doc SP version SP range SP len
+c-extra      =/ "field" SP num SP num SP num SP num SP "0" LF
+              ; GROUP START END PARENT, then zero body length
+snippet-head = "0 0 0 0 snippet 0 " len SP "0" SP len LF
+              ; INSERT and EXTRA lengths, followed by exactly those bytes
+c-extra      =/ "choice" SP num SP num SP len LF
+              ; positive GROUP, COUNT 1..256, LEN bytes of option records
+choice-option = len LF
+              ; followed by exactly LEN UTF-8 bytes, at most 1 MiB each
+
+; Read-only insertion context. Requires agreed snippets and documents=read.
+request      =/ id SP r-snippet-context
+r-snippet-context = "snippet-context" SP doc SP version SP range
+snippet-context-head = "context 1" SP num SP num SP num SP num SP num
+                       SP len SP len SP len SP len SP len SP len LF
+              ; LINE COL TABWIDTH SPACES CRLF, then six byte lengths:
+              ; selected text, current line, path, workspace, indentation, line comment.
+              ; Exactly those six UTF-8 strings follow; body including header <=4 MiB.
+
+; Initial differences between ordinary mirrors require BOTH negotiated features.
+feature      =/ "snippet-variants"
+c-extra      =/ "variant" SP num SP "0" LF
+              ; one-based nonprimary FIELD 1..512, initially unequal to primary
+
+; Compiled transforms require BOTH snippets and snippet-transforms.
+feature      =/ "snippet-transforms"
+c-extra      =/ "transforms" SP "0" SP len LF
+              ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
+              ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.

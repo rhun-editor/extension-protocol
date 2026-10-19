@@ -23,7 +23,7 @@ import (
 )
 
 // providerFeatures are the features that name files in [provides] (all but views)
-var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format"}
+var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions"}
 
 // symbolKinds are the kinds 12e lists; another is shown as given
 var symbolKinds = func() map[string]bool {
@@ -38,6 +38,9 @@ var symbolKinds = func() map[string]bool {
 
 // patterns are the file patterns [provides] gives a feature, "" for none ("no" is none)
 func (h *host) patterns(f string) string {
+	if f == "save-actions" {
+		f = "save_actions"
+	}
 	p := strings.TrimSpace(h.m.provides[f])
 	if p == "no" {
 		return ""
@@ -239,6 +242,7 @@ type place struct {
 	d    *doc   // the open document, nil for a file that is not open
 	path string // as the answer gave it
 	text []byte
+	crlf bool
 }
 
 // at is the text as a document, for positions
@@ -246,7 +250,7 @@ func (t place) at() *doc {
 	if t.d != nil {
 		return t.d
 	}
-	return &doc{path: t.path, text: t.text}
+	return &doc{path: t.path, text: t.text, crlf: t.crlf}
 }
 
 // openDoc is the document a PATH rhun reads names when it is open (#DOC, or an open file's path),
@@ -269,16 +273,16 @@ func (h *host) openDoc(p []byte) *doc {
 // why not
 func (h *host) lookup(p []byte) (place, string) {
 	if d := h.openDoc(p); d != nil {
-		return place{d: d, path: string(p), text: d.text}, ""
+		return place{d: d, path: string(p), text: d.text, crlf: d.crlf}, ""
 	}
 	if p[0] == '#' {
 		return place{}, fmt.Sprintf("%s names a document rhun never opened", p)
 	}
-	text, why, _ := loadFile(string(p))
+	text, why, _, crlf := loadFileContext(string(p))
 	if why != "" {
 		return place{}, fmt.Sprintf("%s is not open, and %s", p, why)
 	}
-	return place{path: string(p), text: text}, ""
+	return place{path: string(p), text: text, crlf: crlf}, ""
 }
 
 // docIDs are the open documents' ids in order
@@ -620,6 +624,9 @@ func (h *host) checkWorkspaceEdit(b []byte, only *doc) ([]wsGroup, string, strin
 			return bad("nofile", "file %d: %s", n, badPath(g.path))
 		}
 		d := h.openDoc(g.path)
+		if only != nil && d != only {
+			return bad("nofile", "file %d: %s is not the document asked about (#%d, %s)", n, g.path, only.id, only.path)
+		}
 		switch {
 		case d == nil && g.path[0] == '#':
 			return bad("nodoc", "file %d: %s names a document rhun never opened", n, g.path)
@@ -632,24 +639,21 @@ func (h *host) checkWorkspaceEdit(b []byte, only *doc) ([]wsGroup, string, strin
 		case g.version >= 0 && g.version != d.version:
 			return bad("stale", "file %d: VERSION %d for %s, which is at version %d", n, g.version, g.path, d.version)
 		}
-		g.t = place{d: d, path: string(g.path), text: d.text}
+		g.t = place{d: d, path: string(g.path), text: d.text, crlf: d.crlf}
 	}
 	for i := range gs {
 		g := &gs[i]
 		if g.t.d != nil {
 			continue
 		}
-		text, why, _ := loadFile(string(g.path))
+		text, why, _, crlf := loadFileContext(string(g.path))
 		if why != "" {
 			return bad("nofile", "file %d: %s is not open, and %s", i+1, g.path, why)
 		}
-		g.t = place{path: string(g.path), text: text}
+		g.t = place{path: string(g.path), text: text, crlf: crlf}
 	}
 	for i := range gs {
 		g, n := &gs[i], i+1
-		if only != nil && g.t.d != only {
-			return bad("nofile", "file %d: %s is not the document asked about (#%d, %s)", n, g.path, only.id, only.path)
-		}
 		for _, p := range gs[:i] {
 			if g.t.d != nil && p.t.d == g.t.d || g.t.d == nil && p.t.d == nil && p.t.path == g.t.path {
 				return bad("syntax", "file %d: %s has a group already (one group per file)", n, g.path)
@@ -687,6 +691,7 @@ func (h *host) apply(groups []wsGroup) {
 		d, fresh := g.t.d, g.t.d == nil
 		if fresh {
 			d = h.newDoc(g.t.path, langOf(g.t.path), g.t.text)
+			d.crlf = g.t.crlf
 		}
 		var recs []edit
 		for i := len(g.edits) - 1; i >= 0; i-- {
@@ -746,6 +751,10 @@ func moved(p int, r edit) int {
 // answer the spec gives is the body "0" LF
 func (h *host) emptyAnswer(f string, m message) bool {
 	if w := strings.Fields(m.line); len(w) == 3 && w[0] == "ok" && w[2] == "0" && m.err == nil {
+		if f == "save-actions" {
+			h.ok("answers save-actions with no edits")
+			return true
+		}
 		h.warn(f, "the answer ok ID 0 has no body: rhun takes it as nothing, but the empty answer is the body \"0\" LF")
 		return true
 	}
@@ -784,7 +793,7 @@ func (h *host) errorAnswer(f string, m message) bool {
 // langWaits are how long rhun waits for each answer (12d)
 var langWaits = map[string]time.Duration{
 	"definition": 5 * time.Second, "references": 10 * time.Second, "symbols": 5 * time.Second,
-	"actions": 3 * time.Second, "rename": 15 * time.Second, "format": 10 * time.Second,
+	"actions": 3 * time.Second, "rename": 15 * time.Second, "format": 10 * time.Second, "save-actions": 2 * time.Second,
 }
 
 // langAsk sends one of the requests of 12d to 12h and returns its answer: false, after failing f,
@@ -889,7 +898,7 @@ func (h *host) checkLangFeatures() {
 			}
 		}
 	}
-	for _, f := range []string{"rename", "format"} {
+	for _, f := range []string{"rename", "format", "save-actions"} {
 		if !has(f) {
 			continue
 		}
@@ -897,6 +906,9 @@ func (h *host) checkLangFeatures() {
 		line, only := fmt.Sprintf("rename %d %d 1 1 invoked renamed", d.id, d.version), (*doc)(nil)
 		if f == "format" {
 			line, only = fmt.Sprintf("format %d %d 4 yes", d.id, d.version), d
+		}
+		if f == "save-actions" {
+			line, only = fmt.Sprintf("save-actions %d %d source", d.id, d.version), d
 		}
 		m, ok := h.langAsk(f, line)
 		if !ok {

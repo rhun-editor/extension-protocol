@@ -143,6 +143,7 @@ type doc struct {
 	cur     int // byte offsets
 	anchor  int
 	dirty   bool // unsaved changes: the text differs from the file (rhun's doc_dirty)
+	crlf    bool // file line-ending mode; text and positions are normalized to LF
 }
 
 type host struct {
@@ -182,6 +183,7 @@ type host struct {
 	hostSeq     int64             // the last id of a request the checker sent
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
+	saveScope   *saveScope
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -221,7 +223,11 @@ func (h *host) newDoc(path, lang string, text []byte) *doc {
 
 // save writes a document to its file as the user saving it does, and tells a subscriber
 func (h *host) save(d *doc) {
-	os.WriteFile(d.path, d.text, 0o644)
+	text := d.text
+	if d.crlf {
+		text = bytes.ReplaceAll(text, []byte("\n"), []byte("\r\n"))
+	}
+	os.WriteFile(d.path, text, 0o644)
 	d.dirty = false
 	if h.sub("saved") {
 		h.write(fmt.Sprintf("0 saved %d %d\n", d.id, d.version))
@@ -233,23 +239,29 @@ func (h *host) save(d *doc) {
 // alone stays, as do a byte order mark and bytes that are not UTF-8); else why not, and whether it
 // is an image
 func loadFile(path string) ([]byte, string, bool) {
+	data, why, image, _ := loadFileContext(path)
+	return data, why, image
+}
+
+// Retain line-ending mode alongside normalized editor text for context snapshots.
+func loadFileContext(path string) ([]byte, string, bool, bool) {
 	st, err := os.Stat(path)
 	switch {
 	case err != nil:
-		return nil, "there is no such file", false
+		return nil, "there is no such file", false, false
 	case !st.Mode().IsRegular():
-		return nil, "it is not a regular file", false
+		return nil, "it is not a regular file", false, false
 	}
 	data, err := os.ReadFile(path)
 	switch {
 	case err != nil:
-		return nil, "it cannot be read", false
+		return nil, "it cannot be read", false, false
 	case isImage(data):
-		return nil, "it is an image", true
+		return nil, "it is an image", true, false
 	case bytes.IndexByte(data[:min(len(data), 8192)], 0) >= 0:
-		return nil, "it is a binary file (a NUL in its first 8 KiB)", false
+		return nil, "it is a binary file (a NUL in its first 8 KiB)", false, false
 	}
-	return bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")), "", false
+	return bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")), "", false, bytes.Contains(data, []byte("\r\n"))
 }
 
 // isImage says whether a file starts as an image rhun shows in an image tab: PNG, JPEG, GIF, BMP,
@@ -290,7 +302,7 @@ func (h *host) start() error {
 	cmd.Dir = h.dir
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"), "HOME=" + h.state, "TMPDIR=" + filepath.Join(h.state, "tmp"),
-		"XDG_CACHE_HOME=" + filepath.Join(h.state, "cache"), "RHUN_VERSION=0.18.0", "RHUN_PROTOCOL=1",
+		"XDG_CACHE_HOME=" + filepath.Join(h.state, "cache"), "RHUN_VERSION=0.18.0", "RHUN_PROTOCOL=1.1",
 		"RHUN_EXTENSION=" + h.m.owner + "/" + h.m.name, "RHUN_TARGET=" + *target, "RHUN_STATE=" + h.state,
 		"RHUN_PROJECT=" + h.project,
 	}
@@ -344,7 +356,7 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -609,6 +621,37 @@ func (h *host) handle(msg message) {
 			return
 		}
 		h.applyRequest(b, reply, rerr, id)
+	case "snippet":
+		if len(args) != 7 {
+			rerr("syntax", "snippet takes DOC VERSION L1 C1 L2 C2 LEN")
+			return
+		}
+		b, ok := body(args[6])
+		if !ok || !need("write") {
+			return
+		}
+		h.snippetRequest(args[:6], b, reply, rerr, id)
+	case "snippet-context":
+		if !need("read") {
+			return
+		}
+		b, version, code, why := h.snippetContext(args)
+		if code != "" {
+			rerr(code, why)
+			return
+		}
+		h.write(fmt.Sprintf("ok %d %d %d\n%s", id, version, len(b), b))
+	case "save-apply":
+		if len(args) != 4 {
+			h.fail("request grammar", "save-apply takes SAVE_REQUEST DOC VERSION LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[3])
+		if !ok || !need("write") {
+			return
+		}
+		h.saveApplyRequest(args[:3], b, reply, rerr, id)
 	case "insert":
 		if len(args) != 3 {
 			h.fail("request grammar", "insert takes DOC VERSION LEN")
@@ -697,7 +740,7 @@ func (h *host) handle(msg message) {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(h.project, path)
 		}
-		data, why, image := loadFile(path)
+		data, why, image, crlf := loadFileContext(path)
 		if image {
 			rerr("nodoc", "an image")
 			return
@@ -714,6 +757,7 @@ func (h *host) handle(msg message) {
 		}
 		if d == nil {
 			d = h.newDoc(path, langOf(path), data)
+			d.crlf = crlf
 			h.write(fmt.Sprintf("0 opened %d %d %s %s\n", d.id, d.version, dash(d.lang), d.path))
 		}
 		h.active = d.id
@@ -862,6 +906,26 @@ func (h *host) handle(msg message) {
 		}
 		h.rtcmds = append(h.rtcmds, full)
 		reply(fmt.Sprintf("ok %d", id))
+	case "unregister":
+		if !h.features["commands"] {
+			h.fail("features", "unregister without commands agreed after hello")
+			rerr("unknown", "no such request")
+			return
+		}
+		if len(args) != 1 || args[0] == "" || len(args[0]) > 40 || strings.Trim(args[0], "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			h.fail("request grammar", "unregister takes a local command name")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		full := h.m.name + "." + args[0]
+		for i, command := range h.rtcmds {
+			if command == full {
+				h.rtcmds = append(h.rtcmds[:i], h.rtcmds[i+1:]...)
+				reply(fmt.Sprintf("ok %d", id))
+				return
+			}
+		}
+		rerr("refused", "not a runtime command of this extension")
 	case "option":
 		if len(args) != 3 {
 			h.fail("request grammar", "option takes DOC KEY VALUE")
@@ -1278,7 +1342,7 @@ func main() {
 		}
 	}
 	for k := range m.provides {
-		if !slices.Contains(providerFeatures, k) && k != "complete.triggers" && k != "signature.triggers" {
+		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
 	}

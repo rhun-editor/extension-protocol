@@ -4,7 +4,9 @@
 use crate::{Doc, Pos, Range};
 
 fn one_line(s: &str) -> String {
-    s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
 }
 
 /// The most bytes of a name, title, detail or preview, and of a kind word, that rhun reads: a
@@ -29,7 +31,10 @@ fn field(s: &str, max: usize) -> String {
 
 /// A kind word: no spaces, at most MAX_KIND bytes.
 fn kind_word(s: &str, default: &str) -> String {
-    let w: String = s.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect();
+    let w: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect();
     let w = field(&w, MAX_KIND);
     if w.is_empty() {
         default.to_string()
@@ -54,7 +59,11 @@ pub struct PosRequest {
 
 impl PosRequest {
     pub fn parse(fields: &[String]) -> Option<PosRequest> {
-        Some(PosRequest { doc: num(fields, 0)?, version: num(fields, 1)?, at: Pos::new(num(fields, 2)?, num(fields, 3)?) })
+        Some(PosRequest {
+            doc: num(fields, 0)?,
+            version: num(fields, 1)?,
+            at: Pos::new(num(fields, 2)?, num(fields, 3)?),
+        })
     }
 }
 
@@ -70,7 +79,11 @@ impl ActionsRequest {
     pub fn parse(fields: &[String]) -> Option<ActionsRequest> {
         let start = Pos::new(num(fields, 2)?, num(fields, 3)?);
         let end = Pos::new(num(fields, 4)?, num(fields, 5)?);
-        Some(ActionsRequest { doc: num(fields, 0)?, version: num(fields, 1)?, range: Range::new(start, end) })
+        Some(ActionsRequest {
+            doc: num(fields, 0)?,
+            version: num(fields, 1)?,
+            range: Range::new(start, end),
+        })
     }
 }
 
@@ -116,8 +129,61 @@ impl FormatRequest {
             "no" => false,
             _ => return None,
         };
-        Some(FormatRequest { doc: num(fields, 0)?, version: num(fields, 1)?, tab_width: num(fields, 2)?, spaces })
+        Some(FormatRequest {
+            doc: num(fields, 0)?,
+            version: num(fields, 1)?,
+            tab_width: num(fields, 2)?,
+            spaces,
+        })
     }
+}
+
+/// `ID save-actions DOC VERSION KIND` (negotiated `save-actions`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveActionsRequest {
+    /// The save invocation. Intermediate edits must name this ID.
+    pub id: u64,
+    pub doc: Doc,
+    pub version: i64,
+    pub kind: String,
+}
+
+impl SaveActionsRequest {
+    pub fn parse(id: u64, fields: &[String]) -> Option<Self> {
+        if id == 0
+            || id > 2147483647
+            || fields.len() != 3
+            || !fields[..2]
+                .iter()
+                .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        {
+            return None;
+        }
+        let doc = num(fields, 0)?;
+        let version = num(fields, 1)?;
+        let kind = fields[2].clone();
+        if doc <= 0 || version < 0 || !valid_source_kind(&kind) {
+            return None;
+        }
+        Some(Self {
+            id,
+            doc,
+            version,
+            kind,
+        })
+    }
+}
+
+pub(crate) fn valid_source_kind(kind: &str) -> bool {
+    kind.len() <= 128
+        && (kind == "source"
+            || kind.strip_prefix("source.").is_some_and(|rest| {
+                rest.split('.').all(|s| {
+                    !s.is_empty()
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                })
+            }))
 }
 
 /// Where a location or an edit is: a file by its absolute path, or an open document by its id
@@ -160,7 +226,11 @@ pub struct Location {
 
 impl Location {
     pub fn new(target: Target, range: Range) -> Location {
-        Location { target, range, text: String::new() }
+        Location {
+            target,
+            range,
+            text: String::new(),
+        }
     }
 
     pub fn text(mut self, text: &str) -> Location {
@@ -177,7 +247,16 @@ impl Location {
         let t = field(&self.text, MAX_TEXT);
         let r = self.range;
         out.extend_from_slice(
-            format!("{} {} {} {} {} {}\n", r.start.line, r.start.col, r.end.line, r.end.col, p.len(), t.len()).as_bytes(),
+            format!(
+                "{} {} {} {} {} {}\n",
+                r.start.line,
+                r.start.col,
+                r.end.line,
+                r.end.col,
+                p.len(),
+                t.len()
+            )
+            .as_bytes(),
         );
         out.extend_from_slice(p.as_bytes());
         out.extend_from_slice(t.as_bytes());
@@ -286,7 +365,13 @@ pub struct Symbol {
 
 impl Symbol {
     pub fn new(range: Range, kind: SymbolKind, depth: u32, name: &str) -> Symbol {
-        Symbol { range, kind, depth, name: field(name, MAX_TEXT), detail: String::new() }
+        Symbol {
+            range,
+            kind,
+            depth,
+            name: field(name, MAX_TEXT),
+            detail: String::new(),
+        }
     }
 
     pub fn detail(mut self, text: &str) -> Symbol {
@@ -351,7 +436,10 @@ pub struct TextEdit {
 
 impl TextEdit {
     pub fn new(range: Range, text: &str) -> TextEdit {
-        TextEdit { range, text: text.to_string() }
+        TextEdit {
+            range,
+            text: text.to_string(),
+        }
     }
 }
 
@@ -379,14 +467,22 @@ impl WorkspaceEdit {
 
     /// Edits for an open document, made against its text at `version`.
     pub fn doc(mut self, doc: Doc, version: i64, edits: Vec<TextEdit>) -> WorkspaceEdit {
-        self.files.push(FileEdit { target: Target::Doc(doc), version: Some(version), edits });
+        self.files.push(FileEdit {
+            target: Target::Doc(doc),
+            version: Some(version),
+            edits,
+        });
         self
     }
 
     /// Edits for a file by its path: the open document at `version`, or with `None` the file as
     /// it is on disk (rhun opens it).
     pub fn file(mut self, path: &str, version: Option<i64>, edits: Vec<TextEdit>) -> WorkspaceEdit {
-        self.files.push(FileEdit { target: Target::Path(path.to_string()), version, edits });
+        self.files.push(FileEdit {
+            target: Target::Path(path.to_string()),
+            version,
+            edits,
+        });
         self
     }
 
@@ -398,7 +494,10 @@ impl WorkspaceEdit {
     /// or [`MAX_EDITS`]): an edit cut short would leave the files half changed, so none is sent.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         if self.files.len() > MAX_EDIT_FILES {
-            return Err(format!("{} files: at most {MAX_EDIT_FILES}", self.files.len()));
+            return Err(format!(
+                "{} files: at most {MAX_EDIT_FILES}",
+                self.files.len()
+            ));
         }
         let edits: usize = self.files.iter().map(|f| f.edits.len()).sum();
         if edits > MAX_EDITS {
@@ -410,14 +509,24 @@ impl WorkspaceEdit {
             if p.is_empty() || p.len() > MAX_PATH {
                 return Err(format!("a path of {} bytes: 1 to {MAX_PATH}", p.len()));
             }
-            let v = f.version.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string());
+            let v = f
+                .version
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".to_string());
             out.extend_from_slice(format!("{} {} {}\n", p.len(), v, f.edits.len()).as_bytes());
             out.extend_from_slice(p.as_bytes());
             for e in &f.edits {
                 let r = e.range;
                 out.extend_from_slice(
-                    format!("{} {} {} {} {}\n", r.start.line, r.start.col, r.end.line, r.end.col, e.text.len())
-                        .as_bytes(),
+                    format!(
+                        "{} {} {} {} {}\n",
+                        r.start.line,
+                        r.start.col,
+                        r.end.line,
+                        r.end.col,
+                        e.text.len()
+                    )
+                    .as_bytes(),
                 );
                 out.extend_from_slice(e.text.as_bytes());
             }
@@ -442,7 +551,12 @@ pub struct CodeAction {
 
 impl CodeAction {
     pub fn new(kind: &str, title: &str) -> CodeAction {
-        CodeAction { kind: kind_word(kind, "quickfix"), title: field(title, MAX_TEXT), edit: None, data: Vec::new() }
+        CodeAction {
+            kind: kind_word(kind, "quickfix"),
+            title: field(title, MAX_TEXT),
+            edit: None,
+            data: Vec::new(),
+        }
     }
 
     pub fn edit(mut self, edit: WorkspaceEdit) -> CodeAction {
@@ -473,8 +587,17 @@ pub fn encode_actions(actions: &[CodeAction]) -> Vec<u8> {
         if title.is_empty() {
             continue;
         }
-        let head = format!("{} {} {} {}\n", kind_word(&a.kind, "quickfix"), title.len(), edit.len(), a.data.len());
-        if n == MAX_ACTIONS || recs.len() + head.len() + title.len() + edit.len() + a.data.len() + 16 > MAX_ACTIONS_BODY {
+        let head = format!(
+            "{} {} {} {}\n",
+            kind_word(&a.kind, "quickfix"),
+            title.len(),
+            edit.len(),
+            a.data.len()
+        );
+        if n == MAX_ACTIONS
+            || recs.len() + head.len() + title.len() + edit.len() + a.data.len() + 16
+                > MAX_ACTIONS_BODY
+        {
             break;
         }
         recs.extend_from_slice(head.as_bytes());
@@ -504,15 +627,27 @@ mod tests {
     fn requests_parse() {
         assert_eq!(
             PosRequest::parse(&fields("3 7 10 5 invoked -")),
-            Some(PosRequest { doc: 3, version: 7, at: Pos::new(10, 5) })
+            Some(PosRequest {
+                doc: 3,
+                version: 7,
+                at: Pos::new(10, 5)
+            })
         );
-        assert_eq!(ActionsRequest::parse(&fields("3 7 1 2 3 4")).unwrap().range, r(1, 2, 3, 4));
+        assert_eq!(
+            ActionsRequest::parse(&fields("3 7 1 2 3 4")).unwrap().range,
+            r(1, 2, 3, 4)
+        );
         let rn = RenameRequest::parse(&fields("3 7 1 2 invoked new_name")).unwrap();
         assert_eq!((rn.at, rn.name.as_str()), (Pos::new(1, 2), "new_name"));
         assert!(RenameRequest::parse(&fields("3 7 1 2 invoked")).is_none());
         assert_eq!(
             FormatRequest::parse(&fields("3 7 4 yes")),
-            Some(FormatRequest { doc: 3, version: 7, tab_width: 4, spaces: true })
+            Some(FormatRequest {
+                doc: 3,
+                version: 7,
+                tab_width: 4,
+                spaces: true
+            })
         );
         assert!(FormatRequest::parse(&fields("3 7 4 maybe")).is_none());
     }
@@ -523,7 +658,10 @@ mod tests {
             Location::new(Target::Path("/a/b.rs".into()), r(1, 4, 1, 8)).text("  fn main() {\n"),
             Location::new(Target::Doc(7), r(2, 1, 2, 1)),
         ]);
-        assert_eq!(body, b"2\n1 4 1 8 7 11\n/a/b.rsfn main() {2 1 2 1 2 0\n#7".to_vec());
+        assert_eq!(
+            body,
+            b"2\n1 4 1 8 7 11\n/a/b.rsfn main() {2 1 2 1 2 0\n#7".to_vec()
+        );
         assert_eq!(encode_locations(&[]), b"0\n".to_vec());
     }
 
@@ -533,8 +671,13 @@ mod tests {
             Symbol::new(r(1, 1, 3, 2), SymbolKind::Struct, 0, "Point"),
             Symbol::new(r(2, 5, 2, 11), SymbolKind::Field, 1, "x").detail("i32"),
         ]);
-        assert_eq!(body, b"2\n1 1 3 2 struct 0 5 0\nPoint2 5 2 11 field 1 1 3\nxi32".to_vec());
-        let many: Vec<Symbol> = (0..10001).map(|i| Symbol::new(r(1, 1, 1, 1), SymbolKind::Variable, 0, &i.to_string())).collect();
+        assert_eq!(
+            body,
+            b"2\n1 1 3 2 struct 0 5 0\nPoint2 5 2 11 field 1 1 3\nxi32".to_vec()
+        );
+        let many: Vec<Symbol> = (0..10001)
+            .map(|i| Symbol::new(r(1, 1, 1, 1), SymbolKind::Variable, 0, &i.to_string()))
+            .collect();
         assert!(encode_symbols(&many).starts_with(b"10000\n"));
     }
 
@@ -542,7 +685,14 @@ mod tests {
     fn workspace_edits_are_framed_and_checked() {
         let e = WorkspaceEdit::new()
             .doc(3, 9, vec![TextEdit::new(r(1, 1, 1, 4), "new")])
-            .file("/p/x.rs", None, vec![TextEdit::new(r(2, 1, 2, 1), "a\n"), TextEdit::new(r(5, 1, 5, 3), "")]);
+            .file(
+                "/p/x.rs",
+                None,
+                vec![
+                    TextEdit::new(r(2, 1, 2, 1), "a\n"),
+                    TextEdit::new(r(5, 1, 5, 3), ""),
+                ],
+            );
         assert_eq!(
             e.encode().unwrap(),
             b"2\n2 9 1\n#31 1 1 4 3\nnew7 - 2\n/p/x.rs2 1 2 1 2\na\n5 1 5 3 0\n".to_vec()
@@ -574,12 +724,20 @@ mod tests {
         let long = format!("{}é{}", "x".repeat(999), "y".repeat(10));
         let s = Symbol::new(r(1, 1, 1, 1), SymbolKind::Function, 0, &long);
         assert_eq!(s.name, "x".repeat(999));
-        let body = encode_actions(&[CodeAction::new(&"k".repeat(50), &long), CodeAction::new("source", "")]);
+        let body = encode_actions(&[
+            CodeAction::new(&"k".repeat(50), &long),
+            CodeAction::new("source", ""),
+        ]);
         assert!(body.starts_with(format!("1\n{} 999 0 0\n", "k".repeat(40)).as_bytes()));
-        let far = Location::new(Target::Path(format!("/{}", "p".repeat(4096))), r(1, 1, 1, 1));
+        let far = Location::new(
+            Target::Path(format!("/{}", "p".repeat(4096))),
+            r(1, 1, 1, 1),
+        );
         let near = Location::new(Target::Path("/p".into()), r(1, 1, 1, 1));
         assert!(encode_locations(&[far.clone(), near]).starts_with(b"1\n"));
-        assert!(encode_symbols(&[Symbol::new(r(1, 1, 1, 1), SymbolKind::Function, 0, "")]) == b"0\n");
+        assert!(
+            encode_symbols(&[Symbol::new(r(1, 1, 1, 1), SymbolKind::Function, 0, "")]) == b"0\n"
+        );
         let e = WorkspaceEdit::new().file(&format!("/{}", "p".repeat(4096)), None, vec![]);
         assert!(e.encode().is_err());
     }
