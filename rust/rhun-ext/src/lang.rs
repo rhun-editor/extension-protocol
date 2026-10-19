@@ -195,7 +195,7 @@ pub enum Target {
 }
 
 impl Target {
-    fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         match self {
             Target::Path(p) => p.clone(),
             Target::Doc(d) => format!("#{d}"),

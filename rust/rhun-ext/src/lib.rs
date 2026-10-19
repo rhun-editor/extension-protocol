@@ -31,8 +31,10 @@
 //! language support (the [`Handler`] methods of the same names answer them). Protocol 1.1 adds
 //! [`Feature::QueryStream`] (parts and progress through a [`Stream`]), [`Feature::ProviderScope`]
 //! ([`Ext::provides`]), [`Feature::CompleteItems`], [`Feature::SignatureList`],
-//! [`Feature::Navigation`], [`Feature::PrepareRename`], [`Feature::PartialFormat`] and
-//! [`Feature::CodeActions`].
+//! [`Feature::Navigation`], [`Feature::PrepareRename`], [`Feature::PartialFormat`],
+//! [`Feature::CodeActions`], [`Feature::HoverQuery`], [`Feature::SelectionRanges`],
+//! [`Feature::Hierarchy`], [`Feature::WorkspaceSymbols`], [`Feature::DocumentLinks`] and
+//! [`Feature::FileDiagnostics`] ([`Ext::file_diagnostics`]).
 
 #![allow(clippy::needless_doctest_main)]
 
@@ -40,6 +42,7 @@ pub mod actions;
 pub mod chart;
 pub mod complete;
 pub mod lang;
+pub mod langfeat;
 pub mod picture;
 pub mod query;
 pub mod snippet;
@@ -67,14 +70,21 @@ pub use lang::{
     ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest,
     SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
 };
+pub use langfeat::{
+    encode_calls, encode_document_links, encode_file_diagnostics, encode_hierarchy_items,
+    encode_hierarchy_roots, encode_selection_ranges, encode_workspace_symbols, selection_chain,
+    valid_diagnostic_id, Call, DiagnosticTag, DocRequest, DocumentLink, HierarchyItem, Hover,
+    HoverRequest, LinkTarget, RelatedInfo, SelectionRangesRequest, WorkspaceSymbol,
+    WorkspaceSymbolsRequest,
+};
 pub use picture::{Color, Picture};
 pub use query::Stream;
-pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
 };
+pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 
 #[cfg(test)]
 mod tests {
@@ -178,12 +188,20 @@ pub enum Feature {
     /// Code actions with hierarchical kinds, resolve data and commands, in place of v1's
     /// `actions`: [`Handler::code_actions`] and [`Handler::code_action_resolve`] (protocol 1.1).
     CodeActions,
-    // Protocol 1.1 features this crate names but does not answer yet.
+    /// The hover card's text and range: [`Handler::hover`] (protocol 1.1).
     HoverQuery,
+    /// Expand and Shrink Selection: [`Handler::selection_ranges`] (protocol 1.1).
     SelectionRanges,
+    /// Call and type hierarchies: [`Handler::call_hierarchy`], [`Handler::calls_in`],
+    /// [`Handler::calls_out`], [`Handler::type_hierarchy`], [`Handler::supertypes`],
+    /// [`Handler::subtypes`] (protocol 1.1).
     Hierarchy,
+    /// Go to Symbol in Project: [`Handler::workspace_symbols`] (protocol 1.1).
     WorkspaceSymbols,
+    /// Diagnostics for any file in rhun's Problems store: [`Ext::file_diagnostics`] and
+    /// [`Ext::reset_diagnostics`] (protocol 1.1).
     FileDiagnostics,
+    /// Links under ctrl+hover: [`Handler::document_links`] (protocol 1.1).
     DocumentLinks,
 }
 
@@ -339,8 +357,9 @@ pub fn whole_range(text: &[u8]) -> Range {
 }
 
 /// The severity of a diagnostic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Severity {
+    #[default]
     Error,
     Warning,
     Info,
@@ -358,13 +377,22 @@ impl Severity {
     }
 }
 
-/// A mark: a range, a severity and a one-line message.
-#[derive(Clone, Debug)]
+/// A mark: a range, a severity and a one-line message. The fields after `message` travel only
+/// with [`Ext::file_diagnostics`] (protocol 1.1; [`Ext::diagnostics`] sends `source` as v1 did):
+/// `id`, a token of `[A-Za-z0-9_.:-]` unique in the set, comes back in code-actions requests
+/// ([`CodeActionsRequest::diagnostics`]); `code` and `source` show as `source(code)`; `href` is an
+/// http(s) link explaining the code; `tags`; `related` places.
+#[derive(Clone, Debug, Default)]
 pub struct Diagnostic {
     pub range: Range,
     pub severity: Severity,
     pub source: String,
     pub message: String,
+    pub id: String,
+    pub code: String,
+    pub href: String,
+    pub tags: Vec<DiagnosticTag>,
+    pub related: Vec<RelatedInfo>,
 }
 
 /// What a view tells its extension (section 12a).
@@ -698,6 +726,56 @@ pub trait Handler: Send {
         _req: &ActionResolveRequest,
     ) -> Result<ResolvedAction, String> {
         Err("nothing to resolve".to_string())
+    }
+    /// rhun asks for the hover card's text at a position (hover-query); `None` says nothing.
+    fn hover(&mut self, _ext: &Ext, _req: &HoverRequest) -> Option<Hover> {
+        None
+    }
+    /// rhun asks for the ranges around each selection's cursor (selection-ranges): a group per
+    /// position, innermost first, each range containing the one before.
+    fn selection_ranges(&mut self, _ext: &Ext, _req: &SelectionRangesRequest) -> Vec<Vec<Range>> {
+        Vec::new()
+    }
+    /// rhun asks for the call hierarchy's roots at the cursor (hierarchy).
+    fn call_hierarchy(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<HierarchyItem> {
+        Vec::new()
+    }
+    /// rhun asks for the calls to the item whose data this is (hierarchy); they may come in parts.
+    fn calls_in(&mut self, _ext: &Ext, _data: &[u8], _out: &Stream) -> Vec<Call> {
+        Vec::new()
+    }
+    /// rhun asks for the calls the item whose data this is makes (hierarchy); they may come in
+    /// parts.
+    fn calls_out(&mut self, _ext: &Ext, _data: &[u8], _out: &Stream) -> Vec<Call> {
+        Vec::new()
+    }
+    /// rhun asks for the type hierarchy's roots at the cursor (hierarchy).
+    fn type_hierarchy(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<HierarchyItem> {
+        Vec::new()
+    }
+    /// rhun asks for the supertypes of the item whose data this is (hierarchy); they may come in
+    /// parts.
+    fn supertypes(&mut self, _ext: &Ext, _data: &[u8], _out: &Stream) -> Vec<HierarchyItem> {
+        Vec::new()
+    }
+    /// rhun asks for the subtypes of the item whose data this is (hierarchy); they may come in
+    /// parts.
+    fn subtypes(&mut self, _ext: &Ext, _data: &[u8], _out: &Stream) -> Vec<HierarchyItem> {
+        Vec::new()
+    }
+    /// rhun asks for the project's symbols matching a query (workspace-symbols); they may come in
+    /// parts, and a new query withdraws the request (`out` is then cancelled).
+    fn workspace_symbols(
+        &mut self,
+        _ext: &Ext,
+        _req: &WorkspaceSymbolsRequest,
+        _out: &Stream,
+    ) -> Vec<WorkspaceSymbol> {
+        Vec::new()
+    }
+    /// rhun asks for the links in a document (document-links).
+    fn document_links(&mut self, _ext: &Ext, _req: &DocRequest) -> Vec<DocumentLink> {
+        Vec::new()
     }
 }
 
@@ -1455,6 +1533,65 @@ impl Ext {
                                     Ok(res) => res.encode().map_err(|why| ("toobig", why)),
                                     Err(why) => Err(("refused", why)),
                                 }
+                            })
+                        }
+                        "hover-query" if self.has(Feature::HoverQuery) => {
+                            HoverRequest::parse(id, &fields).map(|r| {
+                                Ok(h.hover(self, &r).map(|h| h.encode()).unwrap_or_default())
+                            })
+                        }
+                        "selection-ranges" if self.has(Feature::SelectionRanges) => {
+                            SelectionRangesRequest::parse(id, &fields, &data).map(|r| {
+                                Ok(langfeat::encode_selection_ranges(
+                                    &r.positions,
+                                    &h.selection_ranges(self, &r),
+                                ))
+                            })
+                        }
+                        "call-hierarchy" if self.has(Feature::Hierarchy) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(langfeat::encode_hierarchy_roots(
+                                    &h.call_hierarchy(self, &r),
+                                ))
+                            })
+                        }
+                        "type-hierarchy" if self.has(Feature::Hierarchy) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(langfeat::encode_hierarchy_roots(
+                                    &h.type_hierarchy(self, &r),
+                                ))
+                            })
+                        }
+                        "calls-in" if self.has(Feature::Hierarchy) => {
+                            langfeat::item_data(&fields, &data)
+                                .map(|d| Ok(langfeat::encode_calls(&h.calls_in(self, d, &out))))
+                        }
+                        "calls-out" if self.has(Feature::Hierarchy) => {
+                            langfeat::item_data(&fields, &data)
+                                .map(|d| Ok(langfeat::encode_calls(&h.calls_out(self, d, &out))))
+                        }
+                        "supertypes" if self.has(Feature::Hierarchy) => {
+                            langfeat::item_data(&fields, &data).map(|d| {
+                                Ok(langfeat::encode_hierarchy_items(
+                                    &h.supertypes(self, d, &out),
+                                ))
+                            })
+                        }
+                        "subtypes" if self.has(Feature::Hierarchy) => {
+                            langfeat::item_data(&fields, &data).map(|d| {
+                                Ok(langfeat::encode_hierarchy_items(&h.subtypes(self, d, &out)))
+                            })
+                        }
+                        "workspace-symbols" if self.has(Feature::WorkspaceSymbols) => {
+                            WorkspaceSymbolsRequest::parse(id, &fields, &data).map(|r| {
+                                Ok(langfeat::encode_workspace_symbols(
+                                    &h.workspace_symbols(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "document-links" if self.has(Feature::DocumentLinks) => {
+                            DocRequest::parse(id, &fields).map(|r| {
+                                Ok(langfeat::encode_document_links(&h.document_links(self, &r)))
                             })
                         }
                         "symbols" => PosRequest::parse(&fields)

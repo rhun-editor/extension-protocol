@@ -1301,3 +1301,309 @@ fn navigation_rename_format_and_actions() {
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+// ---- hover-query, selection-ranges, hierarchy, workspace-symbols, document-links,
+// file-diagnostics (go/rhunext/langfeat_test.go, the same bytes)
+
+struct MoreProbe(Sender<String>);
+
+fn item(name: &str, data: &str) -> rhun_ext::HierarchyItem {
+    use rhun_ext::{HierarchyItem, SymbolKind, Target};
+    HierarchyItem::new(
+        SymbolKind::Function,
+        name,
+        Target::Path("/p/a.go".into()),
+        rg(3, 1, 9, 2),
+    )
+    .detail("pkg")
+    .selection(rg(3, 6, 3, 6 + name.len() as u32))
+    .data(data.as_bytes())
+}
+
+fn item_rec(sel: &str, name: &str, data: &str, sites: &[&str]) -> String {
+    let mut head = format!("function 3 1 9 2 {sel} 7 {} 3 {}", name.len(), data.len());
+    if !sites.is_empty() {
+        head += &format!(" {}", sites.len());
+    }
+    let mut s = format!("{head}\n/p/a.go{name}pkg{data}");
+    for site in sites {
+        s += site;
+        s.push('\n');
+    }
+    s
+}
+
+impl Handler for MoreProbe {
+    fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+        use rhun_ext::{Diagnostic, Target};
+        let ds = [Diagnostic {
+            range: rg(1, 4, 1, 9),
+            message: "bad\nname".into(),
+            id: "e1".into(),
+            ..Default::default()
+        }];
+        if !ext.has(Feature::FileDiagnostics) {
+            let e = ext
+                .file_diagnostics(&Target::Doc(1), Some(0), &ds)
+                .unwrap_err();
+            let r = ext.reset_diagnostics().unwrap_err();
+            let _ = self.0.send(format!("{} {}", e.code, r.code));
+            return;
+        }
+        let stale = ext
+            .file_diagnostics(&Target::Doc(1), Some(0), &ds)
+            .unwrap_err();
+        let path = ext.file_diagnostics(&Target::Path("/p/other.rs".into()), Some(3), &ds);
+        let rel = ext
+            .file_diagnostics(&Target::Path("other.rs".into()), None, &ds)
+            .unwrap_err();
+        let nover = ext
+            .file_diagnostics(&Target::Doc(1), None, &ds)
+            .unwrap_err();
+        let reset = ext.reset_diagnostics();
+        let _ = self.0.send(format!(
+            "{} {} {:?} {} {} {:?}",
+            stale.code,
+            stale.text,
+            path.is_ok(),
+            rel.code,
+            nover.code,
+            reset.is_ok()
+        ));
+    }
+    fn hover(&mut self, _ext: &Ext, req: &rhun_ext::HoverRequest) -> Option<rhun_ext::Hover> {
+        (req.at.line != 9)
+            .then(|| rhun_ext::Hover::new(rg(2, 1, 2, 9), &format!("fn {}", req.kind)))
+    }
+    fn selection_ranges(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::SelectionRangesRequest,
+    ) -> Vec<Vec<Range>> {
+        req.positions
+            .iter()
+            .map(|p| match p.line {
+                1 => vec![
+                    rg(1, 5, 1, 8),
+                    rg(1, 5, 1, 8),
+                    rg(1, 1, 1, 20),
+                    rg(1, 2, 2, 1),
+                ],
+                2 => vec![],
+                l => vec![rg(l, 1, l, 9), rg(l, 9, l, 1)],
+            })
+            .collect()
+    }
+    fn call_hierarchy(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::PosRequest,
+    ) -> Vec<rhun_ext::HierarchyItem> {
+        vec![
+            item("main", "m1"),
+            item("outside", "o").selection(rg(1, 1, 1, 2)),
+        ]
+    }
+    fn calls_in(&mut self, _ext: &Ext, data: &[u8], out: &rhun_ext::Stream) -> Vec<rhun_ext::Call> {
+        use rhun_ext::Call;
+        if out
+            .part_calls(&[Call::new(item("caller", "c1"), vec![rg(4, 2, 4, 6)])])
+            .is_err()
+        {
+            return vec![Call::new(item("nostream", ""), vec![rg(1, 1, 1, 2)])];
+        }
+        let name = format!("late{}", String::from_utf8_lossy(data));
+        vec![
+            Call::new(
+                item(&name, ""),
+                vec![rg(5, 1, 5, 2), rg(6, 2, 6, 1), rg(7, 1, 7, 3)],
+            ),
+            Call::new(item("nosites", ""), vec![]),
+        ]
+    }
+    fn type_hierarchy(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::PosRequest,
+    ) -> Vec<rhun_ext::HierarchyItem> {
+        let mut it = item("Shape", "t");
+        it.kind = rhun_ext::SymbolKind::Interface;
+        vec![it]
+    }
+    fn supertypes(
+        &mut self,
+        _ext: &Ext,
+        data: &[u8],
+        _out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::HierarchyItem> {
+        vec![item(&format!("Base{}", String::from_utf8_lossy(data)), "b")]
+    }
+    fn workspace_symbols(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::WorkspaceSymbolsRequest,
+        out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::WorkspaceSymbol> {
+        use rhun_ext::{SymbolKind, Target, WorkspaceSymbol};
+        let first = vec![WorkspaceSymbol::new(
+            Target::Path("/p/a.go".into()),
+            rg(3, 6, 3, 10),
+            SymbolKind::Function,
+            "Main",
+        )
+        .detail("main")];
+        if out.part_workspace_symbols(&first).is_err() {
+            return first;
+        }
+        vec![WorkspaceSymbol::new(
+            Target::Doc(2),
+            rg(1, 1, 1, 4),
+            SymbolKind::Function,
+            &format!("{}\nx", req.query),
+        )]
+    }
+    fn document_links(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::DocRequest,
+    ) -> Vec<rhun_ext::DocumentLink> {
+        use rhun_ext::{DocumentLink, LinkTarget};
+        vec![
+            DocumentLink::new(
+                rg(1, 1, 1, 20),
+                LinkTarget::Url("https://example.test/a".into()),
+            )
+            .tip("Open\nthe page"),
+            DocumentLink::new(
+                rg(2, 3, 2, 9),
+                LinkTarget::Path("/p/a.go".into(), Pos::new(4, 2)),
+            ),
+            DocumentLink::new(rg(4, 3, 4, 9), LinkTarget::Doc(req.doc)),
+            DocumentLink::new(
+                rg(5, 3, 5, 9),
+                LinkTarget::Path("relative.go".into(), Pos::default()),
+            ),
+        ]
+    }
+}
+
+#[test]
+fn hover_selection_hierarchy_symbols_links_and_file_diagnostics() {
+    let feats = vec![
+        Feature::FileDiagnostics,
+        Feature::HoverQuery,
+        Feature::SelectionRanges,
+        Feature::Hierarchy,
+        Feature::WorkspaceSymbols,
+        Feature::DocumentLinks,
+        Feature::QueryStream,
+    ];
+    let (tx, rx) = channel();
+    let (mut host, done) = session(feats, MoreProbe(tx));
+    let names = "file-diagnostics hover-query selection-ranges hierarchy workspace-symbols document-links query-stream";
+    assert_eq!(host.line(), format!("hello 1 {names}"));
+    host.send(&format!("0 features {names}\n0 ready -\n"));
+    let rec = "1 4 1 9 error 8 7\nbad\nnameid 2\ne1";
+    assert_eq!(
+        host.line(),
+        format!("1 file-diagnostics 0 1 2 {}", 2 + rec.len())
+    );
+    assert_eq!(host.body(2 + rec.len()), format!("#1{rec}"));
+    host.send("error 1 stale 4\n");
+    assert_eq!(
+        host.line(),
+        format!("2 file-diagnostics - 1 11 {}", 11 + rec.len())
+    );
+    assert_eq!(host.body(11 + rec.len()), format!("/p/other.rs{rec}"));
+    host.send("ok 2\n");
+    assert_eq!(host.line(), "3 file-diagnostics-reset");
+    host.send("ok 3\n");
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+        "stale 4 true syntax syntax true"
+    );
+    host.send("3 hover-query 4 7 2 5 pointer -\n");
+    answer(&mut host, 3, "2 1 2 9\nfn pointer");
+    host.send("4 hover-query 4 7 9 1 invoked -\n");
+    answer(&mut host, 4, "");
+    host.send("5 selection-ranges 4 7 3 12\n1 6\n2 3\n5 4\n");
+    answer(
+        &mut host,
+        5,
+        "2\n1 5 1 8\n1 1 1 20\n1\n2 3 2 3\n1\n5 1 5 9\n",
+    );
+    host.send("6 call-hierarchy 4 7 3 7 invoked -\n");
+    answer(
+        &mut host,
+        6,
+        &("2\n".to_string()
+            + &item_rec("3 6 3 10", "main", "m1", &[])
+            + &item_rec("3 1 9 2", "outside", "o", &[])),
+    );
+    host.send("7 calls-in 2\nm1");
+    let part = "1\n".to_string() + &item_rec("3 6 3 12", "caller", "c1", &["4 2 4 6"]);
+    assert_eq!(host.line(), format!("4 query-part 7 {}", part.len()));
+    assert_eq!(host.body(part.len()), part);
+    host.send("ok 4\n");
+    answer(
+        &mut host,
+        7,
+        &("1\n".to_string() + &item_rec("3 6 3 12", "latem1", "", &["5 1 5 2", "7 1 7 3"])),
+    );
+    host.send("8 calls-out 1\nx");
+    answer(&mut host, 8, "0\n");
+    host.send("9 type-hierarchy 4 7 3 7 invoked -\n");
+    answer(
+        &mut host,
+        9,
+        "1\ninterface 3 1 9 2 3 6 3 11 7 5 3 1\n/p/a.goShapepkgt",
+    );
+    host.send("10 supertypes 1\nt");
+    answer(
+        &mut host,
+        10,
+        &("1\n".to_string() + &item_rec("3 6 3 11", "Baset", "b", &[])),
+    );
+    host.send("11 subtypes 1\nt");
+    answer(&mut host, 11, "0\n");
+    host.send("12 workspace-symbols 500 3\nmai");
+    let part = "1\n3 6 3 10 function 7 4 4\n/p/a.goMainmain";
+    assert_eq!(host.line(), format!("5 query-part 12 {}", part.len()));
+    assert_eq!(host.body(part.len()), part);
+    host.send("error 5 cancelled\n");
+    answer(&mut host, 12, part);
+    host.send("13 document-links 4 7\n");
+    answer(
+        &mut host,
+        13,
+        "3\n1 1 1 20 22 13\nhttps://example.test/aOpen the page2 3 2 9 11 0\n/p/a.go:4:24 3 4 9 2 0\n#4",
+    );
+    host.send("14 selection-ranges 4 7 2 4\n5 4\n");
+    assert!(host.line().starts_with("error 14 unknown"));
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+
+    // without the features: requests are unknown (bodies read past), file-diagnostics is not sent
+    let (tx, rx) = channel();
+    let (mut host, done) = session(vec![Feature::Rename], MoreProbe(tx));
+    assert_eq!(host.line(), "hello 1 rename");
+    host.send("0 features rename\n0 ready -\n");
+    assert_eq!(
+        rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+        "unknown unknown"
+    );
+    for (id, req) in [
+        (2, "hover-query 4 7 2 5 pointer -\n"),
+        (3, "selection-ranges 4 7 1 4\n1 6\n"),
+        (4, "call-hierarchy 4 7 3 7 invoked -\n"),
+        (5, "calls-in 2\nm1"),
+        (6, "supertypes 1\nt"),
+        (7, "workspace-symbols 500 3\nmai"),
+        (8, "document-links 4 7\n"),
+    ] {
+        host.send(&format!("{id} {req}"));
+        assert_eq!(host.line(), format!("error {id} unknown no such request"));
+    }
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
