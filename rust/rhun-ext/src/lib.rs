@@ -35,6 +35,7 @@
 pub mod chart;
 pub mod complete;
 pub mod lang;
+pub mod notify;
 pub mod picture;
 pub mod scm;
 pub mod snippet;
@@ -162,6 +163,12 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Log views (`kind = log`, with [`Feature::ViewTree`]): [`views::Patch::log`].
+    ViewLog,
+    /// Notification cards with buttons: [`Ext::notify`], [`Handler::note_event`] ([`notify`]).
+    Notify,
+    /// Progress in the status bar, a card or a view: [`Ext::progress`], [`Handler::progress_cancel`].
+    Progress,
 }
 
 impl Feature {
@@ -186,8 +193,21 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::ViewLog => "view-log",
+            Feature::Notify => "notify",
+            Feature::Progress => "progress",
         }
     }
+}
+
+/// A title on one line, at most 200 bytes (whole characters).
+fn views_title(title: &str) -> String {
+    let t = title.replace('\n', " ");
+    let mut n = t.len().min(200);
+    while !t.is_char_boundary(n) {
+        n -= 1;
+    }
+    t[..n].to_string()
 }
 
 /// Anything rhun tells the extension without expecting an answer, as it arrived: `0 NAME FIELDS…`.
@@ -522,6 +542,11 @@ pub trait Handler: Send {
     fn view_open(&mut self, _ext: &Ext, _open: &views::ViewOpen) {}
     /// The user did something in a retained view (feature `view-tree`).
     fn view_event(&mut self, _ext: &Ext, _view: View, _ev: &views::RetainedEvent) {}
+    /// The user pressed a button of one of its cards, or closed it (feature `notify`).
+    fn note_event(&mut self, _ext: &Ext, _note: u64, _ev: notify::NoteEvent) {}
+    /// The user pressed Cancel on one of its progress entries (feature `progress`); rhun removes it
+    /// 10 s later unless [`Ext::progress_end`] comes first.
+    fn progress_cancel(&mut self, _ext: &Ext, _progress: u64) {}
     /// rhun asks for a node's children (feature `view-tree`): a patch with a `kids` op for it.
     fn view_children(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
         Err("no children".into())
@@ -1104,6 +1129,56 @@ impl Ext {
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
+    /// A retained view (`tree`, or `log` with [`Feature::ViewLog`]) in an editor tab of its own,
+    /// shown at once; [`Handler::view_open`] follows with place `tab`. Close it with
+    /// [`Ext::unview`].
+    pub fn vtab(&self, kind: &str, title: &str) -> Result<View, Error> {
+        let rep = self.request(&format!("vtab {kind} {}", views_title(title)), None)?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    // ---- notifications and progress (features `notify`, `progress`) ----
+
+    /// A notification card; its NOTE for [`Ext::notify_set`], [`Ext::unnotify`] and
+    /// [`Handler::note_event`].
+    pub fn notify(&self, severity: notify::Severity, note: &notify::Note) -> Result<u64, Error> {
+        let rep = self.request(&format!("notify {}", severity.word()), Some(&note.encode()))?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Replaces a card's content (a card that is gone: nothing happens).
+    pub fn notify_set(&self, note: u64, content: &notify::Note) -> Result<(), Error> {
+        self.request(&format!("notify-set {note}"), Some(&content.encode())).map(|_| ())
+    }
+
+    /// Closes a card without an event.
+    pub fn unnotify(&self, note: u64) -> Result<(), Error> {
+        self.request(&format!("unnotify {note}"), None).map(|_| ())
+    }
+
+    /// Progress (nothing shows if it ends within 500 ms); `cancel` offers a Cancel button. Its P.
+    pub fn progress(&self, place: notify::ProgressWhere, cancel: bool, title: &str) -> Result<u64, Error> {
+        let t = views_title(title);
+        let t = if t.is_empty() { "…".to_string() } else { t };
+        let rep = self.request(
+            &format!("progress {} {}", place.word(), if cancel { "cancel" } else { "-" }),
+            Some(t.as_bytes()),
+        )?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Its share done (`None`: indeterminate) and a message.
+    pub fn progress_set(&self, progress: u64, percent: Option<u8>, message: &str) -> Result<(), Error> {
+        let pct = percent.map(|p| p.min(100).to_string()).unwrap_or_else(|| "-".into());
+        let m: String = message.replace('\n', " ").chars().take(200).collect();
+        self.request(&format!("progress-set {progress} {pct}"), Some(m.as_bytes())).map(|_| ())
+    }
+
+    /// Removes it.
+    pub fn progress_end(&self, progress: u64) -> Result<(), Error> {
+        self.request(&format!("progress-end {progress}"), None).map(|_| ())
+    }
+
     // ---- reading ----
 
     fn reader<R: BufRead>(&self, mut input: R, tx: Sender<Msg>) {
@@ -1298,6 +1373,16 @@ impl Ext {
                             }
                         }
                         "action" => h.action(self, &ev.body),
+                        "notify" => {
+                            if let Some((note, nev)) = notify::parse_note_event(&ev) {
+                                h.note_event(self, note, nev);
+                            }
+                        }
+                        "progress" => {
+                            if let Some(p) = notify::parse_progress_cancel(&ev) {
+                                h.progress_cancel(self, p);
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             break;

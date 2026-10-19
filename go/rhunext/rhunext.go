@@ -306,6 +306,22 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				continue
 			}
 			h.Event(ext, ev)
+		case "notify":
+			if nl, ok := h.(NoteListener); ok {
+				if nev, ok := parseNoteEvent(ev); ok {
+					nl.NoteEvent(ext, nev)
+					continue
+				}
+			}
+			h.Event(ext, ev)
+		case "progress":
+			if pc, ok := h.(ProgressCanceller); ok {
+				if p, ok := parseProgressCancel(ev); ok {
+					pc.ProgressCancel(ext, p)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		default:
 			h.Event(ext, ev)
 		}

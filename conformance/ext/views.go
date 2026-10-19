@@ -28,6 +28,8 @@ type rview struct {
 	id     int64
 	key    string
 	place  string
+	vkind  string // tree or log
+	lines  int    // a log's lines given
 	rev    int64
 	parent map[string]string   // node -> parent ("" the root)
 	kids   map[string][]string // parent -> children in order
@@ -43,6 +45,7 @@ func newRview(id int64, key, place string) *rview {
 
 func (v *rview) clone() *rview {
 	c := newRview(v.id, v.key, v.place)
+	c.vkind, c.lines = v.vkind, v.lines
 	c.rev = v.rev
 	for k, x := range v.parent {
 		c.parent[k] = x
@@ -139,13 +142,19 @@ func (h *host) openRetained() {
 		h.rviews = map[int64]*rview{}
 	}
 	for _, key := range h.manifestViews() {
-		if h.m.views[key+".kind"] != "tree" {
+		kind := h.m.views[key+".kind"]
+		if kind == "log" && !h.features["view-log"] {
+			h.warn("view-log", fmt.Sprintf("[views] %s is a log but view-log was not said after hello 1: rhun shows it as unsupported", key))
+			continue
+		}
+		if kind != "tree" && kind != "log" {
 			continue
 		}
 		h.nextView++
 		v := newRview(h.nextView, key, h.m.views[key+".place"])
+		v.vkind = kind
 		h.rviews[v.id] = v
-		h.write(fmt.Sprintf("0 view %d open tree %s %s\n0 view %d visible 1\n", v.id, v.place, key, v.id))
+		h.write(fmt.Sprintf("0 view %d open %s %s %s\n0 view %d visible 1\n", v.id, kind, v.place, key, v.id))
 	}
 }
 
@@ -193,6 +202,37 @@ func (h *host) retainedRequest(id int64, verb string, args []string, body []byte
 			}
 		}
 		rerr("refused", "no such view")
+	case "vtab":
+		if len(args) < 2 {
+			h.fail("view-tree", fmt.Sprintf("vtab takes KIND TITLE, got %q", strings.Join(args, " ")))
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		kind := args[0]
+		if kind != "tree" && !(kind == "log" && h.features["view-log"]) {
+			h.fail("view-tree", fmt.Sprintf("vtab %s: a kind it did not agree (tree, or log with view-log)", kind))
+			rerr("unknown", "no such request")
+			return
+		}
+		if title := strings.Join(args[1:], " "); len(title) > 80 {
+			h.warn("view-tree", "vtab: a title over 80 bytes is cut")
+		}
+		tabs := len(h.views)
+		for _, v := range h.rviews {
+			if v.place == "tab" {
+				tabs++
+			}
+		}
+		if tabs >= 8 {
+			rerr("toobig", "8 views")
+			return
+		}
+		h.nextView++
+		v := newRview(h.nextView, "-", "tab")
+		v.vkind = kind
+		h.rviews[v.id] = v
+		reply(fmt.Sprintf("ok %d %d", id, v.id))
+		h.write(fmt.Sprintf("0 view %d open %s tab -\n0 view %d visible 1\n", v.id, kind, v.id))
 	case "vreveal":
 		if len(args) != 3 {
 			h.fail("view-tree", fmt.Sprintf("vreveal takes VIEW HOW LEN, got %q", strings.Join(args, " ")))
@@ -201,7 +241,7 @@ func (h *host) retainedRequest(id int64, verb string, args []string, body []byte
 		}
 		n, _ := strconv.ParseInt(args[0], 10, 64)
 		v := h.rviews[n]
-		if v == nil {
+		if v == nil || v.vkind == "log" {
 			rerr("noview", "no such view")
 			return
 		}
@@ -217,6 +257,19 @@ func (h *host) retainedRequest(id int64, verb string, args []string, body []byte
 		reply(fmt.Sprintf("ok %d", id))
 	}
 }
+
+// retainedUnview closes a retained view's own tab (vtab); false when VIEW is not one
+func (h *host) retainedUnview(id int64, args []string, reply func(string)) bool {
+	n, _ := strconv.ParseInt(strings.Join(args, ""), 10, 64)
+	if v := h.rviews[n]; v != nil && v.place == "tab" {
+		delete(h.rviews, n)
+		reply(fmt.Sprintf("ok %d", id))
+		return true
+	}
+	return false
+}
+
+var logSevs = map[string]bool{"trace": true, "debug": true, "info": true, "warn": true, "error": true, "-": true}
 
 // record reads "NAME ARGS... LEN" LF and LEN bytes: fields, data, rest
 func readRecord(b []byte) ([]string, []byte, []byte, string) {
@@ -336,6 +389,42 @@ func applyPatch(v *rview, body []byte) (string, string) {
 		b = rest
 		bad := func(w string) (string, string) { return "syntax", fmt.Sprintf("op %d (%s)", op, w) }
 		switch f[0] {
+		case "kids", "add", "set", "del", "expand", "collapse", "select-mode":
+			if v.vkind == "log" {
+				return "noview", "an op for another kind of view"
+			}
+		case "log", "clear":
+			if v.vkind != "log" {
+				return "noview", "an op for another kind of view"
+			}
+		}
+		switch f[0] {
+		case "log":
+			if len(f) != 3 {
+				return bad("log N LEN")
+			}
+			cnt, err := strconv.Atoi(f[1])
+			if err != nil || cnt < 0 {
+				return bad("log N LEN")
+			}
+			lines := bytes.Split(data, []byte("\n"))
+			if len(data) == 0 || data[len(data)-1] != '\n' || len(lines)-1 != cnt {
+				if cnt != 0 || len(data) != 0 {
+					return bad("log: N lines, each SEV TEXT and LF")
+				}
+			}
+			for _, l := range lines[:len(lines)-1] {
+				sev, _, _ := bytes.Cut(l, []byte(" "))
+				if !logSevs[string(sev)] {
+					return bad(fmt.Sprintf("log: severity %q is not trace, debug, info, warn, error or -", sev))
+				}
+			}
+			v.lines += cnt
+		case "clear":
+			if len(f) != 2 || len(data) != 0 {
+				return bad("clear 0")
+			}
+			v.lines = 0
 		case "title":
 			if len(data) > 80 || bytes.ContainsAny(data, "\n") {
 				return bad("title: one line of at most 80 bytes")
@@ -461,6 +550,17 @@ func (h *host) checkRetained() {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		v := h.rviews[id]
+		if v.vkind == "log" {
+			// the user pressed Clear, then the log went off screen
+			h.write(fmt.Sprintf("0 view %d focus 1\n0 view %d clear\n0 view %d focus 0\n0 view %d visible 0\n", id, id, id, id))
+			h.serve(300 * time.Millisecond)
+			if h.cmdExited() {
+				h.fail("view-log", "the program exited on its log view's events")
+				return
+			}
+			h.ok(fmt.Sprintf("log %s takes focus, clear and visible events", v.key))
+			continue
+		}
 		if v.count() == 0 && h.patches == 0 {
 			h.warn("view-tree", fmt.Sprintf("view %s got no patch after it opened: it shows Loading", v.key))
 		}
