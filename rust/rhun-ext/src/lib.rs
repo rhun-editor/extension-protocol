@@ -37,6 +37,7 @@ pub mod complete;
 pub mod lang;
 pub mod picture;
 pub mod scm;
+pub mod scmpanel;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
@@ -61,6 +62,7 @@ pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
     LogEntry, LogOf, QuickDiffRequest,
 };
+pub use scmpanel::{ScmAction, ScmGroup, ScmPanel, ScmResource};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
@@ -158,6 +160,11 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Version control panels: [`Ext::scm_register`], [`Ext::scm_update`], [`Ext::scm_input`].
+    Scm,
+    /// Commands with where they came from and a body: [`Handler::command_args`]. A minimal hook
+    /// (the run event's FROM and body); fuller command-args and run-command support replaces it.
+    CommandArgs,
 }
 
 impl Feature {
@@ -181,6 +188,8 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::Scm => "scm",
+            Feature::CommandArgs => "command-args",
         }
     }
 }
@@ -509,6 +518,12 @@ pub trait Handler: Send {
     /// One of the extension's commands: `name` without the `NAME.` prefix; `doc` the active
     /// document or 0.
     fn command(&mut self, _ext: &Ext, _name: &str, _doc: Doc) {}
+    /// With [`Feature::CommandArgs`] agreed, every command arrives here instead: `from` is
+    /// `palette`, `key`, `menu` or `ref`, and `body` a menu's `TARGET` LF + the item's args, a
+    /// command reference's ARGS or a key binding's ARGS. The default calls [`Handler::command`].
+    fn command_args(&mut self, ext: &Ext, name: &str, doc: Doc, _from: &str, _body: &[u8]) {
+        self.command(ext, name, doc)
+    }
     /// One of its own settings (section 6d): at start and on every change.
     fn setting(&mut self, _ext: &Ext, _key: &str, _value: &str) {}
     /// Something happened in one of its views.
@@ -1091,6 +1106,7 @@ impl Ext {
                                 | "git-blame"
                                 | "git-log"
                                 | "git-show"
+                                | "scm-input"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1134,7 +1150,9 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" {
+                    // command-args: run EXT.NAME DOC FROM LEN + body
+                    let run_body = ev.name == "run" && ev.fields.len() >= 4;
+                    if ev.name == "edits" || ev.name == "action" || run_body {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1220,7 +1238,12 @@ impl Ext {
                                 .map(|(_, c)| c)
                                 .unwrap_or(&full)
                                 .to_string();
-                            h.command(self, &short, ev.num(1));
+                            if ev.fields.len() >= 4 {
+                                let from = ev.fields[2].clone();
+                                h.command_args(self, &short, ev.num(1), &from, &ev.body);
+                            } else {
+                                h.command(self, &short, ev.num(1));
+                            }
                         }
                         "setting" => {
                             let mut it = ev.rest.splitn(2, ' ');

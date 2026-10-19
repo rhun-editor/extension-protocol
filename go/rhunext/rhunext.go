@@ -262,7 +262,11 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 		case "run":
 			if len(ev.Args) >= 2 {
 				d, _ := strconv.ParseInt(ev.Args[1], 10, 64)
-				h.Run(ext, ev.Args[0], Doc(d))
+				if ar, ok := h.(ArgsRunner); ok && len(ev.Args) >= 4 {
+					ar.RunArgs(ext, ev.Args[0], Doc(d), ev.Args[2], ev.Body)
+				} else {
+					h.Run(ext, ev.Args[0], Doc(d))
+				}
 			}
 		case "bye":
 			ext.closeConnection(errors.New("rhun said bye"))
@@ -396,6 +400,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "run" && len(ev.Args) >= 4 {
+			lenAt = 3 // command-args: run EXT.NAME DOC FROM LEN
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the

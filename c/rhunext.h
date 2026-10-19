@@ -152,6 +152,12 @@ typedef struct {
     /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
      * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
     int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
+    /* With "command-args" agreed every command comes here instead of command (when set): from is
+     * palette, key, menu or ref; the body a menu's "TARGET" LF + the item's args, a command
+     * reference's ARGS or a key binding's ARGS. A minimal hook (the run event's FROM and body);
+     * fuller command-args and run-command support replaces it. */
+    void (*command_args)(rx_ext *ext, const char *name, rx_doc doc, const char *from,
+                         const unsigned char *body, size_t len, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -236,6 +242,24 @@ int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, r
 /* what quickdiff gets; rx_quickdiff_refresh asks rhun to ask again for a file (NULL: every file) */
 typedef struct rx_quickdiff_ask_s { int64_t id; rx_doc doc; int64_t version; } rx_quickdiff_ask;
 int rx_quickdiff_refresh(rx_ext *ext, const char *path);
+/* Feature "scm": version control panels. rx_scm_register adds a sidebar section for the
+ * repository at root (absolute) and returns its handle (-1 on an error); rx_scm_update replaces
+ * what it shows with a body built by the appenders below, in the body's order: rx_scm_head, its
+ * nactions buttons (rx_scm_action), then per group rx_scm_group, the group's actions, and its
+ * resources, each rx_scm_res followed by nrec records (rx_scm_click first, rx_scm_action,
+ * rx_scm_tip). Icons are tree icon names ("check", "refresh", NULL for none); colors added,
+ * modified, deleted, conflict, untracked, ignored or NULL. Texts are at most 200 bytes without
+ * CR or LF (a tip 1000); rhun checks the rest and answers syntax. */
+int64_t rx_scm_register(rx_ext *ext, const char *root, const char *label);
+int rx_scm_update(rx_ext *ext, int64_t scm, const rx_buf *body);
+int rx_scm_input(rx_ext *ext, int64_t scm, rx_buf *out);           /* the message box's text */
+int rx_scm_input_set(rx_ext *ext, int64_t scm, const char *text);  /* "" clears it */
+void rx_scm_head(rx_buf *b, const char *status, const char *placeholder, int nactions, int ngroups);
+void rx_scm_action(rx_buf *b, const char *icon, const char *command, const char *args, size_t args_len, const char *label);
+void rx_scm_group(rx_buf *b, const char *id, const char *label, int nactions, int nres);
+void rx_scm_res(rx_buf *b, char code, const char *color, const char *path, int nrec);
+void rx_scm_click(rx_buf *b, const char *command, const char *args, size_t args_len);
+void rx_scm_tip(rx_buf *b, const char *tip);
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -565,6 +589,11 @@ static const char rx_bad_len[] = "a body's length that is not a decimal of at mo
 /* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
+    if (strncmp(line, "0 run ", 6) == 0) {      /* command-args: 0 run EXT.NAME DOC FROM LEN */
+        int spaces = 0;
+        for (const char *c = line; *c; c++) spaces += *c == ' ';
+        return spaces >= 5;
+    }
     /* ID commit-message LEN */
     if (line[0] < '1' || line[0] > '9') return 0;
     const char *sp = strchr(line, ' ');
@@ -633,7 +662,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
-                     strncmp(verb_args, "git-show ", 9) == 0;
+                     strncmp(verb_args, "git-show ", 9) == 0 || strncmp(verb_args, "scm-input ", 10) == 0;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {
@@ -1080,6 +1109,72 @@ int rx_quickdiff_refresh(rx_ext *ext, const char *path) {
     char line[64];
     snprintf(line, sizeof line, "quickdiff-refresh %zu", strlen(path));
     return rx_request(ext, line, path, strlen(path), NULL, NULL);
+}
+
+int64_t rx_scm_register(rx_ext *ext, const char *root, const char *label) {
+    if (!rx_has(ext, "scm")) {
+        snprintf(ext->error, sizeof ext->error, "unknown scm was not negotiated");
+        return -1;
+    }
+    rx_buf body = {NULL, 0, 0};
+    rx_buf_fmt(&body, "%zu %zu\n%s%s", strlen(root), strlen(label), root, label);
+    char line[64];
+    snprintf(line, sizeof line, "scm-register %zu", body.len);
+    int64_t h = rx_req_num(ext, line, body.data, body.len);
+    rx_buf_free(&body);
+    return h;
+}
+
+int rx_scm_update(rx_ext *ext, int64_t scm, const rx_buf *body) {
+    char line[64];
+    snprintf(line, sizeof line, "scm-update %lld %zu", (long long)scm, body->len);
+    return rx_request(ext, line, body->data, body->len, NULL, NULL);
+}
+
+int rx_scm_input(rx_ext *ext, int64_t scm, rx_buf *out) {
+    char line[64];
+    snprintf(line, sizeof line, "scm-input %lld", (long long)scm);
+    return rx_request(ext, line, NULL, 0, NULL, out);
+}
+
+int rx_scm_input_set(rx_ext *ext, int64_t scm, const char *text) {
+    char line[64];
+    snprintf(line, sizeof line, "scm-input-set %lld %zu", (long long)scm, strlen(text));
+    return rx_request(ext, line, text, strlen(text), NULL, NULL);
+}
+
+void rx_scm_head(rx_buf *b, const char *status, const char *placeholder, int nactions, int ngroups) {
+    if (!placeholder) placeholder = "";
+    rx_buf_fmt(b, "%zu %zu %d %d\n", strlen(status), strlen(placeholder), nactions, ngroups);
+    rx_buf_str(b, status);
+    rx_buf_str(b, placeholder);
+}
+
+void rx_scm_action(rx_buf *b, const char *icon, const char *command, const char *args, size_t args_len, const char *label) {
+    if (!label) label = "";
+    rx_buf_fmt(b, "action %s %s %zu %zu\n", icon && *icon ? icon : "-", command, args ? args_len : 0, strlen(label));
+    if (args) rx_buf_add(b, args, args_len);
+    rx_buf_str(b, label);
+}
+
+void rx_scm_group(rx_buf *b, const char *id, const char *label, int nactions, int nres) {
+    rx_buf_fmt(b, "group %s %zu %d %d\n", id, strlen(label), nactions, nres);
+    rx_buf_str(b, label);
+}
+
+void rx_scm_res(rx_buf *b, char code, const char *color, const char *path, int nrec) {
+    rx_buf_fmt(b, "res %c %s %zu %d\n", code, color && *color ? color : "-", strlen(path), nrec);
+    rx_buf_str(b, path);
+}
+
+void rx_scm_click(rx_buf *b, const char *command, const char *args, size_t args_len) {
+    rx_buf_fmt(b, "command %s %zu\n", command, args ? args_len : 0);
+    if (args) rx_buf_add(b, args, args_len);
+}
+
+void rx_scm_tip(rx_buf *b, const char *tip) {
+    rx_buf_fmt(b, "tip %zu\n", strlen(tip));
+    rx_buf_str(b, tip);
 }
 
 int rx_cmd(rx_ext *ext, const char *name) {
@@ -2473,6 +2568,10 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
             if (h->event) h->event(ext, &ev, user);
             if (strcmp(f[1], "ready") == 0 && h->ready) {
                 h->ready(ext, strcmp(ev.rest, "-") == 0 ? "" : ev.rest, user);
+            } else if (strcmp(f[1], "run") == 0 && n >= 6 && h->command_args) {
+                const char *dot = strchr(f[2], '.');
+                h->command_args(ext, dot ? dot + 1 : f[2], atoll(f[3]), f[4],
+                                m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "run") == 0 && n >= 4 && h->command) {
                 const char *dot = strchr(f[2], '.');
                 h->command(ext, dot ? dot + 1 : f[2], atoll(f[3]), user);
