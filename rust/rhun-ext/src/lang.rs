@@ -17,7 +17,7 @@ pub const MAX_KIND: usize = 40;
 pub const MAX_PATH: usize = 4096;
 
 /// One line, at most `max` bytes, cut at a character.
-fn field(s: &str, max: usize) -> String {
+pub(crate) fn field(s: &str, max: usize) -> String {
     let mut s = one_line(s);
     if s.len() > max {
         let mut cut = max;

@@ -1106,3 +1106,198 @@ fn provides_needs_the_feature() {
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+// ---- navigation, prepare-rename, partial-format, code-actions (go/rhunext/actions_test.go, the
+// same bytes)
+
+struct ActionsProbe;
+
+impl Handler for ActionsProbe {
+    fn declaration(&mut self, _ext: &Ext, req: &rhun_ext::PosRequest) -> Vec<rhun_ext::Location> {
+        use rhun_ext::{Location, Target};
+        vec![Location::new(Target::Doc(req.doc), rg(1, 1, 1, 2)).text("d")]
+    }
+    fn implementation_stream(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::PosRequest,
+        out: &rhun_ext::Stream,
+    ) -> Vec<rhun_ext::Location> {
+        use rhun_ext::{Location, Target};
+        let _ = out.part_locations(&[Location::new(Target::Doc(req.doc), rg(1, 1, 1, 2))]);
+        vec![Location::new(Target::Doc(req.doc), rg(2, 1, 2, 2))]
+    }
+    fn prepare_rename(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::PosRequest,
+    ) -> Result<Option<rhun_ext::PreparedRename>, String> {
+        match req.at.line {
+            9 => Err("You cannot rename a keyword".into()),
+            8 => Ok(None),
+            _ => Ok(Some(rhun_ext::PreparedRename::new(
+                rg(2, 9, 2, 14),
+                "total",
+            ))),
+        }
+    }
+    fn range_format(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::RangeFormatRequest,
+    ) -> rhun_ext::WorkspaceEdit {
+        let mut w = rhun_ext::WorkspaceEdit::new();
+        if req.trim && !req.final_newline && req.tab_width == 4 && req.spaces {
+            w = w.doc(
+                req.doc,
+                req.version,
+                vec![rhun_ext::TextEdit::new(req.range, "x")],
+            );
+        }
+        w
+    }
+    fn type_format(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::TypeFormatRequest,
+    ) -> rhun_ext::WorkspaceEdit {
+        let mut w = rhun_ext::WorkspaceEdit::new();
+        if req.ch == "newline" {
+            w = w.doc(
+                req.doc,
+                req.version,
+                vec![rhun_ext::TextEdit::new(Range::new(req.at, req.at), "  ")],
+            );
+        }
+        w
+    }
+    fn code_actions(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::CodeActionsRequest,
+    ) -> Vec<rhun_ext::Action> {
+        use rhun_ext::{Action, CommandRef};
+        vec![
+            Action::new("quickfix", "Fix")
+                .preferred()
+                .resolve(b"R")
+                .fixes(&["d1"]),
+            Action::new("refactor.extract", "Extract").command(CommandRef::new("extract", b"a b")),
+            Action::new("quickfix", "Cannot").disabled("No fix here"),
+            Action::new("quickfix", "Nothing"),
+        ]
+    }
+    fn code_action_resolve(
+        &mut self,
+        _ext: &Ext,
+        req: &rhun_ext::ActionResolveRequest,
+    ) -> Result<rhun_ext::ResolvedAction, String> {
+        if req.data == b"no" {
+            return Err("The fix\nis gone".into());
+        }
+        let text = String::from_utf8_lossy(&req.data);
+        let w = rhun_ext::WorkspaceEdit::new().doc(
+            req.doc,
+            req.version,
+            vec![rhun_ext::TextEdit::new(rg(1, 1, 1, 1), &text)],
+        );
+        Ok(rhun_ext::ResolvedAction {
+            edit: Some(w),
+            command: Some(rhun_ext::CommandRef::new("fix", b"z")),
+        })
+    }
+}
+
+#[test]
+fn navigation_rename_format_and_actions() {
+    let feats = vec![
+        Feature::Navigation,
+        Feature::PrepareRename,
+        Feature::PartialFormat,
+        Feature::CodeActions,
+        Feature::QueryStream,
+    ];
+    let (mut host, done) = session(feats, ActionsProbe);
+    assert_eq!(
+        host.line(),
+        "hello 1 navigation prepare-rename partial-format code-actions query-stream"
+    );
+    host.send(
+        "0 features navigation prepare-rename partial-format code-actions query-stream\n0 ready -\n",
+    );
+    host.send("2 declaration 4 7 1 1 invoked -\n");
+    answer(&mut host, 2, "1\n1 1 1 2 2 1\n#4d");
+    host.send("3 prepare-rename 4 7 2 10 invoked -\n");
+    answer(&mut host, 3, "2 9 2 14 5\ntotal");
+    host.send("4 prepare-rename 4 7 9 1 invoked -\n");
+    assert_eq!(host.line(), "error 4 refused You cannot rename a keyword");
+    host.send("5 prepare-rename 4 7 8 1 invoked -\n");
+    answer(&mut host, 5, "");
+    host.send("6 range-format 4 7 1 1 2 1 4 yes yes no\n");
+    answer(&mut host, 6, "1\n2 7 1\n#41 1 2 1 1\nx");
+    host.send("7 type-format 4 7 3 5 newline 4 yes no yes\n");
+    answer(&mut host, 7, "1\n2 7 1\n#43 5 3 5 2\n  ");
+    host.send("8 code-actions 4 7 1 1 1 1 invoked quickfix -\n");
+    answer(
+        &mut host,
+        8,
+        "2\nquickfix 3 0 33\nFixpreferred 0\nresolve 1\nRfixes 2\nd1quickfix 6 0 23\nCannotdisabled 11\nNo fix here",
+    );
+    host.send("9 code-actions 4 7 1 1 1 1 invoked - d1,d2\n");
+    answer(
+        &mut host,
+        9,
+        "3\nquickfix 3 0 33\nFixpreferred 0\nresolve 1\nRfixes 2\nd1refactor.extract 7 0 21\n\
+         Extractcommand extract 3\na bquickfix 6 0 23\nCannotdisabled 11\nNo fix here",
+    );
+    host.send("10 code-action-resolve 4 7 1\nR");
+    answer(
+        &mut host,
+        10,
+        "21 15\n1\n2 7 1\n#41 1 1 1 1\nRcommand fix 1\nz",
+    );
+    host.send("11 code-action-resolve 4 7 2\nno");
+    assert_eq!(host.line(), "error 11 refused The fix is gone");
+    host.send("12 code-actions 4 7 1 1 1 1 auto refactor -\n");
+    answer(
+        &mut host,
+        12,
+        "1\nrefactor.extract 7 0 21\nExtractcommand extract 3\na b",
+    );
+    // implementation streams a part first; type definition has no answer of its own
+    host.send("13 implementation 4 7 1 1 invoked -\n");
+    let part = "1\n1 1 1 2 2 0\n#4";
+    assert_eq!(host.line(), format!("1 query-part 13 {}", part.len()));
+    assert_eq!(host.body(part.len()), part);
+    host.send("ok 1\n");
+    answer(&mut host, 13, "1\n2 1 2 2 2 0\n#4");
+    host.send("14 type-definition 4 7 1 1 invoked -\n");
+    answer(&mut host, 14, "0\n");
+    // requests that do not parse are unknown
+    host.send("15 range-format 4 7 1 1 2 1 4 yes yes\n");
+    assert!(host.line().starts_with("error 15 unknown"));
+    host.send("16 code-actions 4 7 1 1 1 1 later - -\n");
+    assert!(host.line().starts_with("error 16 unknown"));
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+
+    // without the features every request is unknown, and the resolve request's body is read past
+    let (mut host, done) = session(vec![Feature::Rename, Feature::Format], ActionsProbe);
+    assert_eq!(host.line(), "hello 1 rename format");
+    host.send("0 features rename format\n0 ready -\n");
+    for (id, req) in [
+        (2, "declaration 4 7 1 1 invoked -\n"),
+        (3, "type-definition 4 7 1 1 invoked -\n"),
+        (4, "implementation 4 7 1 1 invoked -\n"),
+        (5, "prepare-rename 4 7 2 10 invoked -\n"),
+        (6, "range-format 4 7 1 1 2 1 4 yes yes no\n"),
+        (7, "type-format 4 7 3 5 newline 4 yes no yes\n"),
+        (8, "code-actions 4 7 1 1 1 1 invoked - -\n"),
+        (9, "code-action-resolve 4 7 1\nR"),
+    ] {
+        host.send(&format!("{id} {req}"));
+        assert_eq!(host.line(), format!("error {id} unknown no such request"));
+    }
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}

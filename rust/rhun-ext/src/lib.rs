@@ -30,10 +30,13 @@
 //! [`Feature::Symbols`], [`Feature::Actions`], [`Feature::Rename`] and [`Feature::Format`] for
 //! language support (the [`Handler`] methods of the same names answer them). Protocol 1.1 adds
 //! [`Feature::QueryStream`] (parts and progress through a [`Stream`]), [`Feature::ProviderScope`]
-//! ([`Ext::provides`]), [`Feature::CompleteItems`] and [`Feature::SignatureList`].
+//! ([`Ext::provides`]), [`Feature::CompleteItems`], [`Feature::SignatureList`],
+//! [`Feature::Navigation`], [`Feature::PrepareRename`], [`Feature::PartialFormat`] and
+//! [`Feature::CodeActions`].
 
 #![allow(clippy::needless_doctest_main)]
 
+pub mod actions;
 pub mod chart;
 pub mod complete;
 pub mod lang;
@@ -52,6 +55,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+pub use actions::{
+    encode_code_actions, Action, ActionResolveRequest, CodeActionsRequest, CommandRef,
+    PreparedRename, RangeFormatRequest, ResolvedAction, TypeFormatRequest,
+};
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, Resolution, ResolveRequest,
     SignatureHelp, SignatureInfo, SignatureList, SignatureRequest,
@@ -160,15 +167,22 @@ pub enum Feature {
     CompleteItems,
     /// Every overload in signature help: [`Handler::signatures`] (protocol 1.1).
     SignatureList,
+    /// Go to Declaration, Type Definition and Implementation: [`Handler::declaration`],
+    /// [`Handler::type_definition`], [`Handler::implementation`] (protocol 1.1).
+    Navigation,
+    /// What F2 selects and fills the prompt with: [`Handler::prepare_rename`] (protocol 1.1).
+    PrepareRename,
+    /// Format Selection and formatting as you type: [`Handler::range_format`] and
+    /// [`Handler::type_format`] (protocol 1.1).
+    PartialFormat,
+    /// Code actions with hierarchical kinds, resolve data and commands, in place of v1's
+    /// `actions`: [`Handler::code_actions`] and [`Handler::code_action_resolve`] (protocol 1.1).
+    CodeActions,
     // Protocol 1.1 features this crate names but does not answer yet.
     HoverQuery,
-    Navigation,
     SelectionRanges,
     Hierarchy,
     WorkspaceSymbols,
-    PrepareRename,
-    PartialFormat,
-    CodeActions,
     FileDiagnostics,
     DocumentLinks,
 }
@@ -616,6 +630,74 @@ pub trait Handler: Send {
     /// `None` hides the help.
     fn signatures(&mut self, _ext: &Ext, _req: &SignatureRequest) -> Option<SignatureList> {
         None
+    }
+    /// rhun asks where the symbol at the cursor is declared (navigation): as
+    /// [`Handler::definition`].
+    fn declaration(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// rhun asks where the type of the symbol at the cursor is defined (navigation).
+    fn type_definition(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// rhun asks for the implementations of the symbol at the cursor (navigation).
+    fn implementation(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Location> {
+        Vec::new()
+    }
+    /// Declarations that may come in parts; the answer holds the rest.
+    fn declaration_stream(&mut self, ext: &Ext, req: &PosRequest, _out: &Stream) -> Vec<Location> {
+        self.declaration(ext, req)
+    }
+    /// Type definitions that may come in parts; the answer holds the rest.
+    fn type_definition_stream(
+        &mut self,
+        ext: &Ext,
+        req: &PosRequest,
+        _out: &Stream,
+    ) -> Vec<Location> {
+        self.type_definition(ext, req)
+    }
+    /// Implementations that may come in parts; the answer holds the rest.
+    fn implementation_stream(
+        &mut self,
+        ext: &Ext,
+        req: &PosRequest,
+        _out: &Stream,
+    ) -> Vec<Location> {
+        self.implementation(ext, req)
+    }
+    /// F2 asks before the rename prompt opens (prepare-rename): the range to select and the name
+    /// to start with; `None` for the word at the cursor; why nothing can be renamed there (shown
+    /// to the user; neither the prompt nor a file rename follows).
+    fn prepare_rename(
+        &mut self,
+        _ext: &Ext,
+        _req: &PosRequest,
+    ) -> Result<Option<PreparedRename>, String> {
+        Ok(None)
+    }
+    /// rhun asks to format a range of a document (partial-format): edits for that document only.
+    fn range_format(&mut self, _ext: &Ext, _req: &RangeFormatRequest) -> WorkspaceEdit {
+        WorkspaceEdit::default()
+    }
+    /// A trigger character was typed (partial-format): edits for that document only, applied
+    /// while it is still at the request's version.
+    fn type_format(&mut self, _ext: &Ext, _req: &TypeFormatRequest) -> WorkspaceEdit {
+        WorkspaceEdit::default()
+    }
+    /// rhun asks for code actions (code-actions, in place of [`Handler::actions`]). Actions whose
+    /// kind does not match the kinds asked ([`CodeActionsRequest::wants`]) are left out.
+    fn code_actions(&mut self, _ext: &Ext, _req: &CodeActionsRequest) -> Vec<Action> {
+        Vec::new()
+    }
+    /// The user chose an action with resolve data and no edit (code-actions): its edit and
+    /// command; an error says nothing comes.
+    fn code_action_resolve(
+        &mut self,
+        _ext: &Ext,
+        _req: &ActionResolveRequest,
+    ) -> Result<ResolvedAction, String> {
+        Err("nothing to resolve".to_string())
     }
 }
 
@@ -1316,6 +1398,65 @@ impl Ext {
                         "references" => PosRequest::parse(&fields).map(|r| {
                             Ok(lang::encode_locations(&h.references_stream(self, &r, &out)))
                         }),
+                        "declaration" if self.has(Feature::Navigation) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(lang::encode_locations(
+                                    &h.declaration_stream(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "type-definition" if self.has(Feature::Navigation) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(lang::encode_locations(
+                                    &h.type_definition_stream(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "implementation" if self.has(Feature::Navigation) => {
+                            PosRequest::parse(&fields).map(|r| {
+                                Ok(lang::encode_locations(
+                                    &h.implementation_stream(self, &r, &out),
+                                ))
+                            })
+                        }
+                        "prepare-rename" if self.has(Feature::PrepareRename) => {
+                            PosRequest::parse(&fields).map(|r| match h.prepare_rename(self, &r) {
+                                Ok(p) => Ok(p.map(|p| p.encode()).unwrap_or_default()),
+                                Err(why) => Err(("refused", why)),
+                            })
+                        }
+                        "range-format" if self.has(Feature::PartialFormat) => {
+                            RangeFormatRequest::parse(&fields).map(|r| {
+                                h.range_format(self, &r)
+                                    .encode()
+                                    .map_err(|why| ("toobig", why))
+                            })
+                        }
+                        "type-format" if self.has(Feature::PartialFormat) => {
+                            TypeFormatRequest::parse(&fields).map(|r| {
+                                h.type_format(self, &r)
+                                    .encode()
+                                    .map_err(|why| ("toobig", why))
+                            })
+                        }
+                        "code-actions" if self.has(Feature::CodeActions) => {
+                            CodeActionsRequest::parse(id, &fields).map(|r| {
+                                let acts: Vec<Action> = h
+                                    .code_actions(self, &r)
+                                    .into_iter()
+                                    .filter(|a| r.wants(&a.kind_word()))
+                                    .collect();
+                                Ok(encode_code_actions(&acts))
+                            })
+                        }
+                        "code-action-resolve" if self.has(Feature::CodeActions) => {
+                            ActionResolveRequest::parse(id, &fields, &data).map(|r| {
+                                match h.code_action_resolve(self, &r) {
+                                    Ok(res) => res.encode().map_err(|why| ("toobig", why)),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
                         "symbols" => PosRequest::parse(&fields)
                             .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
                         "actions" => ActionsRequest::parse(&fields)
