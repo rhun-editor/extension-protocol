@@ -29,9 +29,12 @@
  * "query-stream" (rx_stream_part, rx_stream_progress), "provider-scope" (rx_provides),
  * "complete-items" (rx_list_item_extra, complete_resolve), "signature-list" (signatures),
  * "navigation" (declaration, type_definition, implementation), "prepare-rename" (prepare_rename),
- * "partial-format" (range_format, type_format) and "code-actions" (code_actions with
- * rx_code_action, code_action_resolve), and "tests" for a test controller (rx_test_item,
- * rx_test_update, rx_test_exec and the tests handlers).
+ * "partial-format" (range_format, type_format), "code-actions" (code_actions with
+ * rx_code_action, code_action_resolve), "hover-query" (hover), "selection-ranges"
+ * (selection_ranges), "hierarchy" (call_hierarchy, calls_in, calls_out, type_hierarchy, supertypes,
+ * subtypes), "workspace-symbols" (workspace_symbols), "document-links" (document_links) and
+ * "file-diagnostics" (rx_file_diagnostics, rx_reset_diagnostics), and "tests" for a test controller
+ * (rx_test_item, rx_test_update, rx_test_exec and the tests handlers).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * The same source builds for wasm32-wasip1 (clang --target=wasm32-wasip1 with a WASI sysroot), one
  * module rhun runs itself on every system: run.wasm32-wasip1 = bin/NAME.wasm in the manifest.
@@ -255,6 +258,78 @@ typedef struct rx_test_results {
 } rx_test_results;
 typedef struct rx_test_coverage { rx_buf recs, ranges, path; int files, nranges, open; } rx_test_coverage;
 
+/* Protocol 1.1, hierarchy: calls-in, calls-out, supertypes and subtypes hand back an item's data
+ * (data[len] is 0) */
+typedef struct {
+    int64_t id;
+    const unsigned char *data;
+    size_t len;
+} rx_data_ask;
+/* selection-ranges: each selection's cursor, n of them (1 to 64) */
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;
+    int n;
+    const rx_pos *positions;
+} rx_selection_ask;
+/* workspace-symbols: the query (one line, at most 256 bytes, maybe empty; query[len] is 0) and
+ * max, a hint of how many symbols are wanted */
+typedef struct {
+    int64_t id;
+    const char *query;
+    size_t len;
+    int max;
+} rx_workspace_symbols_ask;
+/* document-links: the whole document at version */
+typedef struct {
+    int64_t id;
+    rx_doc doc;
+    int64_t version;
+} rx_doc_ask;
+/* the answers, built with rx_selection_group, rx_hierarchy_add, rx_call_add, rx_workspace_symbol
+ * and rx_link (below); the fields are the builders' own (at and npos, the request's positions, and
+ * roots are set for you in the handlers) */
+typedef struct { rx_buf ranges; int counts[64], n; rx_pos at[64]; int npos; } rx_selections;
+typedef struct { rx_buf recs; int n, full, roots; } rx_hierarchy;
+typedef struct { rx_buf recs; int n, full; } rx_calls;
+typedef struct { rx_buf recs; int n, full; } rx_workspace_symbols;
+typedef struct { rx_buf recs; int n, full; } rx_links;
+/* an item of a call or type hierarchy: kind a symbol kind word (12e; NULL is function); name one
+ * line (an empty one leaves the item out) and detail one line or NULL, each cut at 1000 bytes; the
+ * file by its absolute path, or with path NULL the open document doc; range the whole symbol and
+ * selection its name inside it (another is range); data, at most 16 KiB (else the item is left
+ * out), comes back verbatim when rhun asks about the item. */
+typedef struct {
+    const char *kind, *name, *detail, *path;
+    rx_doc doc;
+    rx_range range, selection;
+    const void *data;
+    size_t data_len;
+} rx_hierarchy_item;
+
+/* Protocol 1.1, file-diagnostics: a place related to a diagnostic (the file by its absolute path,
+ * or with path NULL the open document doc; message one line) */
+typedef struct {
+    const char *path;
+    rx_doc doc;
+    rx_range range;
+    const char *message;
+} rx_related;
+/* a diagnostic: severity error warning info hint (NULL is error; another leaves it out); message 1
+ * to 4000 bytes (cut at a character; NULL or "" leaves it out), line feeds kept; id a token of
+ * [A-Za-z0-9_.:-], at most 64 bytes, unique in the set, handed back in code-actions requests; code
+ * and source one line, cut at 100 bytes (the problem shows source(code)); href an http(s) link of at
+ * most 1000 bytes; the tags unnecessary and deprecated; at most 16 related places. NULL and 0 leave a
+ * record out, as do an id, a link or a related place rhun would refuse. */
+typedef struct {
+    rx_range range;
+    const char *severity, *message, *id, *code, *source, *href;
+    int unnecessary, deprecated;
+    const rx_related *related;
+    int nrelated;
+} rx_diagnostic;
+
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -386,6 +461,26 @@ typedef struct {
     void (*cancel_tests)(rx_ext *ext, int64_t run, void *user);
     void (*test_out)(rx_ext *ext, int64_t exec, int err, const unsigned char *data, size_t len, void *user);
     void (*test_exit)(rx_ext *ext, int64_t exec, const char *code, void *user);
+    /* Protocol 1.1, each asked only with its feature agreed, and returning 1 to answer, 0 for
+     * "unknown". hover-query: hover appends rx_hover_answer to out (req->kind is pointer or
+     * invoked), nothing to say nothing. selection-ranges: selection_ranges calls rx_selection_group
+     * once for each of req->positions, in order. hierarchy: call_hierarchy and type_hierarchy add
+     * the roots at the cursor (rx_hierarchy_add); calls_in and calls_out add calls (rx_call_add),
+     * supertypes and subtypes items, of the item whose data req holds, with parts through stream
+     * (query-stream). workspace-symbols: workspace_symbols adds rx_workspace_symbol records, with
+     * parts through stream; a new query withdraws the request. document-links: document_links
+     * adds rx_link records. */
+    int (*hover)(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user);
+    int (*selection_ranges)(rx_ext *ext, const rx_selection_ask *req, rx_selections *out, void *user);
+    int (*call_hierarchy)(rx_ext *ext, const rx_ask *req, rx_hierarchy *out, void *user);
+    int (*calls_in)(rx_ext *ext, const rx_data_ask *req, rx_stream *stream, rx_calls *out, void *user);
+    int (*calls_out)(rx_ext *ext, const rx_data_ask *req, rx_stream *stream, rx_calls *out, void *user);
+    int (*type_hierarchy)(rx_ext *ext, const rx_ask *req, rx_hierarchy *out, void *user);
+    int (*supertypes)(rx_ext *ext, const rx_data_ask *req, rx_stream *stream, rx_hierarchy *out, void *user);
+    int (*subtypes)(rx_ext *ext, const rx_data_ask *req, rx_stream *stream, rx_hierarchy *out, void *user);
+    int (*workspace_symbols)(rx_ext *ext, const rx_workspace_symbols_ask *req, rx_stream *stream,
+                             rx_workspace_symbols *out, void *user);
+    int (*document_links)(rx_ext *ext, const rx_doc_ask *req, rx_links *out, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -1033,6 +1128,59 @@ int rx_kind_wanted(const char *kinds, const char *kind);
  * out->edit.why say why). */
 void rx_code_actions_finish(rx_code_actions *l, rx_buf *out);
 int rx_resolved_finish(rx_resolved *r, rx_buf *out);
+
+/* Protocol 1.1, hover-query: the range the text describes (all 0 for the position only; one whose
+ * end comes before its start is sent so) and the text (plain, or Markdown with markdown agreed), cut
+ * at a character to fit 64 KiB. An empty text appends nothing: nothing to say. */
+void rx_hover_answer(rx_buf *out, rx_range r, const char *text, size_t len);
+/* selection-ranges: the next position's ranges, innermost first. Equal ranges are skipped, and the
+ * first that runs backwards or does not contain the one before ends the group; at most 64. A group
+ * left empty becomes the empty range at its position (it expands nothing), unless no later group has
+ * ranges: the answer then ends before it. Groups past the positions are left out, and the outermost
+ * ranges of the longest groups go until the answer fits 64 KiB. */
+void rx_selection_group(rx_selections *s, const rx_range *ranges, int n);
+/* hierarchy: an item (supertypes, subtypes; the roots: at most 64 and 256 KiB when l->roots), left
+ * out as rx_hierarchy_item says or when its range runs backwards; a call: an item and its call sites
+ * (1 to 1000: backward ones and those past 1000 are left out, a call without sites is left out).
+ * Past 1000 records or 1 MiB the rest are left out. */
+void rx_hierarchy_add(rx_hierarchy *l, const rx_hierarchy_item *it);
+void rx_call_add(rx_calls *l, const rx_hierarchy_item *it, const rx_range *sites, int nsites);
+/* workspace-symbols: a symbol anywhere in the project, the file by its absolute path or with path
+ * NULL the open document doc; kind as rx_symbol's; name one line (an empty one leaves it out) and
+ * detail (its container) NULL or one line, cut at 1000 bytes. Past 10000 or 1 MiB the rest are left
+ * out. */
+void rx_workspace_symbol(rx_workspace_symbols *l, const char *path, rx_doc doc, rx_range r, const char *kind,
+                         const char *name, const char *detail);
+/* document-links: ctrl+click on r opens target: an http or https URL, an absolute path optionally
+ * followed by :LINE or :LINE:COL, or #DOC (rx_link_target_valid; another leaves the link out, as does
+ * a range that runs backwards); tip one line or NULL, cut at 1000 bytes. Past 10000 or 1 MiB the
+ * rest are left out. */
+void rx_link(rx_links *l, rx_range r, const char *target, const char *tip);
+int rx_link_target_valid(const char *target);
+/* the bodies, appended to out, for answers built outside a handler; each empties its builder */
+void rx_selections_finish(rx_selections *s, rx_buf *out);
+void rx_hierarchy_finish(rx_hierarchy *l, rx_buf *out);
+void rx_calls_finish(rx_calls *l, rx_buf *out);
+void rx_workspace_symbols_finish(rx_workspace_symbols *l, rx_buf *out);
+void rx_links_finish(rx_links *l, rx_buf *out);
+/* query-stream parts of those answers: each sends its builder's records, which it empties */
+int rx_stream_hierarchy(rx_stream *s, rx_hierarchy *l);
+int rx_stream_calls(rx_stream *s, rx_calls *l);
+int rx_stream_workspace_symbols(rx_stream *s, rx_workspace_symbols *l);
+
+/* Protocol 1.1, file-diagnostics (needs documents = read): replaces this extension's diagnostics
+ * for a file in rhun's Problems store: the file by its absolute path (version is not sent: pass
+ * RX_ON_DISK), or with path NULL the open document doc at its current version. The file need not be
+ * open: its diagnostics show when it opens. n 0 clears them. Diagnostics left out as rx_diagnostic
+ * says, and those past 2000 or the 4 MiB body, are not sent. 0, or -1 with rx_error saying why:
+ * stale (with the document's current version), needs, nodoc, nofile (an untitled document), syntax,
+ * toobig; a target rhun would refuse fails as syntax without being sent. */
+int rx_file_diagnostics(rx_ext *ext, const char *path, rx_doc doc, int64_t version, const rx_diagnostic *diags,
+                        int n);
+/* removes every set of diagnostics this extension gave */
+int rx_reset_diagnostics(rx_ext *ext);
+/* the records alone, appended to out; count gets how many */
+void rx_file_diagnostics_records(const rx_diagnostic *diags, int n, rx_buf *out, int *count);
 
 /* Definition and references (12d): a location is a file by its absolute path, or with path NULL
  * the open document doc (an untitled one), and a range there (in the open document when the file
@@ -5080,6 +5228,390 @@ static int rx_format_options(char **f, int at, int *opt) {
     return 1;
 }
 
+/* ---- protocol 1.1 language features: hover-query, selection-ranges, hierarchy,
+ * workspace-symbols, document-links, file-diagnostics */
+
+#define RX_HOVER_MAX ((size_t)64 << 10)
+#define RX_SELECTION_MAX 64
+#define RX_SELECTION_BODY ((size_t)64 << 10)
+#define RX_ROOTS 64
+#define RX_ROOTS_BODY ((size_t)256 << 10)
+#define RX_HIERARCHY 1000
+#define RX_HIERARCHY_BODY ((size_t)1 << 20)
+#define RX_HIERARCHY_DATA ((size_t)16 << 10)
+#define RX_CALL_SITES 1000
+#define RX_DIAGNOSTICS 2000
+#define RX_DIAGNOSTICS_BODY ((size_t)4 << 20)
+#define RX_DIAGNOSTIC_MESSAGE 4000
+#define RX_RELATED 16
+
+/* a before b */
+static int rx_before(rx_pos a, rx_pos b) { return a.line < b.line || (a.line == b.line && a.col < b.col); }
+static int rx_well_formed(rx_range r) { return !rx_before(r.end, r.start); }
+static int rx_contains(rx_range a, rx_range b) { return !rx_before(b.start, a.start) && !rx_before(a.end, b.end); }
+static int rx_same_range(rx_range a, rx_range b) {
+    return a.start.line == b.start.line && a.start.col == b.start.col && a.end.line == b.end.line &&
+           a.end.col == b.end.col;
+}
+static void rx_add_range(rx_buf *b, rx_range r) {
+    rx_buf_fmt(b, "%d %d %d %d", rx_nn(r.start.line), rx_nn(r.start.col), rx_nn(r.end.line), rx_nn(r.end.col));
+}
+
+void rx_hover_answer(rx_buf *out, rx_range r, const char *text, size_t len) {
+    if (!text || !len) return;
+    if (!rx_well_formed(r)) memset(&r, 0, sizeof r);
+    size_t at = out->len;
+    rx_add_range(out, r);
+    rx_buf_add(out, "\n", 1);
+    size_t head = out->len - at;
+    rx_buf_add(out, text, rx_cut(text, len, RX_HOVER_MAX - head));
+}
+
+void rx_selection_group(rx_selections *s, const rx_range *ranges, int n) {
+    if (s->n >= RX_SELECTION_MAX) return;
+    int m = 0;
+    rx_range last;
+    memset(&last, 0, sizeof last);
+    for (int i = 0; i < n && m < RX_SELECTION_MAX; i++) {
+        rx_range r = ranges[i];
+        if (!rx_well_formed(r)) break;
+        if (m && rx_same_range(r, last)) continue;
+        if (m && !rx_contains(r, last)) break;
+        rx_buf_add(&s->ranges, &r, sizeof r);
+        last = r;
+        m++;
+    }
+    s->counts[s->n++] = m;
+}
+
+/* the groups with at most m ranges each */
+static void rx_selections_encode(const rx_selections *s, int groups, int m, rx_buf *out) {
+    const rx_range *all = (const rx_range *)(const void *)s->ranges.data;
+    size_t at = 0;
+    for (int g = 0; g < groups; g++) {
+        int c = s->counts[g];
+        if (c == 0) {
+            rx_range r = {s->at[g], s->at[g]};
+            rx_buf_str(out, "1\n");
+            rx_add_range(out, r);
+            rx_buf_add(out, "\n", 1);
+        } else {
+            int k = c < m ? c : m;
+            rx_buf_fmt(out, "%d\n", k);
+            for (int i = 0; i < k; i++) {
+                rx_add_range(out, all[at + (size_t)i]);
+                rx_buf_add(out, "\n", 1);
+            }
+        }
+        at += (size_t)c;
+    }
+}
+
+void rx_selections_finish(rx_selections *s, rx_buf *out) {
+    int groups = s->n < s->npos ? s->n : s->npos;
+    while (groups > 0 && s->counts[groups - 1] == 0) groups--;
+    int lo = 1, hi = RX_SELECTION_MAX;
+    while (lo < hi) {
+        int m = (lo + hi + 1) / 2;
+        rx_buf t = {NULL, 0, 0};
+        rx_selections_encode(s, groups, m, &t);
+        if (t.len <= RX_SELECTION_BODY) lo = m;
+        else hi = m - 1;
+        rx_buf_free(&t);
+    }
+    rx_selections_encode(s, groups, lo, out);
+    rx_buf_free(&s->ranges);
+    s->n = 0;
+}
+
+/* an item's header (without its line end) and bytes into b, or 0 when rhun would refuse it */
+static int rx_item_record(const rx_hierarchy_item *it, rx_buf *b) {
+    char tmp[32];
+    const char *name = it->name ? it->name : "", *detail = it->detail ? it->detail : "";
+    const char *t = rx_target(it->path, it->doc, tmp, sizeof tmp);
+    size_t nl = rx_cut(name, strlen(name), RX_TEXT_MAX), dl = rx_cut(detail, strlen(detail), RX_TEXT_MAX);
+    size_t tl = strlen(t);
+    if (!nl || tl > RX_PATH_MAX || it->data_len > RX_HIERARCHY_DATA || (it->data_len && !it->data) ||
+        !rx_well_formed(it->range))
+        return 0;
+    rx_range sel = rx_well_formed(it->selection) && rx_contains(it->range, it->selection) ? it->selection : it->range;
+    rx_add_word(b, it->kind, "function");
+    rx_buf_add(b, " ", 1);
+    rx_add_range(b, it->range);
+    rx_buf_add(b, " ", 1);
+    rx_add_range(b, sel);
+    rx_buf_fmt(b, " %zu %zu %zu %zu", tl, nl, dl, it->data_len);
+    return 1;
+}
+
+static void rx_item_bytes(const rx_hierarchy_item *it, rx_buf *b) {
+    char tmp[32];
+    const char *name = it->name ? it->name : "", *detail = it->detail ? it->detail : "";
+    const char *t = rx_target(it->path, it->doc, tmp, sizeof tmp);
+    rx_buf_add(b, t, strlen(t));
+    rx_add_line(b, name, rx_cut(name, strlen(name), RX_TEXT_MAX));
+    rx_add_line(b, detail, rx_cut(detail, strlen(detail), RX_TEXT_MAX));
+    rx_buf_add(b, it->data, it->data_len);
+}
+
+void rx_hierarchy_add(rx_hierarchy *l, const rx_hierarchy_item *it) {
+    int max = l->roots ? RX_ROOTS : RX_HIERARCHY;
+    size_t mark = l->recs.len;
+    if (l->n >= max) l->full = 1;
+    if (l->full || !it) return;
+    if (!rx_item_record(it, &l->recs)) {
+        l->recs.len = mark;
+        if (l->recs.data) l->recs.data[mark] = 0;
+        return;
+    }
+    rx_buf_add(&l->recs, "\n", 1);
+    rx_item_bytes(it, &l->recs);
+    rx_keep(&l->recs, mark, &l->n, &l->full, l->roots ? RX_ROOTS_BODY : RX_HIERARCHY_BODY);
+}
+
+void rx_call_add(rx_calls *l, const rx_hierarchy_item *it, const rx_range *sites, int nsites) {
+    size_t mark = l->recs.len;
+    if (l->n >= RX_HIERARCHY) l->full = 1;
+    if (l->full || !it) return;
+    rx_buf sb = {NULL, 0, 0};
+    int r = 0;
+    for (int i = 0; i < nsites && r < RX_CALL_SITES; i++) {
+        if (!rx_well_formed(sites[i])) continue;
+        rx_add_range(&sb, sites[i]);
+        rx_buf_add(&sb, "\n", 1);
+        r++;
+    }
+    if (r && rx_item_record(it, &l->recs)) {
+        rx_buf_fmt(&l->recs, " %d\n", r);
+        rx_item_bytes(it, &l->recs);
+        rx_buf_add(&l->recs, sb.data, sb.len);
+        rx_keep(&l->recs, mark, &l->n, &l->full, RX_HIERARCHY_BODY);
+    } else {
+        l->recs.len = mark;
+        if (l->recs.data) l->recs.data[mark] = 0;
+    }
+    rx_buf_free(&sb);
+}
+
+void rx_workspace_symbol(rx_workspace_symbols *l, const char *path, rx_doc doc, rx_range r, const char *kind,
+                         const char *name, const char *detail) {
+    if (l->n >= RX_RECORDS) l->full = 1;
+    if (l->full) return;
+    char tmp[32];
+    const char *t = rx_target(path, doc, tmp, sizeof tmp);
+    if (!name) name = "";
+    if (!detail) detail = "";
+    size_t tl = strlen(t), nl = rx_cut(name, strlen(name), RX_TEXT_MAX), dl = rx_cut(detail, strlen(detail), RX_TEXT_MAX);
+    size_t mark = l->recs.len;
+    if (!nl || tl > RX_PATH_MAX) return;
+    rx_add_range(&l->recs, r);
+    rx_buf_add(&l->recs, " ", 1);
+    rx_add_word(&l->recs, kind, "function");
+    rx_buf_fmt(&l->recs, " %zu %zu %zu\n", tl, nl, dl);
+    rx_buf_add(&l->recs, t, tl);
+    rx_add_line(&l->recs, name, nl);
+    rx_add_line(&l->recs, detail, dl);
+    rx_keep(&l->recs, mark, &l->n, &l->full, RX_RECORDS_BODY);
+}
+
+/* an http or https URL of at most max bytes without white space or control characters */
+static int rx_url(const char *s, size_t max) {
+    size_t n = strlen(s), p = 0;
+    char low[9] = {0};
+    for (size_t i = 0; i < 8 && i < n; i++) low[i] = (char)(s[i] >= 'A' && s[i] <= 'Z' ? s[i] + 32 : s[i]);
+    if (strncmp(low, "https://", 8) == 0) p = 8;
+    else if (strncmp(low, "http://", 7) == 0) p = 7;
+    if (!p || n == p || n > max) return 0;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)s[i] <= ' ' || s[i] == 0x7f) return 0;
+    return 1;
+}
+
+/* an absolute path: /..., a drive (C:\ or C:/) or \\server\share */
+static int rx_abs_path(const char *p) {
+    if (p[0] == '/' || (p[0] == '\\' && p[1] == '\\')) return 1;
+    return ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) && p[1] == ':' &&
+           (p[2] == '\\' || p[2] == '/');
+}
+
+/* a file rhun takes: an absolute path of at most 4096 bytes on one line, or (path NULL or "") an
+ * open document */
+static int rx_valid_target(const char *path, rx_doc doc) {
+    if (!path || !*path) return doc > 0;
+    return strlen(path) <= RX_PATH_MAX && rx_abs_path(path) && !strpbrk(path, "\r\n");
+}
+
+int rx_link_target_valid(const char *t) {
+    if (!t || !*t) return 0;
+    if (rx_url(t, RX_PATH_MAX)) return 1;
+    if (t[0] == '#') {
+        size_t n = strlen(t + 1);
+        if (n < 1 || n > 10) return 0;
+        for (size_t i = 1; i <= n; i++)
+            if (t[i] < '0' || t[i] > '9') return 0;
+        return atoll(t + 1) > 0;
+    }
+    return rx_abs_path(t) && strlen(t) <= RX_PATH_MAX + 22 && !strpbrk(t, "\r\n");
+}
+
+void rx_link(rx_links *l, rx_range r, const char *target, const char *tip) {
+    if (l->n >= RX_RECORDS) l->full = 1;
+    if (l->full || !rx_link_target_valid(target) || !rx_well_formed(r)) return;
+    if (!tip) tip = "";
+    size_t tl = strlen(target), pl = rx_cut(tip, strlen(tip), RX_TEXT_MAX), mark = l->recs.len;
+    rx_add_range(&l->recs, r);
+    rx_buf_fmt(&l->recs, " %zu %zu\n", tl, pl);
+    rx_buf_add(&l->recs, target, tl);
+    rx_add_line(&l->recs, tip, pl);
+    rx_keep(&l->recs, mark, &l->n, &l->full, RX_RECORDS_BODY);
+}
+
+void rx_hierarchy_finish(rx_hierarchy *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
+void rx_calls_finish(rx_calls *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
+void rx_workspace_symbols_finish(rx_workspace_symbols *l, rx_buf *out) {
+    rx_records_finish(&l->recs, &l->n, &l->full, out);
+}
+void rx_links_finish(rx_links *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
+
+static int rx_stream_records(rx_stream *s, rx_buf *recs, int *n, int *full) {
+    rx_buf b = {NULL, 0, 0};
+    rx_records_finish(recs, n, full, &b);
+    int r = rx_stream_part(s, b.data, b.len);
+    rx_buf_free(&b);
+    return r;
+}
+int rx_stream_hierarchy(rx_stream *s, rx_hierarchy *l) {
+    int roots = l->roots, r = rx_stream_records(s, &l->recs, &l->n, &l->full);
+    l->roots = roots;
+    return r;
+}
+int rx_stream_calls(rx_stream *s, rx_calls *l) { return rx_stream_records(s, &l->recs, &l->n, &l->full); }
+int rx_stream_workspace_symbols(rx_stream *s, rx_workspace_symbols *l) {
+    return rx_stream_records(s, &l->recs, &l->n, &l->full);
+}
+
+/* a diagnostic id: 1 to 64 of [A-Za-z0-9_.:-] */
+static int rx_diagnostic_id(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n < 1 || n > 64) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' ||
+              c == ':' || c == '-'))
+            return 0;
+    }
+    return 1;
+}
+
+/* a diagnostic's range as rhun takes it: positions of at least 1 1, the end not before the start */
+static rx_range rx_mark_range(rx_range r) {
+    if (r.start.line < 1) r.start.line = 1;
+    if (r.start.col < 1) r.start.col = 1;
+    if (r.end.line < 1) r.end.line = 1;
+    if (r.end.col < 1) r.end.col = 1;
+    if (rx_before(r.end, r.start)) r.end = r.start;
+    return r;
+}
+
+/* a record "NAME LEN" and a one-line text cut at max bytes, unless it is empty */
+static void rx_text_record(rx_buf *b, const char *name, const char *s, size_t max) {
+    size_t n = s ? rx_cut(s, strlen(s), max) : 0;
+    if (!n) return;
+    rx_buf_fmt(b, "%s %zu\n", name, n);
+    rx_add_line(b, s, n);
+}
+
+void rx_file_diagnostics_records(const rx_diagnostic *diags, int n, rx_buf *out, int *count) {
+    static const char *const sevs[] = {"error", "warning", "info", "hint"};
+    const char **ids = (const char **)calloc((size_t)(n > 0 ? n : 1), sizeof *ids);
+    if (!ids) abort();
+    int kept = 0, nids = 0;
+    size_t start = out->len;
+    for (int i = 0; i < n && kept < RX_DIAGNOSTICS; i++) {
+        const rx_diagnostic *d = &diags[i];
+        const char *sev = d->severity ? d->severity : "error";
+        int known = 0;
+        for (int k = 0; k < 4; k++) known |= strcmp(sev, sevs[k]) == 0;
+        size_t ml = d->message ? rx_cut(d->message, strlen(d->message), RX_DIAGNOSTIC_MESSAGE) : 0;
+        if (!known || !ml) continue;
+        rx_buf x = {NULL, 0, 0};
+        int fresh = rx_diagnostic_id(d->id);
+        for (int k = 0; fresh && k < nids; k++) fresh = strcmp(ids[k], d->id) != 0;
+        if (fresh) rx_buf_fmt(&x, "id %zu\n%s", strlen(d->id), d->id);
+        rx_text_record(&x, "code", d->code, 100);
+        rx_text_record(&x, "source", d->source, 100);
+        if (d->href && rx_url(d->href, 1000)) rx_buf_fmt(&x, "href %zu\n%s", strlen(d->href), d->href);
+        if (d->unnecessary) rx_buf_str(&x, "tag unnecessary 0\n");
+        if (d->deprecated) rx_buf_str(&x, "tag deprecated 0\n");
+        for (int k = 0, related = 0; d->related && k < d->nrelated && related < RX_RELATED; k++) {
+            const rx_related *r = &d->related[k];
+            if (!rx_valid_target(r->path, r->doc)) continue;
+            char tmp[32];
+            const char *t = rx_target(r->path, r->doc, tmp, sizeof tmp), *m = r->message ? r->message : "";
+            size_t tl = strlen(t), mml = rx_cut(m, strlen(m), RX_DIAGNOSTIC_MESSAGE);
+            rx_buf_str(&x, "related ");
+            rx_add_range(&x, rx_mark_range(r->range));
+            rx_buf_fmt(&x, " %zu %zu\n", tl, mml);
+            rx_buf_add(&x, t, tl);
+            rx_add_line(&x, m, mml);
+            related++;
+        }
+        rx_buf h = {NULL, 0, 0};
+        rx_add_range(&h, rx_mark_range(d->range));
+        rx_buf_fmt(&h, " %s %zu %zu\n", sev, ml, x.len);
+        int fits = out->len - start + h.len + ml + x.len + RX_PATH_MAX <= RX_DIAGNOSTICS_BODY;
+        if (fits) {
+            rx_buf_add(out, h.data, h.len);
+            rx_buf_add(out, d->message, ml);
+            rx_buf_add(out, x.data, x.len);
+            if (fresh) ids[nids++] = d->id;
+            kept++;
+        }
+        rx_buf_free(&h);
+        rx_buf_free(&x);
+        if (!fits) break;
+    }
+    free(ids);
+    *count = kept;
+}
+
+int rx_file_diagnostics(rx_ext *ext, const char *path, rx_doc doc, int64_t version, const rx_diagnostic *diags,
+                        int n) {
+    if (!rx_has(ext, "file-diagnostics")) {
+        snprintf(ext->error, sizeof ext->error, "unknown file-diagnostics was not agreed");
+        return -1;
+    }
+    int is_path = path && *path;
+    if (!rx_valid_target(path, doc)) {
+        snprintf(ext->error, sizeof ext->error, "syntax a target is an absolute path or an open document");
+        return -1;
+    }
+    if (!is_path && version < 0) {
+        snprintf(ext->error, sizeof ext->error, "syntax an open document's diagnostics need its version");
+        return -1;
+    }
+    char tmp[32], v[32] = "-";
+    const char *t = rx_target(path, doc, tmp, sizeof tmp);
+    if (!is_path) snprintf(v, sizeof v, "%lld", (long long)version);
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    int count = 0;
+    rx_buf_str(&body, t);
+    rx_file_diagnostics_records(diags, n, &body, &count);
+    rx_buf_fmt(&line, "file-diagnostics %s %d %zu %zu", v, count, strlen(t), body.len);
+    int r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    rx_buf_free(&line);
+    rx_buf_free(&body);
+    return r;
+}
+
+int rx_reset_diagnostics(rx_ext *ext) {
+    if (!rx_has(ext, "file-diagnostics")) {
+        snprintf(ext->error, sizeof ext->error, "unknown file-diagnostics was not agreed");
+        return -1;
+    }
+    return rx_request(ext, "file-diagnostics-reset", NULL, 0, NULL, NULL);
+}
+
 static void rx_answer_ai(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
                          const unsigned char *in, size_t in_len, int *ok, rx_buf *body);
 
@@ -5370,6 +5902,106 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         }
         rx_wedit_free(&r.edit);
         rx_buf_free(&r.command);
+    } else if (strcmp(verb, "hover-query") == 0 && n >= 7 && rx_nums(f, 2, 6) && h->hover && rx_has(ext, "hover-query")) {
+        rx_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        req.kind = f[6];
+        req.ch = "";
+        ok = h->hover(ext, &req, &body, user);
+    } else if (strcmp(verb, "selection-ranges") == 0 && n == 6 && rx_nums(f, 2, 6) && h->selection_ranges &&
+               rx_has(ext, "selection-ranges") && (size_t)atoll(f[5]) == data_len && atoi(f[4]) >= 1 &&
+               atoi(f[4]) <= RX_SELECTION_MAX) {
+        rx_selections *sel = (rx_selections *)calloc(1, sizeof *sel);
+        if (!sel) abort();
+        const char *p = data ? (const char *)data : "";
+        int want = atoi(f[4]), got = 0, good = 1;
+        while (*p && good) {
+            char *end;
+            long l = strtol(p, &end, 10);
+            good = end != p && *end == ' ' && l >= 0;
+            p = good ? end + 1 : p;
+            long c = good ? strtol(p, &end, 10) : 0;
+            good = good && end != p && (*end == '\n' || *end == 0) && c >= 0 && got < want;
+            if (good) {
+                sel->at[got].line = (int)l, sel->at[got].col = (int)c, got++;
+                p = *end ? end + 1 : end;
+            }
+        }
+        if (good && got == want) {
+            rx_selection_ask req;
+            req.id = stream.id;
+            req.doc = atoll(f[2]);
+            req.version = atoll(f[3]);
+            req.n = got;
+            req.positions = sel->at;
+            sel->npos = got;
+            if ((ok = h->selection_ranges(ext, &req, sel, user)) != 0) rx_selections_finish(sel, &body);
+        }
+        rx_buf_free(&sel->ranges);
+        free(sel);
+    } else if ((strcmp(verb, "call-hierarchy") == 0 || strcmp(verb, "type-hierarchy") == 0) && n >= 6 &&
+               rx_nums(f, 2, 6) && rx_has(ext, "hierarchy")) {
+        int (*fn)(rx_ext *, const rx_ask *, rx_hierarchy *, void *) = verb[0] == 'c' ? h->call_hierarchy : h->type_hierarchy;
+        rx_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        req.kind = n > 6 ? f[6] : "invoked";
+        req.ch = "";
+        rx_hierarchy l;
+        memset(&l, 0, sizeof l);
+        l.roots = 1;
+        if (fn && (ok = fn(ext, &req, &l, user)) != 0) rx_hierarchy_finish(&l, &body);
+        rx_buf_free(&l.recs);
+    } else if ((strcmp(verb, "calls-in") == 0 || strcmp(verb, "calls-out") == 0 || strcmp(verb, "supertypes") == 0 ||
+                strcmp(verb, "subtypes") == 0) && n == 3 && rx_nums(f, 2, 3) && rx_has(ext, "hierarchy") &&
+               (size_t)atoll(f[2]) == data_len) {
+        rx_data_ask req;
+        req.id = stream.id;
+        req.data = data ? data : (const unsigned char *)"";
+        req.len = data_len;
+        if (strncmp(verb, "calls-", 6) == 0) {
+            int (*fn)(rx_ext *, const rx_data_ask *, rx_stream *, rx_calls *, void *) =
+                verb[6] == 'i' ? h->calls_in : h->calls_out;
+            rx_calls l;
+            memset(&l, 0, sizeof l);
+            if (fn && (ok = fn(ext, &req, &stream, &l, user)) != 0) rx_calls_finish(&l, &body);
+            rx_buf_free(&l.recs);
+        } else {
+            int (*fn)(rx_ext *, const rx_data_ask *, rx_stream *, rx_hierarchy *, void *) =
+                verb[1] == 'u' && verb[2] == 'p' ? h->supertypes : h->subtypes;
+            rx_hierarchy l;
+            memset(&l, 0, sizeof l);
+            if (fn && (ok = fn(ext, &req, &stream, &l, user)) != 0) rx_hierarchy_finish(&l, &body);
+            rx_buf_free(&l.recs);
+        }
+    } else if (strcmp(verb, "workspace-symbols") == 0 && n == 4 && rx_nums(f, 2, 4) && h->workspace_symbols &&
+               rx_has(ext, "workspace-symbols") && (size_t)atoll(f[3]) == data_len) {
+        rx_workspace_symbols_ask req;
+        req.id = stream.id;
+        req.query = data ? (const char *)data : "";
+        req.len = data_len;
+        req.max = atoi(f[2]);
+        rx_workspace_symbols l;
+        memset(&l, 0, sizeof l);
+        if ((ok = h->workspace_symbols(ext, &req, &stream, &l, user)) != 0) rx_workspace_symbols_finish(&l, &body);
+        rx_buf_free(&l.recs);
+    } else if (strcmp(verb, "document-links") == 0 && n == 4 && rx_nums(f, 2, 4) && h->document_links &&
+               rx_has(ext, "document-links")) {
+        rx_doc_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        rx_links l;
+        memset(&l, 0, sizeof l);
+        if ((ok = h->document_links(ext, &req, &l, user)) != 0) rx_links_finish(&l, &body);
+        rx_buf_free(&l.recs);
     } else {
         rx_answer_ai(ext, h, user, f, n, data, data_len, &ok, &body);
     }

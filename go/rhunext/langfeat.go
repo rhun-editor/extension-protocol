@@ -354,6 +354,151 @@ func itemData(f []string, body []byte) ([]byte, bool) {
 	return body, err == nil && n == len(body)
 }
 
+// ---- workspace-symbols
+
+// WorkspaceSymbolsRequest is "workspace-symbols MAX LEN" with the query (one line, at most 256
+// bytes, maybe empty) as its body: Max is a hint of how many symbols are wanted.
+type WorkspaceSymbolsRequest struct {
+	Query string
+	Max   int
+}
+
+// WorkspaceSymbol is a symbol anywhere in the project: Range in Target (an absolute path, or an
+// open document); Kind is SymbolFunction when ""; Name and Detail (its container: a type, a
+// module) one line each, cut at MaxText bytes.
+type WorkspaceSymbol struct {
+	Target Target
+	Range  Range
+	Kind   SymbolKind
+	Name   string
+	Detail string
+}
+
+// WorkspaceSymbolProvider answers workspace-symbols requests (feature workspace-symbols): out
+// streams parts (feature query-stream: PartWorkspaceSymbols) and its Context is cancelled by
+// rhun's cancel (Go to Symbol in Project withdraws a request as the query changes).
+type WorkspaceSymbolProvider interface {
+	WorkspaceSymbols(ext *Ext, req WorkspaceSymbolsRequest, out *Stream) []WorkspaceSymbol
+}
+
+// EncodeWorkspaceSymbols is the body of a workspace-symbols answer or part. Symbols without a name
+// or with a path over MaxPath are left out, as those past MaxRecords or MaxRecordsBody.
+func EncodeWorkspaceSymbols(syms []WorkspaceSymbol) []byte {
+	var recs bytes.Buffer
+	n := 0
+	for _, s := range syms {
+		name, detail, path := field(s.Name), field(s.Detail), s.Target.String()
+		if name == "" || len(path) > MaxPath {
+			continue
+		}
+		head := fmt.Sprintf("%s %s %d %d %d\n", rangeFields(s.Range), word(string(s.Kind), string(SymbolFunction)),
+			len(path), len(name), len(detail))
+		if n == MaxRecords || recs.Len()+len(head)+len(path)+len(name)+len(detail)+16 > MaxRecordsBody {
+			break
+		}
+		recs.WriteString(head)
+		recs.WriteString(path)
+		recs.WriteString(name)
+		recs.WriteString(detail)
+		n++
+	}
+	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
+}
+
+// PartWorkspaceSymbols streams workspace symbols.
+func (s *Stream) PartWorkspaceSymbols(syms []WorkspaceSymbol) error {
+	return s.Part(EncodeWorkspaceSymbols(syms))
+}
+
+func parseWorkspaceSymbols(f []string, body []byte) (WorkspaceSymbolsRequest, bool) {
+	if len(f) != 2 {
+		return WorkspaceSymbolsRequest{}, false
+	}
+	m, err1 := strconv.Atoi(f[0])
+	n, err2 := strconv.Atoi(f[1])
+	if err1 != nil || err2 != nil || m < 0 || n != len(body) {
+		return WorkspaceSymbolsRequest{}, false
+	}
+	return WorkspaceSymbolsRequest{Query: string(body), Max: m}, true
+}
+
+// ---- document-links
+
+// DocRequest is a request about a whole document at a version ("document-links DOC VERSION").
+// Context is cancelled by rhun's cancel.
+type DocRequest struct {
+	Doc     Doc
+	Version int64
+	Context context.Context
+}
+
+// DocumentLink is a link in a document: ctrl+click on Range opens Target (LinkURL, LinkPath,
+// LinkDoc); Tip is one line shown beside it, cut at MaxText bytes, or "".
+type DocumentLink struct {
+	Range  Range
+	Target string
+	Tip    string
+}
+
+// DocumentLinker answers document-links requests (feature document-links).
+type DocumentLinker interface {
+	DocumentLinks(ext *Ext, req DocRequest) []DocumentLink
+}
+
+// LinkPath is the target of a link to a file by its absolute path, at a line (0 for none) and
+// column (0 for none).
+func LinkPath(path string, at Pos) string {
+	switch {
+	case at.Line > 0 && at.Col > 0:
+		return path + ":" + strconv.Itoa(at.Line) + ":" + strconv.Itoa(at.Col)
+	case at.Line > 0:
+		return path + ":" + strconv.Itoa(at.Line)
+	}
+	return path
+}
+
+// LinkDoc is the target of a link to an open document.
+func LinkDoc(doc Doc) string { return "#" + itoa(int64(doc)) }
+
+// LinkURL is the target of a link to an http or https URL.
+func LinkURL(url string) string { return url }
+
+// ValidLinkTarget reports whether s is a link target rhun opens: an http or https URL, an absolute
+// path (optionally followed by :LINE or :LINE:COL) or #DOC, of at most MaxPath bytes (a path's
+// :LINE:COL besides) on one line.
+func ValidLinkTarget(s string) bool {
+	switch {
+	case validURL(s, MaxPath):
+		return true
+	case strings.HasPrefix(s, "#"):
+		d, err := strconv.ParseInt(s[1:], 10, 64)
+		return err == nil && d > 0 && len(s) <= 11 && s[1] != '+'
+	}
+	return absPath(s) && len(s) <= MaxPath+22 && !strings.ContainsAny(s, "\n\r")
+}
+
+// EncodeDocumentLinks is the document-links answer. Links whose target is not ValidLinkTarget or
+// whose range ends before it starts are left out, as those past MaxRecords or MaxRecordsBody.
+func EncodeDocumentLinks(links []DocumentLink) []byte {
+	var recs bytes.Buffer
+	n := 0
+	for _, l := range links {
+		tip := field(l.Tip)
+		if !ValidLinkTarget(l.Target) || !wellFormed(l.Range) {
+			continue
+		}
+		head := fmt.Sprintf("%s %d %d\n", rangeFields(l.Range), len(l.Target), len(tip))
+		if n == MaxRecords || recs.Len()+len(head)+len(l.Target)+len(tip)+16 > MaxRecordsBody {
+			break
+		}
+		recs.WriteString(head)
+		recs.WriteString(l.Target)
+		recs.WriteString(tip)
+		n++
+	}
+	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
+}
+
 // answerMore answers the requests of this file; known is false when the handler lacks the
 // interface, the feature was not agreed or the request does not parse.
 func (e *Ext) answerMore(h Handler, id int64, verb string, f []string, body []byte) (out []byte, rerr *Error, known bool) {
@@ -398,6 +543,16 @@ func (e *Ext) answerMore(h Handler, id int64, verb string, f []string, body []by
 				return EncodeHierarchyItems(t.Supertypes(e, data, e.langStream(id))), nil, true
 			}
 			return EncodeHierarchyItems(t.Subtypes(e, data, e.langStream(id))), nil, true
+		}
+	case "workspace-symbols":
+		w, is := h.(WorkspaceSymbolProvider)
+		if req, ok := parseWorkspaceSymbols(f, body); is && ok && e.Has(FeatureWorkspaceSymbols) {
+			return EncodeWorkspaceSymbols(w.WorkspaceSymbols(e, req, e.langStream(id))), nil, true
+		}
+	case "document-links":
+		l, is := h.(DocumentLinker)
+		if doc, version, ok := parseDocVersion(f); is && ok && len(f) == 2 && e.Has(FeatureDocumentLinks) {
+			return EncodeDocumentLinks(l.DocumentLinks(e, DocRequest{doc, version, e.langStream(id).Context})), nil, true
 		}
 	}
 	return nil, nil, false

@@ -994,6 +994,7 @@ func (h *host) checkLangFeatures() {
 	if h.features["partial-format"] && h.askPartialFormat(sample, gone) {
 		return
 	}
+	h.askMoreLangFeatures(sample)
 }
 
 // applyRequest serves the apply request (section 8): a workspace edit checked whole, then made

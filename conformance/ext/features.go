@@ -29,6 +29,7 @@ var knownFeatures = []string{"views", "complete", "signature", "definition", "re
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
 	"notebooks",                                                                                                                            // notebooks: notebook.go
 	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions", // language features: query.go, actions.go
+	"hover-query", "selection-ranges", "hierarchy", "workspace-symbols", "document-links", "file-diagnostics", // langfeat.go
 	"command-args", "context-keys", "status-items", // commands.go
 	"tests"} // test controllers: tests.go
 

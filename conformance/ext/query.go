@@ -187,6 +187,18 @@ func (h *host) checkPart(q *query, body []byte) (int, string) {
 			h.warn(q.verb, "a part: "+w)
 		}
 		return n, why
+	case "workspace-symbols":
+		n, warns, why := h.checkWorkspaceSymbols(m)
+		for _, w := range warns {
+			h.warn(q.verb, "a part: "+w)
+		}
+		return n, why
+	case "calls-in", "calls-out", "supertypes", "subtypes":
+		items, warns, why := h.checkHierarchy(m, q.verb, h.askedItem)
+		for _, w := range warns {
+			h.warn(q.verb, "a part: "+w)
+		}
+		return len(items), why
 	}
 	return 0, ""
 }

@@ -2086,6 +2086,422 @@ static void tests_feature(void) {
     rx_buf_free(&t_out);
 }
 
+
+/* ---- hover-query, selection-ranges, hierarchy, workspace-symbols, document-links,
+ * file-diagnostics (go/rhunext/langfeat_test.go, the same bytes) */
+
+static rx_hierarchy_item hitem(const char *name, const char *data) {
+    rx_hierarchy_item it;
+    memset(&it, 0, sizeof it);
+    it.kind = "function", it.name = name, it.detail = "pkg", it.path = "/p/a.go";
+    it.range = R(3, 1, 9, 2);
+    it.selection = R(3, 6, 3, 6 + (int)strlen(name));
+    it.data = data, it.data_len = strlen(data);
+    return it;
+}
+
+/* an item's record (and its call sites) as the grammar writes it */
+static void hitem_rec(rx_buf *b, const char *kind, const char *sel, const char *name, const char *data,
+                      const char *const *sites, int nsites) {
+    rx_buf_fmt(b, "%s 3 1 9 2 %s 7 %zu 3 %zu", kind, sel, strlen(name), strlen(data));
+    if (nsites) rx_buf_fmt(b, " %d", nsites);
+    rx_buf_fmt(b, "\n/p/a.go%spkg%s", name, data);
+    for (int i = 0; i < nsites; i++) rx_buf_fmt(b, "%s\n", sites[i]);
+}
+
+static void langfeat_records(void) {
+    rx_buf out = {NULL, 0, 0}, want = {NULL, 0, 0};
+    /* file-diagnostics */
+    rx_related rel[3];
+    memset(rel, 0, sizeof rel);
+    rel[0].path = "/p/a.go", rel[0].range = R(1, 1, 1, 4), rel[0].message = "declared\nhere";
+    rel[1].path = "relative.go", rel[1].message = "left out";
+    rel[2].doc = 3, rel[2].range = R(0, 0, 0, 0);
+    rx_diagnostic ds[5];
+    memset(ds, 0, sizeof ds);
+    char code[151];
+    memset(code, 'c', 150), code[150] = 0;
+    ds[0].range = R(2, 9, 2, 14), ds[0].severity = "warning", ds[0].message = "unused\ntotal", ds[0].id = "d1";
+    ds[0].code = "W1", ds[0].source = "lint", ds[0].href = "https://example.test/W1";
+    ds[0].unnecessary = ds[0].deprecated = 1, ds[0].related = rel, ds[0].nrelated = 3;
+    ds[1].message = "zero", ds[1].id = "d1";
+    ds[2].severity = "error";
+    ds[3].severity = "fatal", ds[3].message = "x";
+    ds[4].range = R(3, 5, 3, 1), ds[4].severity = "hint", ds[4].message = "back", ds[4].id = "bad id";
+    ds[4].href = "ftp://x", ds[4].code = code, ds[4].source = "a\nb";
+    int count = 0;
+    rx_file_diagnostics_records(ds, 5, &out, &count);
+    const char *extra = "id 2\nd1code 2\nW1source 4\nlinthref 23\nhttps://example.test/W1tag unnecessary 0\n"
+                        "tag deprecated 0\nrelated 1 1 1 4 7 13\n/p/a.godeclared hererelated 1 1 1 1 2 0\n#3";
+    rx_buf_fmt(&want, "2 9 2 14 warning 12 %zu\nunused\ntotal%s", strlen(extra), extra);
+    rx_buf_str(&want, "1 1 1 1 error 4 0\nzero");
+    rx_buf_fmt(&want, "3 5 3 5 hint 4 %zu\nbackcode 100\n%.100ssource 3\na b", strlen("code 100\n") + 100 + strlen("source 3\na b"), code);
+    assert(count == 3);
+    same(&out, want.data);
+    /* 2000 records at most; the body within 4 MiB */
+    rx_diagnostic *many = (rx_diagnostic *)calloc(2001, sizeof *many);
+    char *msg = (char *)malloc(5001);
+    for (int i = 0; i < 2500; i++) msg[2 * i] = (char)0xc3, msg[2 * i + 1] = (char)0xa9;
+    msg[5000] = 0;
+    for (int i = 0; i < 2001; i++) many[i].range = R(1, 1, 1, 2), many[i].message = "m";
+    rx_buf_clear(&out);
+    rx_file_diagnostics_records(many, 2001, &out, &count);
+    assert(count == 2000);
+    for (int i = 0; i < 2000; i++) many[i].message = msg;
+    rx_buf_clear(&out);
+    rx_file_diagnostics_records(many, 2000, &out, &count);
+    assert(count < 2000 && out.len + 4096 <= ((size_t)4 << 20) && memcmp(out.data, "1 1 1 2 error 4000 0\n", 21) == 0);
+    free(many);
+    free(msg);
+
+    /* hover */
+    rx_buf_clear(&out);
+    rx_hover_answer(&out, R(2, 1, 2, 9), "fn pointer", 10);
+    same(&out, "2 1 2 9\nfn pointer");
+    rx_buf_clear(&out);
+    rx_hover_answer(&out, R(2, 1, 2, 9), "", 0);
+    same(&out, "");
+    char *big = (char *)malloc(80001);
+    for (int i = 0; i < 40000; i++) big[2 * i] = (char)0xc3, big[2 * i + 1] = (char)0xa9;
+    big[80000] = 0;
+    rx_hover_answer(&out, R(8, 5, 8, 1), big, 80000);
+    assert(out.len == 8 + (65536 - 8) / 2 * 2 && memcmp(out.data, "0 0 0 0\n", 8) == 0);
+    free(big);
+
+    /* selection ranges */
+    rx_selections sel;
+    memset(&sel, 0, sizeof sel);
+    sel.at[0].line = 1, sel.at[0].col = 6, sel.at[1].line = 2, sel.at[1].col = 3, sel.at[2].line = 5, sel.at[2].col = 4;
+    sel.npos = 3;
+    rx_range g1[] = {R(1, 5, 1, 8), R(1, 5, 1, 8), R(1, 1, 1, 20), R(1, 2, 2, 1), R(1, 1, 9, 1)};
+    rx_range g3[] = {R(5, 1, 5, 9), R(5, 9, 5, 1)};
+    rx_selection_group(&sel, g1, 5);
+    rx_selection_group(&sel, NULL, 0);
+    rx_selection_group(&sel, g3, 2);
+    rx_buf_clear(&out);
+    rx_selections_finish(&sel, &out);
+    same(&out, "2\n1 5 1 8\n1 1 1 20\n1\n2 3 2 3\n1\n5 1 5 9\n");
+    memset(&sel, 0, sizeof sel);
+    sel.npos = 2;
+    rx_selection_group(&sel, g3, 2);
+    rx_selection_group(&sel, NULL, 0);
+    rx_buf_clear(&out);
+    rx_selections_finish(&sel, &out);
+    same(&out, "1\n5 1 5 9\n");
+    memset(&sel, 0, sizeof sel);
+    sel.npos = 64;
+    rx_range chain[64];
+    for (int j = 0; j < 64; j++) chain[j] = R(1000000 - j, 1000 - j, 1000000 + j, 1000 + j);
+    for (int i = 0; i < 64; i++) sel.at[i].line = 1000000, sel.at[i].col = 1000, rx_selection_group(&sel, chain, 64);
+    rx_buf_clear(&out);
+    rx_selections_finish(&sel, &out);
+    assert(out.len <= 65536 && memcmp(out.data, "42\n1000000 1000 1000000 1000\n", 29) == 0);
+
+    /* hierarchy */
+    rx_hierarchy roots;
+    memset(&roots, 0, sizeof roots);
+    roots.roots = 1;
+    rx_hierarchy_item it = hitem("main", "m1");
+    rx_hierarchy_add(&roots, &it);
+    it = hitem("", "");
+    rx_hierarchy_add(&roots, &it);
+    it = hitem("bad", "");
+    it.range = R(9, 1, 3, 1);
+    rx_hierarchy_add(&roots, &it);
+    it = hitem("outside", "o");
+    it.selection = R(1, 1, 1, 2);
+    rx_hierarchy_add(&roots, &it);
+    rx_buf_clear(&out);
+    rx_hierarchy_finish(&roots, &out);
+    rx_buf_clear(&want);
+    rx_buf_str(&want, "2\n");
+    hitem_rec(&want, "function", "3 6 3 10", "main", "m1", NULL, 0);
+    hitem_rec(&want, "function", "3 1 9 2", "outside", "o", NULL, 0);
+    same(&out, want.data);
+    roots.roots = 1;
+    it = hitem("r", "");
+    for (int i = 0; i < 70; i++) rx_hierarchy_add(&roots, &it);
+    rx_buf_clear(&out);
+    rx_hierarchy_finish(&roots, &out);
+    assert(memcmp(out.data, "64\n", 3) == 0);
+    rx_calls calls;
+    memset(&calls, 0, sizeof calls);
+    rx_range sites[] = {R(5, 1, 5, 2), R(6, 2, 6, 1), R(7, 1, 7, 3)};
+    it = hitem("late", "");
+    rx_call_add(&calls, &it, sites, 3);
+    it = hitem("nosites", "");
+    rx_call_add(&calls, &it, NULL, 0);
+    rx_buf_clear(&out);
+    rx_calls_finish(&calls, &out);
+    rx_buf_clear(&want);
+    rx_buf_str(&want, "1\n");
+    const char *const late_sites[] = {"5 1 5 2", "7 1 7 3"};
+    hitem_rec(&want, "function", "3 6 3 10", "late", "", late_sites, 2);
+    same(&out, want.data);
+    rx_range *many_sites = (rx_range *)malloc(1005 * sizeof *many_sites);
+    for (int i = 0; i < 1005; i++) many_sites[i] = R(1, 1, 1, 2);
+    it = hitem("c", "");
+    rx_call_add(&calls, &it, many_sites, 1005);
+    rx_buf_clear(&out);
+    rx_calls_finish(&calls, &out);
+    assert(strstr(out.data, " 1000\n") != NULL);
+    free(many_sites);
+    rx_hierarchy items;
+    memset(&items, 0, sizeof items);
+    char *hdata = (char *)malloc(16 * 1024 + 2);
+    memset(hdata, 'x', 16 * 1024 + 1), hdata[16 * 1024 + 1] = 0;
+    it = hitem("Huge", hdata);
+    rx_hierarchy_add(&items, &it);
+    it = hitem("Sub", "");
+    rx_hierarchy_add(&items, &it);
+    rx_buf_clear(&out);
+    rx_hierarchy_finish(&items, &out);
+    rx_buf_clear(&want);
+    rx_buf_str(&want, "1\n");
+    hitem_rec(&want, "function", "3 6 3 9", "Sub", "", NULL, 0);
+    same(&out, want.data);
+    free(hdata);
+
+    /* workspace symbols and links */
+    rx_workspace_symbols ws;
+    memset(&ws, 0, sizeof ws);
+    rx_workspace_symbol(&ws, "/p/a.go", 0, R(3, 6, 3, 10), "function", "Main", "main");
+    rx_workspace_symbol(&ws, NULL, 2, R(1, 1, 1, 4), NULL, "mai\nx", NULL);
+    rx_workspace_symbol(&ws, "/p/b.go", 0, R(1, 1, 1, 1), "class", "", NULL);
+    rx_buf_clear(&out);
+    rx_workspace_symbols_finish(&ws, &out);
+    same(&out, "2\n3 6 3 10 function 7 4 4\n/p/a.goMainmain1 1 1 4 function 2 5 0\n#2mai x");
+    rx_links links;
+    memset(&links, 0, sizeof links);
+    rx_link(&links, R(1, 1, 1, 20), "https://example.test/a b", "spaces");
+    rx_link(&links, R(1, 1, 1, 20), "https://example.test/a", "Open\nthe page");
+    rx_link(&links, R(2, 3, 2, 9), "/p/a.go:4:2", NULL);
+    rx_link(&links, R(3, 3, 3, 9), "/p/a.go:4", NULL);
+    rx_link(&links, R(4, 3, 4, 9), "#4", NULL);
+    rx_link(&links, R(5, 3, 5, 9), "relative.go", NULL);
+    rx_link(&links, R(6, 3, 5, 9), "/p/backwards", NULL);
+    rx_link(&links, R(7, 1, 7, 4), "ftp://example.test", NULL);
+    rx_link(&links, R(8, 1, 8, 4), "#0", NULL);
+    rx_buf_clear(&out);
+    rx_links_finish(&links, &out);
+    same(&out, "4\n1 1 1 20 22 13\nhttps://example.test/aOpen the page2 3 2 9 11 0\n/p/a.go:4:2"
+               "3 3 3 9 9 0\n/p/a.go:44 3 4 9 2 0\n#4");
+    assert(rx_link_target_valid("HTTPS://x.test/\xc3\xa9") && rx_link_target_valid("C:\\p\\a.go:3"));
+    assert(rx_link_target_valid("\\\\srv\\share\\a") && rx_link_target_valid("#12"));
+    assert(!rx_link_target_valid("http://") && !rx_link_target_valid("#+1") && !rx_link_target_valid("#"));
+    assert(!rx_link_target_valid("/a\nb") && !rx_link_target_valid("mailto:a@b") && !rx_link_target_valid(NULL));
+    rx_buf_free(&out);
+    rx_buf_free(&want);
+}
+
+static rx_buf langfeat_seen;
+
+static void on_diagnostics_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    rx_diagnostic d;
+    memset(&d, 0, sizeof d);
+    d.range = R(1, 4, 1, 9), d.message = "bad\nname", d.id = "e1";
+    if (!rx_has(ext, "file-diagnostics")) {
+        int a = rx_file_diagnostics(ext, NULL, 1, 0, &d, 1);
+        rx_buf_fmt(&langfeat_seen, "%d %s|", a, rx_error(ext));
+        a = rx_reset_diagnostics(ext);
+        rx_buf_fmt(&langfeat_seen, "%d %s|", a, rx_error(ext));
+        return;
+    }
+    int a = rx_file_diagnostics(ext, NULL, 1, 0, &d, 1);
+    rx_buf_fmt(&langfeat_seen, "%d %s|", a, rx_error(ext));
+    a = rx_file_diagnostics(ext, "/p/other.rs", 0, 3, &d, 1);
+    rx_buf_fmt(&langfeat_seen, "%d|", a);
+    a = rx_file_diagnostics(ext, "other.rs", 0, RX_ON_DISK, &d, 1);
+    rx_buf_fmt(&langfeat_seen, "%d %s|", a, rx_error(ext));
+    a = rx_file_diagnostics(ext, NULL, 1, RX_ON_DISK, &d, 1);
+    rx_buf_fmt(&langfeat_seen, "%d %.6s|", a, rx_error(ext));
+    a = rx_reset_diagnostics(ext);
+    rx_buf_fmt(&langfeat_seen, "%d|", a);
+}
+
+static int on_hover(rx_ext *ext, const rx_ask *req, rx_buf *out, void *user) {
+    (void)ext, (void)user;
+    char text[32];
+    snprintf(text, sizeof text, "fn %s", req->kind);
+    if (req->at.line != 9) rx_hover_answer(out, R(2, 1, 2, 9), text, strlen(text));
+    return 1;
+}
+
+static int on_selection_ranges(rx_ext *ext, const rx_selection_ask *req, rx_selections *out, void *user) {
+    (void)ext, (void)user;
+    for (int i = 0; i < req->n; i++) {
+        int l = req->positions[i].line;
+        rx_range g1[] = {R(1, 5, 1, 8), R(1, 5, 1, 8), R(1, 1, 1, 20), R(1, 2, 2, 1)};
+        rx_range g[] = {R(l, 1, l, 9), R(l, 9, l, 1)};
+        if (l == 1) rx_selection_group(out, g1, 4);
+        else if (l == 2) rx_selection_group(out, NULL, 0);
+        else rx_selection_group(out, g, 2);
+    }
+    return 1;
+}
+
+static int on_call_hierarchy(rx_ext *ext, const rx_ask *req, rx_hierarchy *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    assert(out->roots);
+    rx_hierarchy_item it = hitem("main", "m1");
+    rx_hierarchy_add(out, &it);
+    it = hitem("outside", "o");
+    it.selection = R(1, 1, 1, 2);
+    rx_hierarchy_add(out, &it);
+    return 1;
+}
+
+static int on_calls_in(rx_ext *ext, const rx_data_ask *req, rx_stream *s, rx_calls *out, void *user) {
+    (void)ext, (void)user;
+    rx_calls part;
+    memset(&part, 0, sizeof part);
+    rx_range site = R(4, 2, 4, 6), one = R(1, 1, 1, 2);
+    rx_hierarchy_item it = hitem("caller", "c1");
+    rx_call_add(&part, &it, &site, 1);
+    if (rx_stream_calls(s, &part) < 0) {
+        it = hitem("nostream", "");
+        rx_call_add(out, &it, &one, 1);
+        return 1;
+    }
+    char name[32];
+    snprintf(name, sizeof name, "late%s", (const char *)req->data);
+    rx_range sites[] = {R(5, 1, 5, 2), R(6, 2, 6, 1), R(7, 1, 7, 3)};
+    it = hitem(name, "");
+    rx_call_add(out, &it, sites, 3);
+    return 1;
+}
+
+static int on_calls_out(rx_ext *ext, const rx_data_ask *req, rx_stream *s, rx_calls *out, void *user) {
+    (void)ext, (void)req, (void)s, (void)out, (void)user;
+    return 1;
+}
+
+static int on_type_hierarchy(rx_ext *ext, const rx_ask *req, rx_hierarchy *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_hierarchy_item it = hitem("Shape", "t");
+    it.kind = "interface";
+    rx_hierarchy_add(out, &it);
+    return 1;
+}
+
+static int on_supertypes(rx_ext *ext, const rx_data_ask *req, rx_stream *s, rx_hierarchy *out, void *user) {
+    (void)ext, (void)s, (void)user;
+    char name[32];
+    snprintf(name, sizeof name, "Base%s", (const char *)req->data);
+    rx_hierarchy_item it = hitem(name, "b");
+    rx_hierarchy_add(out, &it);
+    return 1;
+}
+
+static int on_workspace_symbols(rx_ext *ext, const rx_workspace_symbols_ask *req, rx_stream *s,
+                                rx_workspace_symbols *out, void *user) {
+    (void)ext, (void)user;
+    assert(req->max == 500);
+    rx_workspace_symbols part;
+    memset(&part, 0, sizeof part);
+    rx_workspace_symbol(&part, "/p/a.go", 0, R(3, 6, 3, 10), "function", "Main", "main");
+    if (rx_stream_workspace_symbols(s, &part) < 0) {
+        rx_workspace_symbol(out, "/p/a.go", 0, R(3, 6, 3, 10), "function", "Main", "main");
+        return 1;
+    }
+    char name[300];
+    snprintf(name, sizeof name, "%s\nx", req->query);
+    rx_workspace_symbol(out, NULL, 2, R(1, 1, 1, 4), NULL, name, NULL);
+    return 1;
+}
+
+static int on_document_links(rx_ext *ext, const rx_doc_ask *req, rx_links *out, void *user) {
+    (void)ext, (void)user;
+    char doc[32];
+    snprintf(doc, sizeof doc, "#%lld", (long long)req->doc);
+    rx_link(out, R(1, 1, 1, 20), "https://example.test/a", "Open\nthe page");
+    rx_link(out, R(2, 3, 2, 9), "/p/a.go:4:2", NULL);
+    rx_link(out, R(4, 3, 4, 9), doc, NULL);
+    rx_link(out, R(5, 3, 5, 9), "relative.go", NULL);
+    return 1;
+}
+
+static void langfeat_requests(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_diagnostics_ready;
+    h.hover = on_hover;
+    h.selection_ranges = on_selection_ranges;
+    h.call_hierarchy = on_call_hierarchy;
+    h.calls_in = on_calls_in;
+    h.calls_out = on_calls_out;
+    h.type_hierarchy = on_type_hierarchy;
+    h.supertypes = on_supertypes;
+    h.workspace_symbols = on_workspace_symbols;
+    h.document_links = on_document_links;
+    const char *feats = "file-diagnostics hover-query selection-ranges hierarchy workspace-symbols document-links query-stream";
+    rx_buf in = {NULL, 0, 0}, got = {NULL, 0, 0}, want = {NULL, 0, 0};
+    rx_buf_fmt(&in, "0 features %s\n0 ready -\nerror 1 stale 4\nok 2\nok 3\n", feats);
+    rx_buf_str(&in, "3 hover-query 4 7 2 5 pointer -\n4 hover-query 4 7 9 1 invoked -\n"
+                    "5 selection-ranges 4 7 3 12\n1 6\n2 3\n5 4\n6 call-hierarchy 4 7 3 7 invoked -\n"
+                    "7 calls-in 2\nm1ok 4\n8 calls-out 1\nx9 type-hierarchy 4 7 3 7 invoked -\n"
+                    "10 supertypes 1\nt11 subtypes 1\nt12 workspace-symbols 500 3\nmaierror 5 cancelled\n"
+                    "13 document-links 4 7\n14 selection-ranges 4 7 2 4\n5 4\n0 bye\n");
+    run(feats, &h, in.data, &got);
+    const char *rec = "1 4 1 9 error 8 7\nbad\nnameid 2\ne1";
+    rx_buf_fmt(&want, "hello 1 %s\n", feats);
+    rx_buf_fmt(&want, "1 file-diagnostics 0 1 2 %zu\n#1%s", 2 + strlen(rec), rec);
+    rx_buf_fmt(&want, "2 file-diagnostics - 1 11 %zu\n/p/other.rs%s", 11 + strlen(rec), rec);
+    rx_buf_str(&want, "3 file-diagnostics-reset\n");
+    ok(&want, 3, "2 1 2 9\nfn pointer");
+    ok(&want, 4, "");
+    ok(&want, 5, "2\n1 5 1 8\n1 1 1 20\n1\n2 3 2 3\n1\n5 1 5 9\n");
+    rx_buf b = {NULL, 0, 0};
+    rx_buf_str(&b, "2\n");
+    hitem_rec(&b, "function", "3 6 3 10", "main", "m1", NULL, 0);
+    hitem_rec(&b, "function", "3 1 9 2", "outside", "o", NULL, 0);
+    ok(&want, 6, b.data);
+    rx_buf_clear(&b);
+    rx_buf_str(&b, "1\n");
+    const char *const site[] = {"4 2 4 6"}, *const late[] = {"5 1 5 2", "7 1 7 3"};
+    hitem_rec(&b, "function", "3 6 3 12", "caller", "c1", site, 1);
+    rx_buf_fmt(&want, "4 query-part 7 %zu\n%s", b.len, b.data);
+    rx_buf_clear(&b);
+    rx_buf_str(&b, "1\n");
+    hitem_rec(&b, "function", "3 6 3 12", "latem1", "", late, 2);
+    ok(&want, 7, b.data);
+    ok(&want, 8, "0\n");
+    ok(&want, 9, "1\ninterface 3 1 9 2 3 6 3 11 7 5 3 1\n/p/a.goShapepkgt");
+    rx_buf_clear(&b);
+    rx_buf_str(&b, "1\n");
+    hitem_rec(&b, "function", "3 6 3 11", "Baset", "b", NULL, 0);
+    ok(&want, 10, b.data);
+    rx_buf_str(&want, "error 11 unknown no such request\n");      /* no subtypes handler */
+    const char *part = "1\n3 6 3 10 function 7 4 4\n/p/a.goMainmain";
+    rx_buf_fmt(&want, "5 query-part 12 %zu\n%s", strlen(part), part);
+    ok(&want, 12, part);
+    ok(&want, 13, "3\n1 1 1 20 22 13\nhttps://example.test/aOpen the page2 3 2 9 11 0\n/p/a.go:4:24 3 4 9 2 0\n#4");
+    rx_buf_str(&want, "error 14 unknown no such request\n");
+    same(&got, want.data);
+    assert(langfeat_seen.len && strcmp(langfeat_seen.data,
+                                       "-1 stale 4|0|-1 syntax a target is an absolute path or an open document|"
+                                       "-1 syntax|0|") == 0);
+    rx_buf_clear(&langfeat_seen);
+
+    /* without the features: every request is unknown (bodies read past), file-diagnostics is not sent */
+    rx_buf_clear(&got);
+    run("rename", &h,
+        "0 features rename\n0 ready -\n2 hover-query 4 7 2 5 pointer -\n3 selection-ranges 4 7 1 4\n1 6\n"
+        "4 call-hierarchy 4 7 3 7 invoked -\n5 calls-in 2\nm16 supertypes 1\nt7 workspace-symbols 500 3\nmai"
+        "8 document-links 4 7\n0 bye\n",
+        &got);
+    rx_buf_clear(&want);
+    rx_buf_str(&want, "hello 1 rename\n");
+    for (int id = 2; id <= 8; id++) rx_buf_fmt(&want, "error %d unknown no such request\n", id);
+    same(&got, want.data);
+    assert(strcmp(langfeat_seen.data, "-1 unknown file-diagnostics was not agreed|-1 unknown file-diagnostics was not agreed|") == 0);
+    rx_buf_free(&langfeat_seen);
+    rx_buf_free(&b);
+    rx_buf_free(&in);
+    rx_buf_free(&got);
+    rx_buf_free(&want);
+}
 int main(void) {
     retained_patches();
     ai_bodies();
@@ -2100,6 +2516,7 @@ int main(void) {
     cursors();
     item_records();
     code_action_records();
+    langfeat_records();
     old_tests();
     locations();
     symbols();
@@ -2122,6 +2539,7 @@ int main(void) {
     query_requests();
     actions_requests();
     tests_feature();
+    langfeat_requests();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

@@ -22,11 +22,17 @@ var navigation = []struct{ verb, key string }{
 
 // askedKeyFeatures are the 1.1 features whose [provides] keys the checker asks about (besides
 // providerFeatures), with those keys
-var askedKeyFeatures = []string{"navigation", "partial-format"}
+var askedKeyFeatures = []string{"navigation", "partial-format", "hover-query", "selection-ranges", "hierarchy",
+	"workspace-symbols", "document-links"}
 
 var featureKeys = map[string][]string{
-	"navigation":     {"declaration", "type_definition", "implementation"},
-	"partial-format": {"range_format", "type_format"},
+	"navigation":        {"declaration", "type_definition", "implementation"},
+	"partial-format":    {"range_format", "type_format"},
+	"hover-query":       {"hover"},
+	"selection-ranges":  {"selection_ranges"},
+	"hierarchy":         {"call_hierarchy", "type_hierarchy"},
+	"workspace-symbols": {"workspace_symbols"},
+	"document-links":    {"document_links"},
 }
 
 // checkKeyFeatures checks that each 1.1 feature agreed has the [provides] keys that make rhun ask
@@ -47,6 +53,9 @@ func (h *host) checkKeyFeatures() {
 	}
 	if h.features["code-actions"] && h.manifestPatterns("actions") == "" {
 		h.fail("provides", "code-actions agreed after hello but [provides] has no actions patterns: rhun never asks")
+	}
+	if d := h.m.needs["documents"]; h.features["file-diagnostics"] && d != "read" && d != "write" {
+		h.warn("needs", "file-diagnostics agreed after hello, but [needs] documents is not read: rhun answers every set needs")
 	}
 	if h.features["prepare-rename"] && (!h.features["rename"] || h.manifestPatterns("rename") == "") {
 		h.warn("provides", "prepare-rename agreed after hello, but the extension is no rename provider (rename agreed and [provides] rename patterns): rhun never asks")

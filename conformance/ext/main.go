@@ -257,6 +257,10 @@ type host struct {
 	contextKeys map[string]bool   // context-keys: set-context keys (true: set, false: removed)
 	statusItems map[string]bool   // status-items: runtime items
 	tests       *testState        // feature tests (tests.go)
+
+	problems      map[string]int // file-diagnostics: the sets kept, by target
+	fileDiagsSaid bool           // a set was kept (said once)
+	askedItem     []byte         // the PATH of the hierarchy item asked about (calls-out's sites are there)
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -456,7 +460,7 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
 	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go
-	"query-part": true, "query-progress": true, // language features: query.go
+	"query-part": true, "query-progress": true, "file-diagnostics": true, // language features: query.go, langfeat.go
 	"run-command": true, "status-item": true, // commands.go
 	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true} // test controllers: tests.go
 
@@ -1213,6 +1217,34 @@ func (h *host) handle(msg message) {
 		h.commandRequest(id, verb, args, msg, reply, rerr)
 	case "test-items", "test-remove", "test-update", "test-coverage", "test-end", "test-exec":
 		h.testRequest(id, verb, args, msg, reply, rerr)
+	case "file-diagnostics":
+		if !h.features["file-diagnostics"] {
+			h.fail("features", "file-diagnostics without file-diagnostics agreed after hello")
+			rerr("unknown", "no such request")
+			return
+		}
+		if len(args) != 4 {
+			h.fail("request grammar", "file-diagnostics takes VERSION N TARGET_LEN LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[3])
+		if !ok || !need("read") {
+			return
+		}
+		h.fileDiagnostics(args, b, reply, rerr, id)
+	case "file-diagnostics-reset":
+		switch {
+		case !h.features["file-diagnostics"]:
+			h.fail("features", "file-diagnostics-reset without file-diagnostics agreed after hello")
+			rerr("unknown", "no such request")
+		case len(args) != 0:
+			h.fail("request grammar", "file-diagnostics-reset takes nothing")
+			rerr("syntax", "cannot parse the line")
+		default:
+			h.problems = nil
+			reply(fmt.Sprintf("ok %d", id))
+		}
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
