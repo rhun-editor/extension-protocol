@@ -170,6 +170,10 @@ typedef struct {
     /* Notebooks: a kernel started with rx_nb_exec ended; code its exit status (128 + N after
      * signal N), or -1 when rhun ended it. */
     void (*nb_exec_exit)(rx_ext *ext, int64_t exec, int code, void *user);
+    /* Notebooks: a cell document it was told about belongs to notebook nb as cell `cell`, at index
+     * among all its cells; nb_cells lists the cell documents it knows in order (n of them). */
+    void (*nb_cell)(rx_ext *ext, rx_doc doc, int64_t nb, int64_t cell, int index, void *user);
+    void (*nb_cells)(rx_ext *ext, int64_t nb, const rx_doc *docs, int n, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -2831,6 +2835,22 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 run.source = m->body ? m->body : (const unsigned char *)"";
                 run.len = m->body_len;
                 h->nb_run(ext, &run, user);
+            } else if (strcmp(f[1], "cell") == 0 && n == 6 && h->nb_cell && rx_has(ext, "notebooks")) {
+                h->nb_cell(ext, atoll(f[2]), atoll(f[3]), atoll(f[4]), atoi(f[5]), user);
+            } else if (strcmp(f[1], "cells") == 0 && n >= 3 && h->nb_cells && rx_has(ext, "notebooks")) {
+                /* the whole line: a notebook of many cells has more fields than f holds */
+                char *p = (char *)ev.rest, *end;
+                int64_t nb = strtoll(p, &end, 10);
+                size_t cap = strlen(p) / 2 + 1;
+                rx_doc *docs = (rx_doc *)malloc(cap * sizeof *docs);
+                int k = 0;
+                for (p = end; docs && *p; p = end) {
+                    rx_doc d = strtoll(p, &end, 10);
+                    if (end == p) break;
+                    docs[k++] = d;
+                }
+                if (docs) h->nb_cells(ext, nb, docs, k, user);
+                free(docs);
             } else if (strcmp(f[1], "nb-exec-exit") == 0 && n == 4 && h->nb_exec_exit && rx_has(ext, "notebooks")) {
                 h->nb_exec_exit(ext, atoll(f[2]), strcmp(f[3], "killed") == 0 ? -1 : atoi(f[3]), user);
             } else if (strncmp(f[1], "nb-", 3) == 0 && n == 3 && h->nb_event && rx_has(ext, "notebooks") &&

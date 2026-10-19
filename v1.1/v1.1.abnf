@@ -72,6 +72,8 @@ request      =/ id SP "nb-exec" SP id SP len
               ; NB, then a command body as test-exec's; answered "ok" SP id SP num (EXEC)
 request      =/ id SP "nb-exec-signal" SP num SP ( "interrupt" / "terminate" / "kill" )
 event        =/ "0" SP "nb-exec-exit" SP num SP ( num / "killed" )
+event        =/ "0" SP "cell" SP doc SP id SP id SP num     ; DOC NB CELL INDEX (A3)
+event        =/ "0" SP "cells" SP id *( SP doc )             ; NB, then the DOCs of the cells it knows, in order
 nb-state     = "queued" / "running" / "done" / "failed" / "cancelled"
 nb-kstate    = "idle" / "busy" / "starting" / "dead" / "none"
 nb-op        = "append" / "replace" / "clear" / "clear-wait"

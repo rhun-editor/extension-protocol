@@ -108,6 +108,14 @@ type NotebookExecs interface {
 	NbExecExit(ext *Ext, exec int64, code int, killed bool)
 }
 
+// NotebookCells hears which notebook a cell document belongs to (feature notebooks): NbCell after
+// the cell's opened (index among all the notebook's cells, from 0), NbCells with the cells it
+// knows in order after any insert, delete or move.
+type NotebookCells interface {
+	NbCell(ext *Ext, doc Doc, nb, cell int64, index int)
+	NbCells(ext *Ext, nb int64, docs []Doc)
+}
+
 // NotebookEvents receives the notebook events without a run.
 type NotebookEvents interface {
 	NbInterrupt(ext *Ext, nb int64)
@@ -449,6 +457,30 @@ func (e *Ext) notebookEvent(h Handler, ev Event) bool {
 		r.Cell, _ = strconv.ParseInt(ev.Args[1], 10, 64)
 		r.Run, _ = strconv.ParseInt(ev.Args[2], 10, 64)
 		p.NbRun(e, r)
+		return true
+	case "cell":
+		c, is := h.(NotebookCells)
+		if !is || len(ev.Args) != 4 {
+			return false
+		}
+		var n [4]int64
+		for i := range n {
+			n[i], _ = strconv.ParseInt(ev.Args[i], 10, 64)
+		}
+		c.NbCell(e, Doc(n[0]), n[1], n[2], int(n[3]))
+		return true
+	case "cells":
+		c, is := h.(NotebookCells)
+		if !is || len(ev.Args) < 1 {
+			return false
+		}
+		nb, _ := strconv.ParseInt(ev.Args[0], 10, 64)
+		docs := make([]Doc, 0, len(ev.Args)-1)
+		for _, a := range ev.Args[1:] {
+			d, _ := strconv.ParseInt(a, 10, 64)
+			docs = append(docs, Doc(d))
+		}
+		c.NbCells(e, nb, docs)
 		return true
 	case "nb-exec-exit":
 		x, is := h.(NotebookExecs)

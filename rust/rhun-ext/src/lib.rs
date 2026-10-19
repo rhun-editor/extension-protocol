@@ -589,6 +589,12 @@ pub trait Handler: Send {
     /// A kernel started with [`Ext::nb_exec`] ended: its exit status (128 + N after signal N), or
     /// `None` when rhun ended it.
     fn nb_exec_exit(&mut self, _ext: &Ext, _exec: notebook::ExecId, _code: Option<i32>) {}
+    /// A cell document it was told about (`opened` with no path) belongs to notebook `nb` as cell
+    /// `cell`, at `index` among all its cells (feature `notebooks`).
+    fn nb_cell(&mut self, _ext: &Ext, _doc: Doc, _nb: notebook::NbId, _cell: notebook::CellId, _index: usize) {}
+    /// The cell documents it knows of notebook `nb`, in their order (after any insert, delete or
+    /// move).
+    fn nb_cells(&mut self, _ext: &Ext, _nb: notebook::NbId, _docs: &[Doc]) {}
     /// rhun asks for a commit message (feature `commit-message`): the message, or why not (shown
     /// to the user). rhun trims it and refuses one over 8192 bytes or with control characters
     /// ([`scm::check_commit_message`]). A `cancel` event names `req.id`.
@@ -1283,6 +1289,13 @@ impl Ext {
                             if let Some(r) = notebook::NbRun::parse(&ev.fields, &ev.body) {
                                 h.nb_run(self, &r);
                             }
+                        }
+                        "cell" if self.has(Feature::Notebooks) && ev.fields.len() == 4 => {
+                            h.nb_cell(self, ev.num(0), ev.num(1) as u64, ev.num(2) as u64, ev.num(3) as usize);
+                        }
+                        "cells" if self.has(Feature::Notebooks) && !ev.fields.is_empty() => {
+                            let docs: Vec<Doc> = ev.fields[1..].iter().filter_map(|f| f.parse().ok()).collect();
+                            h.nb_cells(self, ev.num(0) as u64, &docs);
                         }
                         "nb-exec-exit" if self.has(Feature::Notebooks) && ev.fields.len() == 2 => {
                             let code = ev.fields[1].parse::<i32>().ok();
