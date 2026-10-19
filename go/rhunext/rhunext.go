@@ -339,7 +339,7 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				}
 				if view, rev, ok := parseRetainedEvent(ev); ok {
 					rv.ViewEvent(ext, view, rev)
-					if rev.Kind != "closed" {
+					if rev.Kind != "closed" && rev.Kind != "focus" { // a picture's focus: Viewer too
 						continue
 					}
 				}

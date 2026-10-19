@@ -23,7 +23,7 @@ import (
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
 	"git-data", "commit-message", "quickdiff", "scm", // source control: scm.go, scmpanel.go
-	"view-tree", "view-log", "notify", "progress", // retained views, notifications, progress: views.go, notify.go
+	"view-tree", "view-log", "notify", "progress", "view-keys", "view-images", // retained views, notifications, progress: views.go, notify.go
 	"idle", "secrets", "uris", "urls", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
@@ -112,7 +112,7 @@ func (h *host) viewRequest(id int64, verb string, args []string, body []byte, re
 			return
 		}
 		v, _ := strconv.ParseInt(args[0], 10, 64)
-		if !h.views[v] {
+		if rv := h.rviews[v]; !h.views[v] && (rv == nil || rv.vkind != "picture") {
 			h.fail("views", fmt.Sprintf("draw names view %s, which is not open", args[0]))
 			rerr("noview", "no such view")
 			return

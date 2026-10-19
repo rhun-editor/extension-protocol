@@ -239,6 +239,7 @@ type host struct {
 	notes       map[int64]*noteState // notifications open (notify.go)
 	progs       map[int64]*progState // progress not ended
 	noteSeq     int64
+	images      map[int64]bool    // view-images handles (views.go)
 	patches     int               // vpatch requests that passed
 	secrets     map[string][]byte // secret-set values (resources.go)
 
@@ -455,7 +456,7 @@ type message struct {
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
 	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
-	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, // retained views, notifications, progress: views.go, notify.go
+	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, "vimage": true, // retained views, notifications, progress: views.go, notify.go
 	"secret-set": true, "open-url": true, "external-uri": true, // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
@@ -1186,6 +1187,8 @@ func (h *host) handle(msg message) {
 		h.nbRequest(id, verb, args, msg.body, reply, rerr)
 	case "notify", "notify-set", "unnotify", "progress", "progress-set", "progress-end":
 		h.notifyRequest(id, verb, args, msg.body, reply, rerr)
+	case "vimage", "unimage":
+		h.imageRequest(id, verb, args, msg.body, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":

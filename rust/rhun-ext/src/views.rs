@@ -512,6 +512,7 @@ pub(crate) fn has_body(what: &str) -> bool {
     matches!(
         what,
         "select" | "activate" | "expand" | "collapse" | "check" | "action" | "discarded" | "change" | "link"
+            | "text" | "paste"
     )
 }
 
@@ -563,9 +564,8 @@ pub fn parse_retained(ev: &Event) -> Option<(View, RetainedEvent)> {
             what: ev.fields.get(3).cloned().unwrap_or_default(),
             id: id(),
         },
-        "size" | "metrics" | "hover" | "down" | "drag" | "up" | "click" | "leave" | "wheel" | "open" => {
-            return None
-        }
+        "size" | "metrics" | "hover" | "down" | "drag" | "up" | "click" | "leave" | "wheel" | "open" | "key"
+        | "text" | "paste" | "selectall" | "dblclick" => return None,
         "closed" => RetainedEvent::Closed,
         "clear" => RetainedEvent::Clear,
         _ => RetainedEvent::Other {
