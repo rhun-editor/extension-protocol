@@ -356,7 +356,8 @@ type message struct {
 }
 
 // bodyVerbs are the requests whose last field is a body length.
-var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true}
+var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
+	"nb-output": true, "nb-stream": true, "nb-kernel-label": true}
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -374,7 +375,18 @@ func (h *host) reader() {
 		// stops an extension whose answer is over 4 MB (a workspace edit's cap): the checker reads
 		// such a body (up to 64 MB) only to stay in step
 		if len(f) == 3 && f[0] == "ok" {
-			if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
+			id, _ := strconv.ParseInt(f[1], 10, 64)
+			if _, big := bigReplies.Load(id); big {
+				// nb-open's and nb-save's answers carry up to 64 MB
+				if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n > 64<<20 {
+					m.err = fmt.Errorf("LEN %q is not 0 to 64 MB", f[2])
+				} else {
+					m.body = make([]byte, n)
+					if _, e := io.ReadFull(h.stdout, m.body); e != nil {
+						m.err = fmt.Errorf("the body of %q ended early: %w", s, e)
+					}
+				}
+			} else if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
 				m.err = fmt.Errorf("LEN %q is not 0 to 4 MB (rhun stops an extension whose answer is over 4 MB)", f[2])
 			} else if n > 4<<20 {
 				m.err = fmt.Errorf("a body of %d bytes: rhun stops an extension whose answer is over 4 MB", n)
@@ -1044,6 +1056,8 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "view", "draw", "unview":
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "nb-state", "nb-output", "nb-stream", "nb-kernel-label":
+		h.nbRequest(id, verb, args, msg.body, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1342,7 +1356,11 @@ func main() {
 		}
 	}
 	for k := range m.provides {
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
+		notebook := k == "notebook" || k == "notebook.title" || k == "notebook.kernel" // v1.1 notebooks
+		if notebook && k == "notebook.kernel" && m.provides[k] != "yes" && m.provides[k] != "no" {
+			bad("[provides] notebook.kernel is yes or no")
+		}
+		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" && !notebook {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
 	}

@@ -35,6 +35,7 @@
 pub mod chart;
 pub mod complete;
 pub mod lang;
+pub mod notebook;
 pub mod picture;
 pub mod snippet;
 pub mod snippet_context;
@@ -145,6 +146,9 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Notebooks: [`Handler::nb_open`], [`Handler::nb_save`], [`Handler::nb_run`] and the
+    /// [`Ext::nb_state`] family ([`notebook`]).
+    Notebooks,
 }
 
 impl Feature {
@@ -165,6 +169,7 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::Notebooks => "notebooks",
         }
     }
 }
@@ -545,6 +550,26 @@ pub trait Handler: Send {
     ) -> Result<WorkspaceEdit, String> {
         Ok(WorkspaceEdit::default())
     }
+    /// rhun asks for a notebook's cells (feature `notebooks`): the file's bytes are in `req.data`.
+    /// An error's text is shown in the notebook's tab, with a way to open the file as text.
+    fn nb_open(&mut self, _ext: &Ext, _req: &notebook::NbOpen) -> Result<notebook::Notebook, String> {
+        Err("this extension does not read notebooks".to_string())
+    }
+    /// rhun asks for the file's bytes for a notebook (feature `notebooks`); rhun writes them.
+    fn nb_save(&mut self, _ext: &Ext, _req: &notebook::NbSave) -> Result<Vec<u8>, String> {
+        Err("this extension does not write notebooks".to_string())
+    }
+    /// Run a cell (feature `notebooks`). Answer with [`Ext::nb_state`], [`Ext::nb_output`] and
+    /// [`Ext::nb_stream`], from another thread for a long run: handlers run one at a time.
+    fn nb_run(&mut self, _ext: &Ext, _run: &notebook::NbRun) {}
+    /// The user asked to interrupt the running cell.
+    fn nb_interrupt(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// Restart the kernel (the user confirmed).
+    fn nb_restart(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// The kernel button was clicked: offer kernels ([`Ext::choose`], from another thread).
+    fn nb_kernel(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
+    /// The notebook's tab closed.
+    fn nb_closed(&mut self, _ext: &Ext, _nb: notebook::NbId) {}
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
 }
@@ -555,6 +580,7 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
+        body: Vec<u8>,
     },
     End,
 }
@@ -1090,6 +1116,17 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
+                    if ev.name == "nb-run" {
+                        // a cell's source: 4 MB at most
+                        let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
+                            Some(n) if n <= notebook::SOURCE_MAX => n,
+                            _ => break,
+                        };
+                        ev.body = vec![0; len];
+                        if input.read_exact(&mut ev.body).is_err() {
+                            break;
+                        }
+                    }
                     if ev.name == "edits" || ev.name == "action" {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
@@ -1114,11 +1151,24 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
+                        let mut body = Vec::new();
+                        if verb == "nb-open" || verb == "nb-save" {
+                            // a notebook body: 64 MB at most, and its path
+                            let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
+                                Some(n) if n <= notebook::BODY_MAX + 65536 => n,
+                                _ => break,
+                            };
+                            body = vec![0; len];
+                            if input.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                        }
                         if tx
                             .send(Msg::HostRequest {
                                 id,
                                 verb,
                                 fields: rest,
+                                body,
                             })
                             .is_err()
                         {
@@ -1177,6 +1227,22 @@ impl Ext {
                             }
                         }
                         "action" => h.action(self, &ev.body),
+                        "nb-run" if self.has(Feature::Notebooks) => {
+                            if let Some(r) = notebook::NbRun::parse(&ev.fields, &ev.body) {
+                                h.nb_run(self, &r);
+                            }
+                        }
+                        "nb-interrupt" | "nb-restart" | "nb-kernel" | "nb-closed"
+                            if self.has(Feature::Notebooks) =>
+                        {
+                            let nb = ev.num(0) as u64;
+                            match ev.name.as_str() {
+                                "nb-interrupt" => h.nb_interrupt(self, nb),
+                                "nb-restart" => h.nb_restart(self, nb),
+                                "nb-kernel" => h.nb_kernel(self, nb),
+                                _ => h.nb_closed(self, nb),
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             break;
@@ -1184,7 +1250,12 @@ impl Ext {
                         _ => {}
                     }
                 }
-                Msg::HostRequest { id, verb, fields } => {
+                Msg::HostRequest {
+                    id,
+                    verb,
+                    fields,
+                    body: hbody,
+                } => {
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
                             .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
@@ -1216,6 +1287,17 @@ impl Ext {
                                     Ok(e) => e.encode().map_err(|why| ("toobig", why)),
                                     Err(why) => Err(("refused", why)),
                                 }
+                            })
+                        }
+                        "nb-open" if self.has(Feature::Notebooks) => notebook::NbOpen::parse(id, &fields, &hbody)
+                            .map(|r| match h.nb_open(self, &r) {
+                                Ok(n) => Ok(n.encode()),
+                                Err(why) => Err(("refused", why)),
+                            }),
+                        "nb-save" if self.has(Feature::Notebooks) => {
+                            notebook::NbSave::parse(id, &fields, &hbody).map(|r| match r {
+                                Ok(r) => h.nb_save(self, &r).map_err(|why| ("refused", why)),
+                                Err(why) => Err(("syntax", why)),
                             })
                         }
                         _ => None,

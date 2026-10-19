@@ -52,3 +52,34 @@ feature      =/ "snippet-transforms"
 c-extra      =/ "transforms" SP "0" SP len LF
               ; followed by LEN canonical RFC 4648 standard padded Base64 bytes;
               ; one SNTX v1 payload, at most one record, see v1.1.md for binary layouts.
+
+; Notebooks (v1.1.md, "Feature: notebooks"). rhun's requests nb-open and nb-save are answered
+; "ok" SP id SP len LF + body; their answers may carry up to 64 MiB.
+feature      =/ "notebooks"
+host-request =/ id SP "nb-open" SP id SP len
+              ; PATH_LEN SP DATA_LEN LF, then PATH and DATA
+host-request =/ id SP "nb-save" SP id SP len
+              ; PATH_LEN LF, PATH, then a notebook body
+event        =/ "0" SP "nb-run" SP id SP id SP id SP nb-lang SP len
+              ; NB CELL RUN LANG, then the cell's source
+event        =/ "0" SP ( "nb-interrupt" / "nb-restart" / "nb-kernel" / "nb-closed" ) SP id
+request      =/ id SP "nb-state" SP id SP id SP id SP nb-state SP ( num / "-" )
+request      =/ id SP "nb-output" SP id SP id SP id SP nb-op SP ( num / nb-token / "-" ) SP len
+              ; an output body; clear and clear-wait carry none (LEN 0)
+request      =/ id SP "nb-stream" SP id SP id SP id SP ( "stdout" / "stderr" ) SP len
+request      =/ id SP "nb-kernel-label" SP id SP nb-kstate SP len
+nb-state     = "queued" / "running" / "done" / "failed" / "cancelled"
+nb-kstate    = "idle" / "busy" / "starting" / "dead" / "none"
+nb-op        = "append" / "replace" / "clear" / "clear-wait"
+nb-lang      = 1*VCHAR                       ; a grammar name, spaces as "_", or "-"
+nb-token     = 1*64( %x61-7A / DIGIT / "_" / "." / "+" / "/" / "-" )
+nb-body      = num SP len LF nb-meta *nb-cell
+              ; N cells, the notebook's metadata
+nb-cell      = ( "code" / "markup" ) SP nb-lang SP ( num / "-" ) SP len SP len SP num LF
+              ; SOURCE_LEN META_LEN NOUT, then SOURCE, META and NOUT nb-output-body
+nb-output-body = ( "stdout" / "stderr" / "result" / "display" / "error" ) SP ( nb-token / "-" )
+                 SP len SP num LF
+              ; KEEP_LEN NITEM, then KEEP and NITEM items
+nb-item      = nb-token SP num SP num SP len LF
+              ; TYPE W H LEN, then LEN bytes
+nb-meta      = *OCTET                        ; META_LEN opaque bytes
