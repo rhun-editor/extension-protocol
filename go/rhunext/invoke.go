@@ -130,19 +130,15 @@ type Invoker interface {
 	Invoke(ext *Ext, inv Invocation)
 }
 
-// validCommandName is a local command name: 1 to 40 of [a-z0-9_].
-func validCommandName(name string) bool {
-	return name != "" && len(name) <= 40 && strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") == ""
-}
-
-// CommandRef is the record "command NAME LEN" LF ARGS: a reference to one of the extension's own
-// commands (local NAME) inside a body (code lens, tree items, status items …). When the user
-// activates it, rhun runs the command with FromRef and the ARGS as the body.
-func CommandRef(name string, args []byte) ([]byte, error) {
+// EncodeCommandRef is the record "command NAME LEN" LF ARGS: a reference to one of the extension's
+// own commands (local NAME) inside a body (code lens, tree items, status items …). When the user
+// activates it, rhun runs the command with FromRef and the ARGS as the body. (A code action's
+// command is a *CommandRef, which encodes the same record.)
+func EncodeCommandRef(name string, args []byte) ([]byte, error) {
 	return AppendCommandRef(nil, name, args)
 }
 
-// AppendCommandRef appends CommandRef's record to dst.
+// AppendCommandRef appends EncodeCommandRef's record to dst.
 func AppendCommandRef(dst []byte, name string, args []byte) ([]byte, error) {
 	if !validCommandName(name) {
 		return dst, &Error{Code: "syntax", Text: "a command name is 1 to 40 of a-z 0-9 _"}
@@ -179,10 +175,10 @@ func (e *Ext) RunCommandContext(ctx context.Context, name string, args []byte) (
 	return r.Body, nil
 }
 
-// Call is another extension running one of this extension's commands: "ID call EXT.NAME DOC
+// CallRequest is another extension running one of this extension's commands: "ID call EXT.NAME DOC
 // CALLER LEN" and ARGS. Context ends when rhun cancels it (the caller's 10 seconds are up, the
 // caller stopped) or the connection ends.
-type Call struct {
+type CallRequest struct {
 	ID      int64
 	Command string // the full name, EXT.NAME
 	Doc     Doc    // the active document, or 0
@@ -192,25 +188,25 @@ type Call struct {
 }
 
 // Name is the command's local name.
-func (c Call) Name() string { return Invocation{Command: c.Command}.Name() }
+func (c CallRequest) Name() string { return Invocation{Command: c.Command}.Name() }
 
 // Callee answers calls of its commands declared callable ([command-options] NAME.callable = yes).
 // The result goes back to the caller (at most 1 MiB); an *Error goes back with its code and text,
 // any other error as refused.
 type Callee interface {
-	Call(ext *Ext, c Call) ([]byte, error)
+	Call(ext *Ext, c CallRequest) ([]byte, error)
 }
 
-func parseCall(id int64, f []string, args []byte, ctx context.Context) (Call, bool) {
+func parseCall(id int64, f []string, args []byte, ctx context.Context) (CallRequest, bool) {
 	// f: EXT.NAME DOC CALLER LEN
 	if len(f) != 4 || !strings.Contains(f[0], ".") || f[2] == "" {
-		return Call{}, false
+		return CallRequest{}, false
 	}
 	doc, err := strconv.ParseInt(f[1], 10, 64)
 	if err != nil || doc < 0 {
-		return Call{}, false
+		return CallRequest{}, false
 	}
-	return Call{ID: id, Command: f[0], Doc: Doc(doc), Caller: f[2], Args: args, Context: ctx}, true
+	return CallRequest{ID: id, Command: f[0], Doc: Doc(doc), Caller: f[2], Args: args, Context: ctx}, true
 }
 
 // answerCall runs the Callee for a call request: the reply's body, or the error to send.

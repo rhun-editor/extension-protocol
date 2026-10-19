@@ -193,8 +193,8 @@ Panel buttons and clicks run command references, whose ARGS arrive through `comm
 Protocol 1.1's `command-args` tells a command where it was invoked from (`palette`, `key`, `menu`,
 `ref`) and gives it a body: a key binding's ARGS, a menu's `TARGET` line and the item's args, or a
 command reference's ARGS. Go handlers implement `Invoker` (`Invocation.From`, `.Body`,
-`.Target()` for menus), build references with `CommandRef`, run built-ins and other extensions'
-callable commands with `RunCommand`, and answer calls with `Callee` (`Call.Context` ends on
+`.Target()` for menus), build references with `EncodeCommandRef`, run built-ins and other extensions'
+callable commands with `RunCommand`, and answer calls with `Callee` (`CallRequest.Context` ends on
 `cancel`). Rust has `Handler::invoke`, `command_ref`, `Ext::run_command` and `Handler::call`; C has
 `rx_handlers.invoke`, `rx_menu_target`, `rx_command_ref`, `rx_run_command` and `rx_handlers.call`.
 `context-keys` sets the extension's keys for when clauses (`SetContext` / `set_context` /

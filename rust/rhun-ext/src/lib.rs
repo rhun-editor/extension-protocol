@@ -1871,7 +1871,7 @@ impl Ext {
                         } else if verb == "run-command" {
                             match fields.last().and_then(|v| v.parse::<usize>().ok()) {
                                 Some(n) if n <= commands::MAX_CALL_RESULT => n,
-                                _ => break,
+                                _ => return Msg::End,
                             }
                         } else {
                             fields.last().and_then(|v| v.parse().ok()).unwrap_or(0)
