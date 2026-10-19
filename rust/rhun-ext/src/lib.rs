@@ -1368,10 +1368,16 @@ impl Ext {
 
     /// The reply for a request: from the reader thread, or (without threads) read here.
     fn wait(&self, rx: Receiver<Result<Reply, Error>>) -> Result<Reply, Error> {
+        self.recv_wait(&rx).unwrap_or_else(|| Err(closed_error()))
+    }
+
+    /// The next item on `rx`: sent by the reader thread, or (without threads) read here, keeping
+    /// the events and requests read meanwhile for later; `None` once rhun is gone and nothing came.
+    pub(crate) fn recv_wait<T>(&self, rx: &Receiver<T>) -> Option<T> {
         if let Some(inline) = &self.inline {
             loop {
-                if let Ok(reply) = rx.try_recv() {
-                    return reply;
+                if let Ok(item) = rx.try_recv() {
+                    return Some(item);
                 }
                 let msg = {
                     let mut input = inline.input.lock().unwrap();
@@ -1382,13 +1388,13 @@ impl Ext {
                     Msg::End => {
                         self.close();
                         inline.queue.lock().unwrap().push_back(Msg::End);
-                        return rx.try_recv().unwrap_or_else(|_| Err(closed_error()));
+                        return rx.try_recv().ok();
                     }
                     other => inline.queue.lock().unwrap().push_back(other),
                 }
             }
         }
-        rx.recv().unwrap_or_else(|_| Err(closed_error()))
+        rx.recv().ok()
     }
 
     /// [`Ext::request`] whose `0 found ID` batches and reply come through the receiver
@@ -2184,7 +2190,7 @@ impl Ext {
                         let p = self.pending.lock().unwrap();
                         if let Some(s) = p.streams.get(&id) {
                             let _ = s.send(StreamItem::Batch(std::mem::take(&mut ev.body)));
-                            continue;
+                            return Msg::Delivered;
                         }
                     }
                     if ev.name == "cancel" {
