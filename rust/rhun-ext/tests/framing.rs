@@ -778,7 +778,7 @@ fn compiled_transform_negotiation_and_framing() {
 fn workspace_edit_transactions_and_the_editor_model() {
     use rhun_ext::{
         Create, Linked, LinkedRequest, Location, Rename, Reveal, Selection, Selections, Show,
-        Target, TextEdit, Visible, WorkspaceEdit,
+        Target, TextEdit, WorkspaceEdit,
     };
     struct Model(Sender<String>);
     impl Handler for Model {
@@ -827,11 +827,6 @@ fn workspace_edit_transactions_and_the_editor_model() {
         fn selections(&mut self, _ext: &Ext, s: &Selections) {
             self.0
                 .send(format!("selections {} {:?}", s.doc, s.sels))
-                .unwrap();
-        }
-        fn visible(&mut self, _ext: &Ext, v: &Visible) {
-            self.0
-                .send(format!("visible {} {:?}", v.doc, v.ranges))
                 .unwrap();
         }
         fn linked(&mut self, _ext: &Ext, req: &LinkedRequest) -> Linked {
@@ -907,12 +902,11 @@ fn workspace_edit_transactions_and_the_editor_model() {
     host.send("error 6 stale 2 /p/a.rs changed on disk\n");
     assert_eq!(next(&got), "stale 2 /p/a.rs changed on disk Some(File(0))");
     // events with and without a body, then a linked request
-    host.send("0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n0 visible 4 1 1 40\n9 linked 4 7 3 2\n");
+    host.send("0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n9 linked 4 7 3 2\n");
     assert_eq!(
         next(&got),
         "selections 4 [Selection { anchor: Pos { line: 3, col: 1 }, cursor: Pos { line: 3, col: 5 } }, Selection { anchor: Pos { line: 1, col: 2 }, cursor: Pos { line: 1, col: 2 } }]"
     );
-    assert_eq!(next(&got), "visible 4 [(1, 40)]");
     let linked = "2\n3 2 3 5\n4 3 4 6\nword 1\n-";
     assert_eq!(host.line(), format!("ok 9 {}", linked.len()));
     assert_eq!(host.body(linked.len()), linked);

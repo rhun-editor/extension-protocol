@@ -1,5 +1,4 @@
-//! The editor model of protocol 1.1: several selections and the visible lines (feature
-//! `selections`), scrolling to a place and listing locations (feature `reveal`), diff tabs
+//! The editor model of protocol 1.1: several selections (feature `selections`), scrolling to a place and listing locations (feature `reveal`), diff tabs
 //! (feature `diff`) and linked editing ranges (feature `linked-editing`).
 
 use crate::lang::{encode_locations, Location};
@@ -7,8 +6,6 @@ use crate::{Doc, Event, Pos, Range};
 
 /// The most selections a document has, and a `select-many` sends.
 pub const MAX_SELECTIONS: usize = 512;
-/// The most ranges of a `visible` event.
-pub const MAX_VISIBLE: usize = 64;
 /// The longest title of `show-locations` and `diff` rhun shows.
 pub const MAX_TITLE: usize = 200;
 /// The most ranges of a linked editing answer.
@@ -79,34 +76,6 @@ impl Selections {
             sels.push(Selection::new(pos_at(&f, 0)?, pos_at(&f, 2)?));
         }
         Some(Selections { doc, sels })
-    }
-}
-
-/// The event `0 visible DOC N L1 L2 …` (feature `selections`): the active document's shown lines,
-/// as inclusive ranges top to bottom.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Visible {
-    pub doc: Doc,
-    pub ranges: Vec<(u32, u32)>,
-}
-
-impl Visible {
-    pub fn parse(ev: &Event) -> Option<Visible> {
-        if ev.name != "visible" || ev.fields.len() < 4 {
-            return None;
-        }
-        let doc = ev.fields[0].parse().ok()?;
-        let n: usize = ev.fields[1].parse().ok()?;
-        if n == 0 || n > MAX_VISIBLE || ev.fields.len() != 2 + 2 * n {
-            return None;
-        }
-        let mut ranges = Vec::with_capacity(n);
-        for i in 0..n {
-            let a: u32 = ev.fields[2 + 2 * i].parse().ok()?;
-            let b: u32 = ev.fields[3 + 2 * i].parse().ok()?;
-            ranges.push((a, b));
-        }
-        Some(Visible { doc, ranges })
     }
 }
 
@@ -292,10 +261,6 @@ mod tests {
         );
         assert!(Selections::parse(&ev("0 selections 4 3 16", "3 1 3 5\n1 2 1 2\n")).is_none());
         assert!(Selections::parse(&ev("0 selections 4 1 6", "3 1 3\n")).is_none());
-        let v = Visible::parse(&ev("0 visible 4 2 1 30 41 60", "")).unwrap();
-        assert_eq!(v.ranges, vec![(1, 30), (41, 60)]);
-        assert!(Visible::parse(&ev("0 visible 4 2 1 30", "")).is_none());
-        assert!(Visible::parse(&ev("0 visible 4 0", "")).is_none());
     }
 
     #[test]

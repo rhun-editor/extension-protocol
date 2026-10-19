@@ -74,9 +74,8 @@ error-apply   = "error" SP id SP code SP num SP rest     ; with workspace-edits:
 code         =/ "io"
 
 ; selections
-event        =/ "0" SP e-selections / "0" SP e-visible
+event        =/ "0" SP e-selections
 e-selections  = "selections" SP doc SP num SP len        ; N lines of sel-line follow, the primary first
-e-visible     = "visible" SP doc SP num 1*( SP line SP line )   ; N (1 to 64) inclusive line ranges
 request      =/ id SP r-select-many
 r-select-many = "select-many" SP doc SP num SP len        ; N (1 to 512) lines of sel-line follow
 sel-line      = range LF                                  ; anchor, then cursor

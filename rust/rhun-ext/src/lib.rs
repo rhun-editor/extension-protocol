@@ -34,7 +34,7 @@
 //! [`Feature::FileOperations`]: [`WorkspaceEdit::file_hashed`], [`WorkspaceEdit::create`],
 //! [`WorkspaceEdit::rename`], [`WorkspaceEdit::delete`], [`edits::from_ordered`] for LSP's ordered
 //! changes, [`ApplyError`]), several selections ([`Feature::Selections`]: [`Ext::select_many`],
-//! [`Handler::selections`], [`Handler::visible`]), [`Ext::reveal`] and [`Ext::show_locations`]
+//! [`Handler::selections`]), [`Ext::reveal`] and [`Ext::show_locations`]
 //! ([`Feature::Reveal`]), diff tabs ([`Feature::Diff`]: [`Ext::diff`]) and linked editing
 //! ([`Feature::LinkedEditing`]: [`Handler::linked`]).
 
@@ -61,7 +61,7 @@ use std::thread;
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
 };
-pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show, Visible};
+pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show};
 pub use edits::{Change, Located, OrderError};
 pub use lang::{
     fnv1a64, ActionsRequest, CodeAction, Create, Delete, Entry, FileEdit, FileOp, FormatRequest,
@@ -163,8 +163,7 @@ pub enum Feature {
     WorkspaceEdits,
     /// Creating, renaming and deleting files in workspace edits (with [`Feature::WorkspaceEdits`]).
     FileOperations,
-    /// Every selection ([`Handler::selections`]), the visible lines ([`Handler::visible`]) and
-    /// [`Ext::select_many`].
+    /// Every selection ([`Handler::selections`]) and [`Ext::select_many`].
     Selections,
     /// [`Ext::reveal`] and [`Ext::show_locations`].
     Reveal,
@@ -636,8 +635,6 @@ pub trait Handler: Send {
     /// Every selection of a document changed (feature `selections`, `[subscribe] selection`):
     /// the primary first. A caret that only moved comes as `cursor` instead.
     fn selections(&mut self, _ext: &Ext, _sels: &Selections) {}
-    /// The active document's visible lines changed (feature `selections`, `[subscribe] visible`).
-    fn visible(&mut self, _ext: &Ext, _vis: &Visible) {}
     /// rhun asks for the ranges that change together with the word at the cursor (feature
     /// `linked-editing`, `[provides] linked`); none says there are none.
     fn linked(&mut self, _ext: &Ext, _req: &LinkedRequest) -> Linked {
@@ -1374,11 +1371,6 @@ impl Ext {
                         "selections" if self.has(Feature::Selections) => {
                             if let Some(s) = Selections::parse(&ev) {
                                 h.selections(self, &s);
-                            }
-                        }
-                        "visible" if self.has(Feature::Selections) => {
-                            if let Some(v) = Visible::parse(&ev) {
-                                h.visible(self, &v);
                             }
                         }
                         "bye" => {

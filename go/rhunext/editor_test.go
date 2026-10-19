@@ -57,9 +57,6 @@ func (m *modelProbe) Event(ext *Ext, ev Event) {
 	if d, sels, ok := ParseSelections(ev); ok {
 		m.got <- fmt.Sprintf("selections %d %v", d, sels)
 	}
-	if d, lines, ok := ParseVisible(ev); ok {
-		m.got <- fmt.Sprintf("visible %d %v", d, lines)
-	}
 }
 
 func (m *modelProbe) Linked(ext *Ext, req LinkedRequest) Linked {
@@ -139,11 +136,8 @@ func TestWorkspaceEditTransactionsAndTheEditorModel(t *testing.T) {
 	if got := m.next(t); got != "stale 2 /p/a.go changed on disk {Op:false Index:0}" {
 		t.Fatal(got)
 	}
-	s.send("0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n0 visible 4 1 1 40\n9 linked 4 7 3 2\n")
+	s.send("0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n9 linked 4 7 3 2\n")
 	if got := m.next(t); got != "selections 4 [{{3 1} {3 5}} {{1 2} {1 2}}]" {
-		t.Fatal(got)
-	}
-	if got := m.next(t); got != "visible 4 [{1 40}]" {
 		t.Fatal(got)
 	}
 	s.answer(9, "2\n3 2 3 5\n4 3 4 6\nword 1\n-")
@@ -190,11 +184,6 @@ func TestEditorModelBodiesAndEvents(t *testing.T) {
 	} {
 		if _, _, ok := ParseSelections(bad); ok {
 			t.Fatalf("%+v parsed", bad)
-		}
-	}
-	for _, bad := range [][]string{{"4", "2", "1", "30"}, {"4", "0"}, {"4", "1", "x", "3"}} {
-		if _, _, ok := ParseVisible(Event{Name: "visible", Args: bad}); ok {
-			t.Fatalf("%v parsed", bad)
 		}
 	}
 	w := "-_\n-é:"

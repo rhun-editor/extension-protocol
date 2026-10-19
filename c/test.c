@@ -1096,17 +1096,12 @@ static void on_model_ready(rx_ext *ext, const char *project, void *user) {
 static void on_model_event(rx_ext *ext, const rx_event *ev, void *user) {
     (void)ext, (void)user;
     rx_selection s[4];
-    rx_lines v[4];
     rx_doc d;
     char note[128];
     int n;
     if ((n = rx_parse_selections(ev, &d, s, 4)) > 0) {
         snprintf(note, sizeof note, "sel %lld %d %d:%d-%d:%d %d:%d", (long long)d, n, s[0].anchor.line, s[0].anchor.col,
                  s[0].cursor.line, s[0].cursor.col, s[1].cursor.line, s[1].cursor.col);
-        model_note(note);
-    }
-    if ((n = rx_parse_visible(ev, &d, v, 4)) > 0) {
-        snprintf(note, sizeof note, "vis %lld %d %d-%d", (long long)d, n, v[0].first, v[0].last);
         model_note(note);
     }
 }
@@ -1138,7 +1133,6 @@ static void editor_model(void) {
         "ok 5\n"
         "error 6 stale 2 /p/a.c changed on disk\n"
         "0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n"
-        "0 visible 4 1 1 40\n"
         "9 linked 4 7 3 2\n"
         "0 bye\n",
         &got);
@@ -1154,7 +1148,7 @@ static void editor_model(void) {
     rx_buf_fmt(&want, "6 apply %zu\n%s", strlen(edit), edit);
     ok(&want, 9, "2\n3 2 3 5\n4 3 4 6\nword 3\n-_:");
     same(&got, want.data);
-    assert(strcmp(model_seen, "ready|sel 4 2 3:1-3:5 1:2|vis 4 1 1-40|") == 0);
+    assert(strcmp(model_seen, "ready|sel 4 2 3:1-3:5 1:2|") == 0);
 
     /* without the features: refused before sending, linked unknown, the body still read */
     rx_buf_clear(&got);

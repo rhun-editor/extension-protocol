@@ -106,10 +106,6 @@
         },
         "hover": {
           "$ref": "#/$defs/patterns"
-        },
-        "visible": {
-          "$ref": "#/$defs/patterns",
-          "description": "protocol 1.1, feature selections: the visible event for the active document"
         }
       },
       "additionalProperties": false

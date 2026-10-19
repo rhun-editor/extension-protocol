@@ -1,6 +1,6 @@
 package rhunext
 
-// Protocol 1.1's editor model: every selection and the visible lines (feature selections),
+// Protocol 1.1's editor model: every selection (feature selections),
 // scrolling a document to a place and listing locations (feature reveal), diff tabs (feature
 // diff) and linked editing ranges (feature linked-editing).
 
@@ -13,10 +13,9 @@ import (
 )
 
 // The caps of the editor model: selections a document has and select-many sends, ranges of a
-// visible event, the bytes of a show-locations or diff title, ranges of a linked answer.
+// the bytes of a show-locations or diff title, ranges of a linked answer.
 const (
 	MaxSelections = 512
-	MaxVisible    = 64
 	MaxTitle      = 200
 	MaxLinked     = 64
 )
@@ -84,32 +83,6 @@ func ParseSelections(ev Event) (Doc, []Selection, bool) {
 		sels = append(sels, Selection{a, c})
 	}
 	return Doc(d), sels, true
-}
-
-// LineRange is an inclusive range of lines.
-type LineRange struct{ First, Last int }
-
-// ParseVisible reads a visible event ("0 visible DOC N L1 L2 …"): the active document's shown
-// lines, top to bottom.
-func ParseVisible(ev Event) (Doc, []LineRange, bool) {
-	if ev.Name != "visible" || len(ev.Args) < 4 {
-		return 0, nil, false
-	}
-	d, err1 := strconv.ParseInt(ev.Args[0], 10, 64)
-	n, err2 := strconv.Atoi(ev.Args[1])
-	if err1 != nil || err2 != nil || n < 1 || n > MaxVisible || len(ev.Args) != 2+2*n {
-		return 0, nil, false
-	}
-	out := make([]LineRange, n)
-	for i := range out {
-		a, e1 := strconv.Atoi(ev.Args[2+2*i])
-		b, e2 := strconv.Atoi(ev.Args[3+2*i])
-		if e1 != nil || e2 != nil {
-			return 0, nil, false
-		}
-		out[i] = LineRange{a, b}
-	}
-	return Doc(d), out, true
 }
 
 // RevealHow is where reveal puts the position in the view.

@@ -1348,7 +1348,7 @@ func main() {
 	}
 	for k := range m.subscribe {
 		switch k {
-		case "opened", "saved", "changed", "cursor", "selection", "edits", "hover", "visible":
+		case "opened", "saved", "changed", "cursor", "selection", "edits", "hover":
 		default:
 			bad(fmt.Sprintf("[subscribe] %s is not an event with a subscription", k))
 		}
@@ -1510,16 +1510,16 @@ func main() {
 		}
 	}
 
-	// 2b'. protocol 1.1: every selection and the visible lines, for an extension that agreed
-	// selections and subscribes to them
-	if h.features["selections"] && (h.sub("selection") || h.sub("visible")) {
+	// 2b'. protocol 1.1: every selection, for an extension that agreed selections and subscribes
+	// to selection
+	if h.features["selections"] && h.sub("selection") {
 		h.sendEditorEvents(h.docs[2])
 		h.serve(500 * time.Millisecond)
 		if h.cmdExited() {
-			h.fail("selections", "the program exited on a selections or visible event")
+			h.fail("selections", "the program exited on a selections event")
 			report(h)
 		}
-		h.ok("takes the selections and visible events")
+		h.ok("takes the selections event")
 	}
 
 	// 2c. section 12: the requests rhun sends (completion, signature help, definition, references,

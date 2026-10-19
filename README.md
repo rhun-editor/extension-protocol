@@ -69,7 +69,7 @@ Protocol 1.1 (v1.4.0 of the SDKs) adds six features, specified in [v1.1](v1.1/v1
 | `workspace-edits`: an edit is one transaction, files that are not open are edited on disk, one undo | `WorkspaceEdit::file_hashed`, `.label`, `.confirm`, `Ext::apply` returns `ApplyError` (code, entry, text) | `AddFileHashed`, `Label`, `Confirm`, `Apply` returns `*ApplyError` | `rx_wedit_file_hashed`, `rx_fnv1a64`, `rx_wedit_label`, `rx_wedit_confirm`, `rx_last_apply_error` |
 | `file-operations`: create, rename and delete entries | `.create`, `.rename`, `.delete` with `Create`, `Rename`, `Delete` | `Create`, `Rename`, `Delete` with their options | `rx_wedit_create`, `rx_wedit_rename`, `rx_wedit_delete` with `RX_OVERWRITE` … |
 | LSP's ordered `documentChanges` onto rhun's phases | `edits::from_ordered`, `edits::locate` | `NormalizeOrdered`, `Locate` | `rx_wedit_from_ordered`, `rx_locate` |
-| `selections`: every selection, the visible lines | `Ext::select_many`, `Handler::selections`, `Handler::visible` | `SelectMany`, `ParseSelections`, `ParseVisible` | `rx_select_many`, `rx_parse_selections`, `rx_parse_visible` |
+| `selections`: every selection | `Ext::select_many`, `Handler::selections` | `SelectMany`, `ParseSelections` | `rx_select_many`, `rx_parse_selections` |
 | `reveal`: scroll to a place, list locations | `Ext::reveal`, `Ext::show_locations` | `Reveal`, `ShowLocations` | `rx_reveal`, `rx_show_locations` |
 | `diff`: a diff tab between two open documents | `Ext::diff`, `Ext::diff_close` | `Diff`, `DiffClose` | `rx_diff`, `rx_diff_close` |
 | `linked-editing`: ranges that change together (`[provides] linked`) | `Handler::linked` → `Linked` | `LinkedEditor` → `Linked` | the `linked` handler, `rx_linked_range`, `rx_linked_word` |

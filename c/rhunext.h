@@ -24,7 +24,7 @@
  * workspace edits as transactions and file operations ("workspace-edits file-operations":
  * rx_wedit_file_hashed, rx_wedit_create/rename/delete, rx_wedit_label, rx_wedit_confirm,
  * rx_wedit_from_ordered for LSP's ordered changes, rx_last_apply_error), several selections
- * ("selections": rx_select_many, rx_parse_selections, rx_parse_visible), "reveal" (rx_reveal,
+ * ("selections": rx_select_many, rx_parse_selections), "reveal" (rx_reveal,
  * rx_show_locations), "diff" (rx_diff, rx_diff_close) and "linked-editing" (the linked handler).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * MIT license. */
@@ -362,10 +362,6 @@ int rx_select_many(rx_ext *ext, rx_doc doc, const rx_selection *sels, int n);
 /* the event "0 selections DOC N LEN" (every selection, the primary first): up to max into sels,
  * the count, or -1 when ev is not one or does not read */
 int rx_parse_selections(const rx_event *ev, rx_doc *doc, rx_selection *sels, int max);
-/* the event "0 visible DOC N L1 L2 ...": the active document's shown lines, inclusive ranges top
- * to bottom, up to max into lines; the count, or -1 */
-typedef struct { int first, last; } rx_lines;
-int rx_parse_visible(const rx_event *ev, rx_doc *doc, rx_lines *lines, int max);
 /* "reveal": scrolls the document's view so at shows, the cursor stays: where is "top", "center",
  * "nearest" or "center-if-outside" */
 int rx_reveal(rx_ext *ext, rx_doc doc, rx_pos at, const char *where);
@@ -2295,21 +2291,6 @@ int rx_parse_selections(const rx_event *ev, rx_doc *doc, rx_selection *sels, int
         if (!nl && i + 1 < n) return -1;
     }
     if (p != end) return -1;
-    if (doc) *doc = d;
-    return n < max ? n : max;
-}
-
-int rx_parse_visible(const rx_event *ev, rx_doc *doc, rx_lines *lines, int max) {
-    int64_t d;
-    int n;
-    if (!ev || strcmp(ev->name, "visible") || ev->argc < 4 || !rx_positive_num(ev->argv[0], INT64_MAX, &d) ||
-        !rx_int_field(ev->argv[1], &n) || n < 1 || n > 64 || ev->argc != 2 + 2 * n)
-        return -1;
-    for (int i = 0; i < n; i++) {
-        int a, b;
-        if (!rx_int_field(ev->argv[2 + 2 * i], &a) || !rx_int_field(ev->argv[3 + 2 * i], &b)) return -1;
-        if (i < max && lines) lines[i].first = a, lines[i].last = b;
-    }
     if (doc) *doc = d;
     return n < max ? n : max;
 }

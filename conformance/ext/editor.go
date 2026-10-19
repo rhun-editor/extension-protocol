@@ -1,8 +1,8 @@
 package main
 
 // Protocol 1.1's editor model: select-many (feature selections), reveal and show-locations
-// (feature reveal), diff and diff-close (feature diff) served and validated; the selections and
-// visible events sent to subscribers; the linked request (feature linked-editing) asked and its
+// (feature reveal), diff and diff-close (feature diff) served and validated; the selections event
+// sent to subscribers; the linked request (feature linked-editing) asked and its
 // answer checked against the document: 0 or 2 to 64 ranges, well formed, with equal text, apart,
 // one holding the cursor, and the word record.
 
@@ -213,9 +213,8 @@ func (h *host) editorRequest(id int64, verb string, args []string, msg message, 
 	}
 }
 
-// sendEditorEvents sends the selections and visible events of the active document to an
-// extension that agreed selections and subscribes to them, as rhun does at catch-up and when they
-// change
+// sendEditorEvents sends the selections event of the active document to an extension that
+// agreed selections and subscribes to selection, as rhun does at catch-up and when they change
 func (h *host) sendEditorEvents(d *doc) {
 	if !h.features["selections"] || d == nil {
 		return
@@ -223,10 +222,6 @@ func (h *host) sendEditorEvents(d *doc) {
 	if h.sub("selection") {
 		body := "1 1 1 3\n2 1 2 1\n"
 		h.write(fmt.Sprintf("0 selections %d 2 %d\n%s", d.id, len(body), body))
-	}
-	if h.sub("visible") {
-		lines := bytes.Count(d.text, []byte("\n")) + 1
-		h.write(fmt.Sprintf("0 visible %d 1 1 %d\n", d.id, lines))
 	}
 }
 
