@@ -2,6 +2,8 @@ package rhunext
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"testing"
 )
@@ -93,4 +95,58 @@ func TestDebugStartAndEnded(t *testing.T) {
 	if d := <-p.ended; d != (DebugEnded{8, 0, false}) {
 		t.Fatalf("ended %+v", d)
 	}
+}
+
+type resolveProbe struct {
+	debugProbe
+	answer func(req DebugResolveRequest) (DebugConfig, error)
+}
+
+func (p *resolveProbe) ResolveDebug(ext *Ext, req DebugResolveRequest) (DebugConfig, error) {
+	return p.answer(req)
+}
+
+func TestDebugResolve(t *testing.T) {
+	p := &resolveProbe{debugProbe: debugProbe{ready: make(chan *Ext, 1), ended: make(chan DebugEnded, 1)}}
+	p.answer = func(req DebugResolveRequest) (DebugConfig, error) {
+		switch req.Config.String("program") {
+		case "same":
+			return nil, nil
+		case "no":
+			return nil, errors.New("no Go package in this folder")
+		case "cancel":
+			return nil, ErrDebugCancelled
+		}
+		if req.Type != "go" || req.Request != "launch" || !req.NoDebug || req.Doc != 3 || req.Path != "/p/a.go" || req.At != (Pos{4, 5}) {
+			t.Errorf("request %+v", req)
+		}
+		c := req.Config
+		c.Set("mode", DebugStr("test"))
+		return c, nil
+	}
+	s := startHost(t, []string{FeatureDebug}, p)
+	s.expect("hello 1 debug")
+	s.send("0 features debug\n0 ready /project\n")
+	<-p.ready
+	send := func(id int, program string) {
+		var c DebugConfig
+		c.Set("type", DebugStr("go"))
+		c.Set("program", DebugStr(program))
+		b, _ := c.Encode()
+		b = append(b, "context 3 4 5 7\n/p/a.go"...)
+		s.send(fmt.Sprintf("%d debug-resolve go launch 1 %d\n", id, len(b)) + string(b))
+	}
+	send(5, "same")
+	s.expect("ok 5 0")
+	send(6, "no")
+	s.expect("error 6 refused no Go package in this folder")
+	send(7, "cancel")
+	s.expect("error 7 cancelled the launch was cancelled")
+	send(8, "x")
+	var want DebugConfig
+	want.Set("type", DebugStr("go"))
+	want.Set("program", DebugStr("x"))
+	want.Set("mode", DebugStr("test"))
+	b, _ := want.Encode()
+	s.answer(8, string(b))
 }

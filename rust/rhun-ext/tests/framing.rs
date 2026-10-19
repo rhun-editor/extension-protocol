@@ -837,3 +837,79 @@ fn debug_start_and_ended() {
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+#[test]
+fn debug_resolve_answers() {
+    struct Res;
+    impl Handler for Res {
+        fn resolve_debug(
+            &mut self,
+            _ext: &Ext,
+            req: &rhun_ext::DebugResolve,
+        ) -> rhun_ext::Resolved {
+            match req.config.get_str("program") {
+                Some("same") => rhun_ext::Resolved::Unchanged,
+                Some("no") => rhun_ext::Resolved::Refuse("no Go package in this folder".into()),
+                Some("cancel") => rhun_ext::Resolved::Cancel,
+                _ => {
+                    assert_eq!(
+                        (req.kind.as_str(), req.request.as_str(), req.no_debug),
+                        ("go", "launch", true)
+                    );
+                    assert_eq!(req.doc, Some((3, Pos::new(4, 5), "/p/a.go".to_string())));
+                    let mut c = req.config.clone();
+                    c.set("mode", rhun_ext::DebugValue::Str("test".into()));
+                    rhun_ext::Resolved::Config(c)
+                }
+            }
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Debug],
+            Res,
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 debug");
+    host.send("0 features debug\n0 ready -\n");
+    let config = |program: &str| {
+        let mut c = rhun_ext::DebugConfig::new();
+        c.set("type", rhun_ext::DebugValue::Str("go".into()));
+        c.set("program", rhun_ext::DebugValue::Str(program.into()));
+        c
+    };
+    let send = |host: &Host, id: u32, program: &str| {
+        let mut b = config(program).encode().unwrap();
+        b.extend_from_slice(b"context 3 4 5 7\n/p/a.go");
+        host.send(&format!("{id} debug-resolve go launch 1 {}\n", b.len()));
+        host.to_ext.send(b).unwrap();
+    };
+    send(&host, 5, "same");
+    assert_eq!(host.line(), "ok 5 0");
+    send(&host, 6, "no");
+    assert_eq!(host.line(), "error 6 refused no Go package in this folder");
+    send(&host, 7, "cancel");
+    assert_eq!(host.line(), "error 7 cancelled the launch was cancelled");
+    send(&host, 8, "x");
+    let mut want = config("x");
+    want.set("mode", rhun_ext::DebugValue::Str("test".into()));
+    let w = want.encode().unwrap();
+    assert_eq!(host.line(), format!("ok 8 {}", w.len()));
+    assert_eq!(host.body(w.len()).into_bytes(), w);
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}

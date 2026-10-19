@@ -437,6 +437,21 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 				return nil, err
 			}
 		}
+		// debug-resolve TYPE REQUEST NODEBUG LEN is followed by a configuration body; "0 cancel ID"
+		// ends its context
+		if len(fields) == 6 && fields[1] == "debug-resolve" {
+			n, ok := bodyLen(fields[5], MaxDebugBody)
+			if !ok {
+				return nil, fmt.Errorf("a debug-resolve length %q", fields[5])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+			if _, err := e.beginSource(id); err != nil {
+				return nil, err
+			}
+		}
 		// commit-message (LEN) is followed by a body; "0 cancel ID" ends its context
 		if len(fields) == 3 && fields[1] == FeatureCommitMessage {
 			n, ok := bodyLen(fields[2], MaxEventBody)

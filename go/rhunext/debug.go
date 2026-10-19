@@ -327,3 +327,57 @@ func ParseDebugEnded(ev Event) (DebugEnded, bool) {
 	}
 	return d, true
 }
+
+// DebugResolveRequest is debug-resolve: rhun shows a debugger's extension the configuration
+// (variables replaced, types applied) before every launch of a debugger with resolve = yes.
+// Context is cancelled when rhun withdraws the request (the user pressed Stop).
+type DebugResolveRequest struct {
+	ID      int64
+	Type    string
+	Request string // launch or attach
+	NoDebug bool
+	Config  DebugConfig
+	Doc     Doc // the active document, 0 for none
+	At      Pos
+	Path    string
+	Context context.Context
+}
+
+// DebugResolver answers debug-resolve: the complete resolved configuration, nil to launch it
+// unchanged, ErrDebugCancelled to abandon the launch quietly (the user dismissed a question), or
+// any other error to abandon it with the error's text. It may ask the user (Choose, Ask).
+type DebugResolver interface {
+	ResolveDebug(ext *Ext, req DebugResolveRequest) (DebugConfig, error)
+}
+
+// ErrDebugCancelled abandons a launch quietly.
+var ErrDebugCancelled = errors.New("cancelled")
+
+func parseDebugResolve(id int64, f []string, body []byte, ctx context.Context) (DebugResolveRequest, bool) {
+	if len(f) != 6 || (f[3] != "launch" && f[3] != "attach") || (f[4] != "0" && f[4] != "1") {
+		return DebugResolveRequest{}, false
+	}
+	cfg, dctx, err := ParseDebugConfig(body)
+	if err != nil {
+		return DebugResolveRequest{}, false
+	}
+	return DebugResolveRequest{ID: id, Type: f[2], Request: f[3], NoDebug: f[4] == "1", Config: cfg,
+		Doc: dctx.Doc, At: dctx.At, Path: dctx.Path, Context: ctx}, true
+}
+
+func answerDebugResolve(e *Ext, r DebugResolver, req DebugResolveRequest) ([]byte, *Error) {
+	cfg, err := r.ResolveDebug(e, req)
+	switch {
+	case errors.Is(err, ErrDebugCancelled) || req.Context.Err() != nil:
+		return nil, &Error{Code: "cancelled", Text: "the launch was cancelled"}
+	case err != nil:
+		return nil, &Error{Code: "refused", Text: err.Error()}
+	case cfg == nil:
+		return nil, nil
+	}
+	b, err := cfg.Encode()
+	if err != nil {
+		return nil, &Error{Code: "toobig", Text: err.Error()}
+	}
+	return b, nil
+}

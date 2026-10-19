@@ -17,6 +17,9 @@ pub const MAX_DEBUG_SEGMENTS: usize = 16;
 /// A leaf's value.
 pub const MAX_DEBUG_VALUE: usize = 64 << 10;
 
+/// A configuration body's context record: the active document, the cursor and the path.
+pub type DebugDocContext = (Doc, Pos, String);
+
 /// One leaf's value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DebugValue {
@@ -137,7 +140,7 @@ impl DebugConfig {
 
     /// Reads a configuration body and its extra records (unknown ones are skipped): the
     /// configuration and the context record's document, position and path.
-    pub fn parse(body: &[u8]) -> Option<(DebugConfig, Option<(Doc, Pos, String)>)> {
+    pub fn parse(body: &[u8]) -> Option<(DebugConfig, Option<DebugDocContext>)> {
         let mut rest = body;
         fn line<'a>(rest: &mut &'a [u8]) -> Option<&'a str> {
             let nl = rest.iter().position(|&c| c == b'\n')?;
@@ -224,6 +227,57 @@ impl DebugEnded {
         };
         Some(DebugEnded { session, code })
     }
+}
+
+/// `ID debug-resolve TYPE REQUEST NODEBUG LEN` + configuration: what [`crate::Handler::resolve_debug`]
+/// gets before every launch of a debugger with `resolve = yes`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DebugResolve {
+    pub id: u64,
+    /// the debugger's type
+    pub kind: String,
+    /// `launch` or `attach`
+    pub request: String,
+    pub no_debug: bool,
+    pub config: DebugConfig,
+    /// the active document, the cursor and the document's path
+    pub doc: Option<DebugDocContext>,
+}
+
+impl DebugResolve {
+    /// `TYPE REQUEST NODEBUG LEN`, the fields after the verb, and the body.
+    pub fn parse(id: u64, fields: &[String], body: &[u8]) -> Option<DebugResolve> {
+        if fields.len() != 4 || !matches!(fields[1].as_str(), "launch" | "attach") {
+            return None;
+        }
+        let no_debug = match fields[2].as_str() {
+            "0" => false,
+            "1" => true,
+            _ => return None,
+        };
+        let (config, doc) = DebugConfig::parse(body)?;
+        Some(DebugResolve {
+            id,
+            kind: fields[0].clone(),
+            request: fields[1].clone(),
+            no_debug,
+            config,
+            doc: doc.filter(|d| d.0 > 0),
+        })
+    }
+}
+
+/// The answer to [`DebugResolve`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// launch the configuration as it is
+    Unchanged,
+    /// launch this one instead (the complete configuration, with `type`)
+    Config(DebugConfig),
+    /// abandon the launch quietly (the user dismissed a question)
+    Cancel,
+    /// abandon it and show the sentence
+    Refuse(String),
 }
 
 impl Ext {

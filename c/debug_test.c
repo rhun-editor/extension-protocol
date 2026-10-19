@@ -3,7 +3,49 @@
 #include "rhunext.h"
 #include <assert.h>
 
+static int resolver(rx_ext *ext, const rx_debug_resolve_ask *req, rx_debug_config *out, rx_buf *why, void *user) {
+    (void)ext;
+    (void)user;
+    const rx_debug_entry *p = rx_debug_config_get(&req->config, "program");
+    if (p && !strcmp(p->value, "same")) return 0;
+    if (p && !strcmp(p->value, "no")) {
+        rx_buf_str(why, "no Go package\nhere");
+        return -1;
+    }
+    if (p && !strcmp(p->value, "cancel")) return -2;
+    assert(!strcmp(req->type, "go") && !strcmp(req->request, "launch") && req->no_debug && req->ctx.doc == 3);
+    for (size_t i = 0; i < req->config.n; i++)
+        rx_debug_config_set(out, req->config.entries[i].kind, req->config.entries[i].path, req->config.entries[i].value);
+    rx_debug_config_set(out, 's', "mode", "test");
+    return 1;
+}
+
+static void resolve_through_rx_answer(void) {
+    rx_ext ext;
+    memset(&ext, 0, sizeof ext);
+    snprintf(ext.features, sizeof ext.features, "debug");
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.debug_resolve = resolver;
+    const char *programs[] = {"same", "no", "cancel", "x"};
+    for (int i = 0; i < 4; i++) {
+        rx_debug_config c = {0};
+        rx_debug_config_set(&c, 's', "type", "go");
+        rx_debug_config_set(&c, 's', "program", programs[i]);
+        rx_buf b = {NULL, 0, 0};
+        rx_debug_config_encode(&c, &b);
+        rx_buf_str(&b, "context 3 4 5 7\n/p/a.go");
+        char len[32];
+        snprintf(len, sizeof len, "%zu", b.len);
+        char *f[] = {"9", "debug-resolve", "go", "launch", "1", len};
+        rx_answer(&ext, &h, NULL, f, 6, (const unsigned char *)b.data, b.len);
+        rx_debug_config_free(&c);
+        rx_buf_free(&b);
+    }
+}
+
 int main(void) {
+    resolve_through_rx_answer();
     rx_debug_config c = {0};
     assert(rx_debug_config_set(&c, 's', "type", "go") == 0);
     assert(rx_debug_config_set(&c, 's', "args.0", "-test.run") == 0);

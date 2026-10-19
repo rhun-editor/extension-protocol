@@ -39,6 +39,8 @@ typedef struct { rx_pos start, end; } rx_range; /* half-open */
 typedef struct rx_ext rx_ext;
 struct rx_commit_message_ask_s;                  /* source control: rx_commit_message_ask */
 struct rx_quickdiff_ask_s;                       /* and rx_quickdiff_ask */
+struct rx_debug_resolve_ask_s;                   /* debuggers: rx_debug_resolve_ask */
+struct rx_debug_config_s;                        /* and rx_debug_config */
 
 /* bytes that grow: pictures, answers, anything built piece by piece */
 typedef struct { char *data; size_t len, cap; } rx_buf;
@@ -152,6 +154,11 @@ typedef struct {
     /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
      * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
     int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
+    /* debug-resolve (feature "debug", a debugger with resolve = yes): 0 launches req's configuration
+     * unchanged; 1 launches *out (the complete configuration) instead; -1 refuses with why's text;
+     * -2 cancels quietly. */
+    int (*debug_resolve)(rx_ext *ext, const struct rx_debug_resolve_ask_s *req, struct rx_debug_config_s *out,
+                         rx_buf *why, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -241,7 +248,7 @@ int rx_quickdiff_refresh(rx_ext *ext, const char *path);
  * typed leaves with dotted paths ("args.0", "env.LOG"): kind 's' string, 'n' integer (|v| < 2^53),
  * 'b' "true"/"false", 'z' null (empty value). Entries own their path and value. */
 typedef struct { char kind; char *path; char *value; size_t value_len; } rx_debug_entry;
-typedef struct { rx_debug_entry *entries; size_t n, cap; } rx_debug_config;
+typedef struct rx_debug_config_s { rx_debug_entry *entries; size_t n, cap; } rx_debug_config;
 /* the context record of a configuration body rhun sends: the active document (0: none) */
 typedef struct { rx_doc doc; rx_pos at; rx_buf path; } rx_debug_context;
 /* replaces the leaf (and anything under its path) or adds it; -1 for a bad kind, path or value */
@@ -257,6 +264,14 @@ int rx_debug_config_parse(const unsigned char *body, size_t len, rx_debug_config
 int64_t rx_debug_start(rx_ext *ext, const char *name, const rx_debug_config *c);
 /* "0 debug-ended SESSION CODE": 1 with the session and code (*has_code 0 when unknown), else 0 */
 int rx_parse_debug_ended(const rx_event *ev, int64_t *session, int *code, int *has_code);
+/* what debug_resolve gets */
+typedef struct rx_debug_resolve_ask_s {
+    int64_t id;
+    const char *type, *request;     /* request: launch or attach */
+    int no_debug;
+    rx_debug_config config;
+    rx_debug_context ctx;
+} rx_debug_resolve_ask;
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -586,10 +601,10 @@ static const char rx_bad_len[] = "a body's length that is not a decimal of at mo
 /* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
-    /* ID commit-message LEN */
+    /* ID commit-message LEN, ID debug-resolve TYPE REQUEST NODEBUG LEN */
     if (line[0] < '1' || line[0] > '9') return 0;
     const char *sp = strchr(line, ' ');
-    return sp && strncmp(sp + 1, "commit-message ", 15) == 0;
+    return sp && (strncmp(sp + 1, "commit-message ", 15) == 0 || strncmp(sp + 1, "debug-resolve ", 14) == 0);
 }
 
 /* reads the next message: a line, and a body when it is an edits or action event; NULL when the
@@ -2581,6 +2596,37 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
             rx_positive_num(f[3], INT64_MAX, &req.version))
             ok = h->quickdiff(ext, &req, &body, user);
+    } else if (strcmp(verb, "debug-resolve") == 0 && n == 6 && h->debug_resolve && rx_has(ext, "debug")) {
+        rx_debug_resolve_ask req;
+        memset(&req, 0, sizeof req);
+        req.type = f[2];
+        req.request = f[3];
+        req.no_debug = strcmp(f[4], "1") == 0;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
+            (strcmp(f[3], "launch") == 0 || strcmp(f[3], "attach") == 0) &&
+            rx_debug_config_parse(rbody, rbody_len, &req.config, &req.ctx) == 0) {
+            rx_debug_config out = {0};
+            rx_buf why = {NULL, 0, 0};
+            int r = h->debug_resolve(ext, &req, &out, &why, user);
+            ok = 1;
+            if (r == 1 && rx_debug_config_encode(&out, &body) < 0) {
+                e.fail = "toobig";
+                snprintf(e.why, sizeof e.why, "the configuration is over 1 MB");
+            } else if (r == -2) {
+                e.fail = "cancelled";
+                snprintf(e.why, sizeof e.why, "the launch was cancelled");
+            } else if (r < 0) {
+                e.fail = "refused";
+                size_t w = 0;
+                for (size_t i = 0; i < why.len && w + 1 < sizeof e.why; i++)
+                    e.why[w++] = why.data[i] == '\n' || why.data[i] == '\r' ? ' ' : why.data[i];
+                e.why[w] = 0;
+            }
+            rx_debug_config_free(&out);
+            rx_debug_config_free(&req.config);
+            rx_buf_free(&req.ctx.path);
+            rx_buf_free(&why);
+        }
     } else if (strcmp(verb, "commit-message") == 0 && n == 3 && h->commit_message && rx_has(ext, "commit-message")) {
         rx_commit_message_ask req;
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&

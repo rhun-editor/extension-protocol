@@ -53,7 +53,7 @@ use std::thread;
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
 };
-pub use debug::{DebugConfig, DebugEnded, DebugValue};
+pub use debug::{DebugConfig, DebugEnded, DebugResolve, DebugValue, Resolved};
 pub use lang::{
     ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest,
     SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
@@ -580,6 +580,12 @@ pub trait Handler: Send {
     /// leave the gutter marks to git.
     fn quickdiff(&mut self, _ext: &Ext, _req: &QuickDiffRequest) -> Option<Vec<u8>> {
         None
+    }
+    /// rhun shows a debugger's configuration before launching it (feature `debug`, a debugger
+    /// with `resolve = yes`): the complete resolved configuration, or launch it unchanged, or
+    /// abandon the launch quietly or with a sentence. It may ask the user (choose, ask).
+    fn resolve_debug(&mut self, _ext: &Ext, _req: &DebugResolve) -> Resolved {
+        Resolved::Unchanged
     }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
@@ -1164,6 +1170,17 @@ impl Ext {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
                         let mut body = Vec::new();
+                        if verb == "debug-resolve" {
+                            // TYPE REQUEST NODEBUG LEN + a configuration body (1 MB at most)
+                            let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
+                                Some(n) if n <= debug::MAX_DEBUG_BODY => n,
+                                _ => break,
+                            };
+                            body = vec![0; len];
+                            if input.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                        }
                         if verb == "commit-message" {
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
                             let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
@@ -1288,6 +1305,18 @@ impl Ext {
                         "quickdiff" if self.has(Feature::QuickDiff) => {
                             QuickDiffRequest::parse(id, &fields)
                                 .map(|r| Ok(h.quickdiff(self, &r).unwrap_or_default()))
+                        }
+                        "debug-resolve" if self.has(Feature::Debug) => {
+                            DebugResolve::parse(id, &fields, &req_body).map(|r| {
+                                match h.resolve_debug(self, &r) {
+                                    Resolved::Unchanged => Ok(Vec::new()),
+                                    Resolved::Config(c) => c.encode().map_err(|e| ("toobig", e)),
+                                    Resolved::Cancel => {
+                                        Err(("cancelled", "the launch was cancelled".to_string()))
+                                    }
+                                    Resolved::Refuse(why) => Err(("refused", why)),
+                                }
+                            })
                         }
                         "commit-message" if self.has(Feature::CommitMessage) => {
                             CommitMessageRequest::parse(id, &req_body).map(|r| {
