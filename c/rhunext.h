@@ -339,6 +339,12 @@ typedef struct {
     int (*type_format)(rx_ext *ext, const rx_type_format_ask *req, rx_wedit *out, void *user);
     int (*code_actions)(rx_ext *ext, const rx_code_actions_ask *req, rx_code_actions *out, void *user);
     int (*code_action_resolve)(rx_ext *ext, const rx_resolve_ask *req, rx_resolved *out, void *user);
+    /* Notifications (feature "notify"): button N (from 1) without a command was pressed, or (0)
+     * the card was closed by the user, a timeout or Clear All. */
+    void (*note_event)(rx_ext *ext, int64_t note, int pressed, void *user);
+    /* Progress (feature "progress"): the user pressed Cancel; rhun removes it 10 s later unless
+     * rx_progress_end comes first. */
+    void (*progress_cancel)(rx_ext *ext, int64_t progress, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -417,6 +423,31 @@ void rx_rec(rx_buf *b, const char *head, const void *data, size_t len);
 int64_t rx_view_patch(rx_ext *ext, int64_t view, const rx_patch *p);
 /* opens a declared view's place on it; focus 1 also gives it the keyboard; its view number */
 int64_t rx_vshow(rx_ext *ext, const char *name, int focus);
+/* Log views (feature "view-log", kind = log): n lines appended, sevs[i] "trace", "debug", "info",
+ * "warn", "error" or "-", texts[i] one line each (SGR colors kept); clear removes them all. */
+void rx_patch_log(rx_patch *p, int n, const char *const *sevs, const char *const *texts);
+void rx_patch_clear(rx_patch *p);
+/* a retained view (kind "tree", or "log" with view-log) in an editor tab of its own, shown at once;
+ * its view number, or -1. rx_unview closes it. */
+int64_t rx_vtab(rx_ext *ext, const char *kind, const char *title);
+
+/* Notifications (protocol 1.1, feature "notify"): a card built with rx_note_*, shown with
+ * rx_notify(ext, "info"|"warning"|"error", &note); rx_note_free after. */
+typedef struct rx_note_s { rx_buf msg, extra; int buttons; } rx_note;
+void rx_note_init(rx_note *n, const char *msg);                /* at most 2000 bytes; LF breaks a line */
+void rx_note_detail(rx_note *n, const char *text);             /* a muted line under it */
+void rx_note_sticky(rx_note *n);                               /* it stays until closed */
+/* a button (3 at most): command NULL reports note_event pressed N, else that command runs with args */
+void rx_note_button(rx_note *n, const char *title, const char *command, const void *args, size_t len);
+void rx_note_free(rx_note *n);
+int64_t rx_notify(rx_ext *ext, const char *severity, const rx_note *n);   /* its NOTE, or -1 */
+int rx_notify_set(rx_ext *ext, int64_t note, const rx_note *n);
+int rx_unnotify(rx_ext *ext, int64_t note);
+/* Progress (feature "progress"): where "status", "note" or "view:VIEW"; cancel 1 offers Cancel.
+ * Nothing shows when it ends within 500 ms. Its P, or -1. */
+int64_t rx_progress(rx_ext *ext, const char *where, int cancel, const char *title);
+int rx_progress_set(rx_ext *ext, int64_t progress, int percent, const char *msg);   /* -1: indeterminate */
+int rx_progress_end(rx_ext *ext, int64_t progress);
 
 /* Feature agents: replace its rows in the agents panel; say a session has total messages, the first
  * changed one at first. 0, or -1 with rx_error. */
@@ -4425,6 +4456,114 @@ int64_t rx_vshow(rx_ext *ext, const char *name, int focus) {
     return view;
 }
 
+void rx_patch_log(rx_patch *p, int n, const char *const *sevs, const char *const *texts) {
+    rx_buf d = {NULL, 0, 0};
+    for (int i = 0; i < n; i++) {
+        const char *sev = sevs && sevs[i] && *sevs[i] ? sevs[i] : "-";
+        rx_buf_add(&d, sev, strlen(sev));
+        rx_buf_add(&d, " ", 1);
+        const char *t = texts[i] ? texts[i] : "";
+        for (; *t; t++) rx_buf_add(&d, *t == '\n' ? " " : t, 1);
+        rx_buf_add(&d, "\n", 1);
+    }
+    char head[48];
+    snprintf(head, sizeof head, "log %d", n);
+    rx_patch_op(p, head, d.data, d.len);
+    rx_buf_free(&d);
+}
+void rx_patch_clear(rx_patch *p) { rx_patch_op(p, "clear", NULL, 0); }
+
+int64_t rx_vtab(rx_ext *ext, const char *kind, const char *title) {
+    rx_buf line = {NULL, 0, 0}, f = {NULL, 0, 0};
+    rx_buf_fmt(&line, "vtab %s ", kind);
+    rx_buf_add(&line, title, rx_line_len(title, 80));
+    rx_buf_add(&line, "", 1);
+    line.len--;
+    int r = rx_request(ext, line.data, NULL, 0, &f, NULL);
+    int64_t view = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&line);
+    rx_buf_free(&f);
+    return view;
+}
+
+void rx_note_init(rx_note *n, const char *msg) {
+    memset(n, 0, sizeof *n);
+    size_t len = strlen(msg);
+    if (len > 2000) {
+        len = 2000;
+        while (len > 0 && ((unsigned char)msg[len] & 0xc0) == 0x80) len--;
+    }
+    rx_buf_add(&n->msg, msg, len);
+}
+void rx_note_detail(rx_note *n, const char *text) { rx_rec(&n->extra, "detail", text, rx_line_len(text, 1000)); }
+void rx_note_sticky(rx_note *n) { rx_rec(&n->extra, "sticky", NULL, 0); }
+void rx_note_button(rx_note *n, const char *title, const char *command, const void *args, size_t len) {
+    if (n->buttons >= 3) return;
+    n->buttons++;
+    rx_rec(&n->extra, "button", title, rx_line_len(title, 60));
+    if (command) {
+        rx_buf h = {NULL, 0, 0};
+        rx_buf_fmt(&h, "command %s", command);
+        rx_rec(&n->extra, h.data, args, len);
+        rx_buf_free(&h);
+    }
+}
+void rx_note_free(rx_note *n) { rx_buf_free(&n->msg); rx_buf_free(&n->extra); n->buttons = 0; }
+static void rx_note_body(const rx_note *n, rx_buf *b) {
+    rx_buf_fmt(b, "%zu %zu\n", n->msg.len, n->extra.len);
+    if (n->msg.len) rx_buf_add(b, n->msg.data, n->msg.len);
+    if (n->extra.len) rx_buf_add(b, n->extra.data, n->extra.len);
+}
+int64_t rx_notify(rx_ext *ext, const char *severity, const rx_note *n) {
+    rx_buf body = {NULL, 0, 0}, f = {NULL, 0, 0};
+    rx_note_body(n, &body);
+    char line[96];
+    snprintf(line, sizeof line, "notify %s %zu", severity, body.len);
+    int r = rx_request(ext, line, body.data, body.len, &f, NULL);
+    int64_t note = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&body);
+    rx_buf_free(&f);
+    return note;
+}
+int rx_notify_set(rx_ext *ext, int64_t note, const rx_note *n) {
+    rx_buf body = {NULL, 0, 0};
+    rx_note_body(n, &body);
+    char line[96];
+    snprintf(line, sizeof line, "notify-set %lld %zu", (long long)note, body.len);
+    int r = rx_request(ext, line, body.data, body.len, NULL, NULL);
+    rx_buf_free(&body);
+    return r;
+}
+int rx_unnotify(rx_ext *ext, int64_t note) {
+    char line[64];
+    snprintf(line, sizeof line, "unnotify %lld", (long long)note);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+int64_t rx_progress(rx_ext *ext, const char *where, int cancel, const char *title) {
+    size_t tn = rx_line_len(title, 200);
+    if (tn == 0) title = "\xe2\x80\xa6", tn = 3;
+    rx_buf f = {NULL, 0, 0};
+    char line[160];
+    snprintf(line, sizeof line, "progress %s %s %zu", where, cancel ? "cancel" : "-", tn);
+    int r = rx_request(ext, line, title, tn, &f, NULL);
+    int64_t p = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&f);
+    return p;
+}
+int rx_progress_set(rx_ext *ext, int64_t progress, int percent, const char *msg) {
+    char pct[16], line[96];
+    if (percent < 0) snprintf(pct, sizeof pct, "-");
+    else snprintf(pct, sizeof pct, "%d", percent > 100 ? 100 : percent);
+    size_t mn = msg ? rx_line_len(msg, 200) : 0;
+    snprintf(line, sizeof line, "progress-set %lld %s %zu", (long long)progress, pct, mn);
+    return rx_request(ext, line, msg, mn, NULL, NULL);
+}
+int rx_progress_end(rx_ext *ext, int64_t progress) {
+    char line[64];
+    snprintf(line, sizeof line, "progress-end %lld", (long long)progress);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
 /* a retained view's event (or open) to its handler; 0 when it is a 12a picture event */
 static int rx_retained_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
                                 const unsigned char *body, size_t body_len) {
@@ -4837,6 +4976,11 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                        (strcmp(f[1], "nb-interrupt") == 0 || strcmp(f[1], "nb-restart") == 0 ||
                         strcmp(f[1], "nb-kernel") == 0 || strcmp(f[1], "nb-closed") == 0)) {
                 h->nb_event(ext, f[1] + 3, atoll(f[2]), user);
+            } else if (strcmp(f[1], "notify") == 0 && n >= 4 && h->note_event) {
+                if (strcmp(f[3], "pressed") == 0 && n >= 5) h->note_event(ext, atoll(f[2]), atoi(f[4]), user);
+                else if (strcmp(f[3], "closed") == 0) h->note_event(ext, atoll(f[2]), 0, user);
+            } else if (strcmp(f[1], "progress") == 0 && n >= 4 && strcmp(f[3], "cancel") == 0 && h->progress_cancel) {
+                h->progress_cancel(ext, atoll(f[2]), user);
             } else if (strcmp(f[1], "bye") == 0) {
                 if (h->bye) h->bye(ext, user);
                 done = 1;

@@ -23,7 +23,7 @@ import (
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
 	"git-data", "commit-message", "quickdiff", // source control: scm.go
-	"view-tree",               // retained views: views.go
+	"view-tree", "view-log", "notify", "progress", // retained views, notifications, progress: views.go, notify.go
 	"idle", "secrets", "uris", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
@@ -428,6 +428,10 @@ func (h *host) checkFeatures() {
 		}
 	}
 	h.checkRetained()
+	if h.cmdExited() {
+		return
+	}
+	h.checkNotify()
 	if h.cmdExited() {
 		return
 	}

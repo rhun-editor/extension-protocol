@@ -17,6 +17,25 @@ import (
 // FeatureViewTree is retained views: manifest [views], PatchView, ShowView, RetainedViewer.
 const FeatureViewTree = "view-tree"
 
+// FeatureViewLog is log views (kind = log, with view-tree): Patch.Log and Patch.Clear.
+const FeatureViewLog = "view-log"
+
+// Log line severities (feature view-log).
+const (
+	LogNone  = "-"
+	LogTrace = "trace"
+	LogDebug = "debug"
+	LogInfo  = "info"
+	LogWarn  = "warn"
+	LogError = "error"
+)
+
+// LogLine is a log view's line: a severity (Log*) and one line of text (SGR colors kept).
+type LogLine struct {
+	Level string
+	Text  string
+}
+
 // MaxViewNodes is the most nodes one retained view holds (400000 in all views).
 const MaxViewNodes = 100000
 
@@ -288,6 +307,25 @@ func (p *Patch) Action(key, icon, where, title string) *Patch {
 	return p.op(fmt.Sprintf("action %s %s %s", key, icon, where), []byte(viewLine(title, 200)))
 }
 
+// Log appends lines to a log view (feature view-log).
+func (p *Patch) Log(lines ...LogLine) *Patch {
+	var data []byte
+	for _, l := range lines {
+		lv := l.Level
+		if lv == "" {
+			lv = LogNone
+		}
+		data = append(data, lv...)
+		data = append(data, ' ')
+		data = append(data, strings.ReplaceAll(l.Text, "\n", " ")...)
+		data = append(data, '\n')
+	}
+	return p.op("log "+strconv.Itoa(len(lines)), data)
+}
+
+// Clear removes every line of a log view.
+func (p *Patch) Clear() *Patch { return p.op("clear", nil) }
+
 // SelectMode lets several nodes be selected (Ctrl and Shift).
 func (p *Patch) SelectMode(multi bool) *Patch {
 	if multi {
@@ -359,6 +397,16 @@ func (e *Ext) RevealView(v View, id []byte, how ...string) error {
 	return err
 }
 
+// TabView opens a retained view of kind ("tree", or "log" with view-log) in an editor tab of its
+// own, shown at once; ViewOpen follows with place "tab". Close it with CloseView.
+func (e *Ext) TabView(kind, title string) (View, error) {
+	r, err := e.Request("vtab", nil, kind, viewLine(title, 80))
+	if err != nil {
+		return 0, err
+	}
+	return View(argInt(r, 0)), nil
+}
+
 // ChildrenRequest is rhun asking for a node's children (vkids) or for more of them (vmore).
 type ChildrenRequest struct {
 	ID   int64 // a cancel event names it
@@ -421,7 +469,7 @@ type ViewOpen struct {
 }
 
 // RetainedEvent is what the user did in a retained view. Kind is visible, focus, select,
-// activate, expand, collapse, check, action, discarded or closed; On for visible, focus and
+// activate, expand, collapse, check, action, discarded, closed or clear (a log's Clear button); On for visible, focus and
 // check; Rev the content the user acted on; IDs the selected nodes (select) or the node.
 type RetainedEvent struct {
 	Kind string

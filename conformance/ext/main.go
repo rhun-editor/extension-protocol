@@ -222,7 +222,10 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
-	rviews      map[int64]*rview  // retained views it was given (views.go)
+	rviews      map[int64]*rview     // retained views it was given (views.go)
+	notes       map[int64]*noteState // notifications open (notify.go)
+	progs       map[int64]*progState // progress not ended
+	noteSeq     int64
 	patches     int               // vpatch requests that passed
 	secrets     map[string][]byte // secret-set values (resources.go)
 
@@ -430,7 +433,7 @@ type message struct {
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
-	"vpatch": true, "vreveal": true, // retained views: views.go
+	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, // retained views, notifications, progress: views.go, notify.go
 	"secret-set":     true,                                                        // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
@@ -1151,14 +1154,19 @@ func (h *host) handle(msg message) {
 		}
 		h.aiRequest(id, verb, args, b, ok, reply, rerr)
 	case "view", "draw", "unview":
+		if verb == "unview" && h.retainedUnview(id, args, reply) {
+			return
+		}
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
 	case "nb-state", "nb-output", "nb-stream", "nb-kernel-label", "nb-exec", "nb-exec-signal":
 		h.nbRequest(id, verb, args, msg.body, reply, rerr)
+	case "notify", "notify-set", "unnotify", "progress", "progress-set", "progress-end":
+		h.notifyRequest(id, verb, args, msg.body, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
-	case "vpatch", "vshow", "vreveal":
+	case "vpatch", "vshow", "vreveal", "vtab":
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	case "select-many", "reveal", "show-locations", "diff", "diff-close":
 		h.editorRequest(id, verb, args, msg, reply, rerr)

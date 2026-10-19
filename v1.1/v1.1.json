@@ -202,6 +202,16 @@
       "pattern": "^\\s*[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*(\\s+[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*){0,15}\\s*$",
       "description": "a pack: other extensions installed with this one (at most 16, OWNER/NAME, space separated, not the pack itself). A pack needs no program: without run entries it never starts, and its themes and grammars load"
     },
+    "views": {
+      "type": "object",
+      "description": "[views] (protocol 1.1, feature view-tree): retained views as KEY.FIELD = VALUE, at most 16; place sidebar, panel or side; kind tree, or log with view-log; open yes expands it (sidebar) or chooses its tab the first time",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(title|place|kind|icon|when|open)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "settings": {
       "type": "object",
       "description": "[settings]: the extension's own settings as KEY.FIELD = VALUE; shown on its page, sent as setting events (section 6d)",

@@ -1011,6 +1011,27 @@ static void transform_requests(void) {
     }
 }
 /* retained views: a patch's bytes, as v1.1.md's view-tree section writes them */
+static void notes_and_logs(void) {
+    rx_note n;
+    rx_note_init(&n, "Reload the window?");
+    rx_note_button(&n, "Reload", "reload", NULL, 0);
+    rx_note_button(&n, "Later", NULL, NULL, 0);
+    rx_buf b = {NULL, 0, 0};
+    rx_note_body(&n, &b);
+    same(&b, "18 46\nReload the window?button 6\nReloadcommand reload 0\nbutton 5\nLater");
+    rx_buf_free(&b);
+    rx_note_free(&n);
+    rx_patch p;
+    memset(&p, 0, sizeof p);
+    const char *sevs[] = {"info", NULL};
+    const char *texts[] = {"start", "two\nlines"};
+    rx_patch_log(&p, 2, sevs, texts);
+    rx_patch_clear(&p);
+    same(&p.body, "log 2 23\ninfo start\n- two lines\nclear 0\n");
+    assert(p.n == 2);
+    rx_patch_free(&p);
+}
+
 static void retained_patches(void) {
     rx_patch p;
     memset(&p, 0, sizeof p);
@@ -1864,6 +1885,7 @@ static void actions_requests(void) {
 int main(void) {
     retained_patches();
     ai_bodies();
+    notes_and_logs();
     snippet_transform_wire();
     snippet_transform_programs();
     snippet_snapshot_decoder();

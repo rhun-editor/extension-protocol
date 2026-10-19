@@ -30,6 +30,30 @@ use std::ops::Range;
 
 use crate::{Event, View};
 
+/// A log line's severity (feature `view-log`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    None,
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub fn word(self) -> &'static str {
+        match self {
+            LogLevel::None => "-",
+            LogLevel::Trace => "trace",
+            LogLevel::Debug => "debug",
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "error",
+        }
+    }
+}
+
 /// Whether a node has children, and whether it starts expanded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kids {
@@ -369,6 +393,22 @@ impl Patch {
         let t = cut(&one_line(title), 200).to_string();
         self.op(&format!("action {key} {} {w}", icon.unwrap_or("-")), t.as_bytes())
     }
+    /// Lines appended to a log view (feature `view-log`): a severity and a text each (one line;
+    /// SGR color sequences color it, other control characters are dropped by rhun).
+    pub fn log(&mut self, lines: &[(LogLevel, &str)]) -> &mut Patch {
+        let mut data = Vec::new();
+        for (level, text) in lines {
+            data.extend_from_slice(level.word().as_bytes());
+            data.push(b' ');
+            data.extend_from_slice(one_line(text).as_bytes());
+            data.push(b'\n');
+        }
+        self.op(&format!("log {}", lines.len()), &data)
+    }
+    /// Removes every line of a log view.
+    pub fn clear(&mut self) -> &mut Patch {
+        self.op("clear", b"")
+    }
     /// Several nodes may be selected (Ctrl and Shift).
     pub fn select_mode(&mut self, multi: bool) -> &mut Patch {
         self.op(if multi { "select-mode multi" } else { "select-mode single" }, b"")
@@ -429,6 +469,8 @@ pub enum RetainedEvent {
     Discarded { rev: u64, what: String, id: Vec<u8> },
     /// The user closed a tab instance.
     Closed,
+    /// The user cleared a log view (its Clear button).
+    Clear,
     /// Any other `0 view VIEW WHAT ...` event: WHAT, the fields after it, the body.
     Other { what: String, fields: Vec<String>, body: Vec<u8> },
 }
@@ -525,6 +567,7 @@ pub fn parse_retained(ev: &Event) -> Option<(View, RetainedEvent)> {
             return None
         }
         "closed" => RetainedEvent::Closed,
+        "clear" => RetainedEvent::Clear,
         _ => RetainedEvent::Other {
             what: what.to_string(),
             fields: ev.fields[2..].to_vec(),
@@ -548,6 +591,13 @@ mod tests {
             body,
             b"3\ntitle 4\nTODObadge 3 0\nkids 0 1 0 28\n1 5 10 open\naAlphabadge 1 0\n".to_vec()
         );
+    }
+
+    #[test]
+    fn log_lines_keep_one_line_each() {
+        let mut p = Patch::new();
+        p.log(&[(LogLevel::Info, "start"), (LogLevel::Error, "two\nlines")]).clear();
+        assert_eq!(p.encode().unwrap(), b"2\nlog 2 27\ninfo start\nerror two lines\nclear 0\n".to_vec());
     }
 
     #[test]
