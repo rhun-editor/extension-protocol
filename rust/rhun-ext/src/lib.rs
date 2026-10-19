@@ -28,7 +28,9 @@
 //! spec) are asked for by name in [`run`]: [`Feature::Views`] for pictures in tabs of their own,
 //! [`Feature::Complete`], [`Feature::Signature`], [`Feature::Definition`], [`Feature::References`],
 //! [`Feature::Symbols`], [`Feature::Actions`], [`Feature::Rename`] and [`Feature::Format`] for
-//! language support (the [`Handler`] methods of the same names answer them).
+//! language support (the [`Handler`] methods of the same names answer them). Protocol 1.1 adds
+//! [`Feature::QueryStream`] (parts and progress through a [`Stream`]), [`Feature::ProviderScope`]
+//! ([`Ext::provides`]), [`Feature::CompleteItems`] and [`Feature::SignatureList`].
 
 #![allow(clippy::needless_doctest_main)]
 
@@ -36,6 +38,7 @@ pub mod chart;
 pub mod complete;
 pub mod lang;
 pub mod picture;
+pub mod query;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
@@ -44,18 +47,21 @@ pub mod watch;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 pub use complete::{
-    CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
+    CompleteRequest, CompletionItem, CompletionList, Kind, Resolution, ResolveRequest,
+    SignatureHelp, SignatureInfo, SignatureList, SignatureRequest,
 };
 pub use lang::{
     ActionsRequest, CodeAction, FileEdit, FormatRequest, Location, PosRequest, RenameRequest,
     SaveActionsRequest, Symbol, SymbolKind, Target, TextEdit, WorkspaceEdit,
 };
 pub use picture::{Color, Picture};
+pub use query::Stream;
 pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
@@ -145,6 +151,26 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Parts of long answers and progress on rhun's pending requests: [`Stream`] (protocol 1.1).
+    QueryStream,
+    /// Narrowing `[provides]` while running: [`Ext::provides`] (protocol 1.1).
+    ProviderScope,
+    /// Completion items with resolve data, a replace range, commit characters and more:
+    /// [`CompletionItem`]'s fields and [`Handler::complete_resolve`] (protocol 1.1).
+    CompleteItems,
+    /// Every overload in signature help: [`Handler::signatures`] (protocol 1.1).
+    SignatureList,
+    // Protocol 1.1 features this crate names but does not answer yet.
+    HoverQuery,
+    Navigation,
+    SelectionRanges,
+    Hierarchy,
+    WorkspaceSymbols,
+    PrepareRename,
+    PartialFormat,
+    CodeActions,
+    FileDiagnostics,
+    DocumentLinks,
 }
 
 impl Feature {
@@ -165,6 +191,20 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::QueryStream => "query-stream",
+            Feature::ProviderScope => "provider-scope",
+            Feature::CompleteItems => "complete-items",
+            Feature::SignatureList => "signature-list",
+            Feature::HoverQuery => "hover-query",
+            Feature::Navigation => "navigation",
+            Feature::SelectionRanges => "selection-ranges",
+            Feature::Hierarchy => "hierarchy",
+            Feature::WorkspaceSymbols => "workspace-symbols",
+            Feature::PrepareRename => "prepare-rename",
+            Feature::PartialFormat => "partial-format",
+            Feature::CodeActions => "code-actions",
+            Feature::FileDiagnostics => "file-diagnostics",
+            Feature::DocumentLinks => "document-links",
         }
     }
 }
@@ -547,6 +587,36 @@ pub trait Handler: Send {
     }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
+
+    // Protocol 1.1 language features. The `*_stream` methods are what rhun's requests call; by
+    // default they answer with the methods above. `out` sends parts and progress (query-stream).
+    /// A completion list that may come in parts: the first part replaces what the extension said
+    /// before in the session, later parts and the answer add to it.
+    fn complete_stream(
+        &mut self,
+        ext: &Ext,
+        req: &CompleteRequest,
+        _out: &Stream,
+    ) -> CompletionList {
+        self.complete(ext, req)
+    }
+    /// Definition locations that may come in parts; the answer holds the rest.
+    fn definition_stream(&mut self, ext: &Ext, req: &PosRequest, _out: &Stream) -> Vec<Location> {
+        self.definition(ext, req)
+    }
+    /// References that may come in parts; the answer holds the rest.
+    fn references_stream(&mut self, ext: &Ext, req: &PosRequest, _out: &Stream) -> Vec<Location> {
+        self.references(ext, req)
+    }
+    /// rhun resolves the selected item with its resolve data (complete-items).
+    fn complete_resolve(&mut self, _ext: &Ext, _req: &ResolveRequest) -> Resolution {
+        Resolution::default()
+    }
+    /// rhun asks for every overload (signature-list; it then sends this instead of `signature`);
+    /// `None` hides the help.
+    fn signatures(&mut self, _ext: &Ext, _req: &SignatureRequest) -> Option<SignatureList> {
+        None
+    }
 }
 
 enum Msg {
@@ -555,6 +625,7 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
+        body: Vec<u8>,
     },
     End,
 }
@@ -586,6 +657,8 @@ pub struct Ext {
     shared: Arc<Mutex<Shared>>,
     pending: Arc<Mutex<Pending>>,
     features: Arc<Mutex<Vec<String>>>,
+    /// rhun's pending requests to the extension, and whether each was cancelled (query.rs)
+    queries: Arc<Mutex<HashMap<u64, Arc<AtomicBool>>>>,
 }
 
 /// Speaks the protocol over standard input and output until rhun stops the extension, with
@@ -608,6 +681,7 @@ where
         })),
         pending: Arc::new(Mutex::new(Pending::default())),
         features: Arc::new(Mutex::new(Vec::new())),
+        queries: Arc::new(Mutex::new(HashMap::new())),
     };
     let mut hello = String::from("hello 1");
     for f in features {
@@ -1105,6 +1179,14 @@ impl Ext {
                     if ev.name == "features" {
                         *self.features.lock().unwrap() = ev.fields.clone();
                     }
+                    if ev.name == "cancel" {
+                        if let Some(id) = ev.fields.first().and_then(|v| v.parse().ok()) {
+                            self.cancel_query(Some(id));
+                        }
+                    }
+                    if ev.name == "bye" {
+                        self.cancel_query(None);
+                    }
                     if tx.send(Msg::Event(ev)).is_err() {
                         break;
                     }
@@ -1114,11 +1196,26 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
+                        // protocol 1.1: some requests end in the length of a body (at most 64
+                        // KiB); a longer or malformed one is not rhun's, and the session ends
+                        let mut body = Vec::new();
+                        if query::BODIED.contains(&verb.as_str()) && !rest.is_empty() {
+                            let len = match rest.last().and_then(|s| body_len(s)) {
+                                Some(n) if n <= query::MAX_REQUEST_BODY => n,
+                                _ => break,
+                            };
+                            body = vec![0; len];
+                            if input.read_exact(&mut body).is_err() {
+                                break;
+                            }
+                        }
+                        self.begin_query(id);
                         if tx
                             .send(Msg::HostRequest {
                                 id,
                                 verb,
                                 fields: rest,
+                                body,
                             })
                             .is_err()
                         {
@@ -1129,6 +1226,7 @@ impl Ext {
             }
         }
         // rhun is gone: every waiting request fails, later ones fail at once, the handler loop ends
+        self.cancel_query(None);
         let mut p = self.pending.lock().unwrap();
         p.closed = true;
         for (_, (_, w)) in p.waiters.drain() {
@@ -1184,20 +1282,40 @@ impl Ext {
                         _ => {}
                     }
                 }
-                Msg::HostRequest { id, verb, fields } => {
+                Msg::HostRequest {
+                    id,
+                    verb,
+                    fields,
+                    body: data,
+                } => {
+                    let out = self.stream(id);
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
-                            .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
+                            .map(|r| Ok(h.complete_stream(self, &r, &out).encode_bytes())),
+                        "complete-resolve" if self.has(Feature::CompleteItems) => {
+                            ResolveRequest::parse(id, &fields, &data)
+                                .map(|r| Ok(h.complete_resolve(self, &r).encode().into_bytes()))
+                        }
                         "signature" => SignatureRequest::parse(&fields).map(|r| {
                             Ok(h.signature(self, &r)
                                 .map(|s| s.encode())
                                 .unwrap_or_default()
                                 .into_bytes())
                         }),
-                        "definition" => PosRequest::parse(&fields)
-                            .map(|r| Ok(lang::encode_locations(&h.definition(self, &r)))),
-                        "references" => PosRequest::parse(&fields)
-                            .map(|r| Ok(lang::encode_locations(&h.references(self, &r)))),
+                        "signatures" if self.has(Feature::SignatureList) => {
+                            SignatureRequest::parse(&fields).map(|r| {
+                                Ok(h.signatures(self, &r)
+                                    .map(|l| l.encode())
+                                    .unwrap_or_default()
+                                    .into_bytes())
+                            })
+                        }
+                        "definition" => PosRequest::parse(&fields).map(|r| {
+                            Ok(lang::encode_locations(&h.definition_stream(self, &r, &out)))
+                        }),
+                        "references" => PosRequest::parse(&fields).map(|r| {
+                            Ok(lang::encode_locations(&h.references_stream(self, &r, &out)))
+                        }),
                         "symbols" => PosRequest::parse(&fields)
                             .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
                         "actions" => ActionsRequest::parse(&fields)
@@ -1245,10 +1363,19 @@ impl Ext {
                         }
                         None => self.write(&format!("error {id} unknown no such request"), &[]),
                     };
+                    self.finish_query(id);
                 }
             }
         }
     }
+}
+
+/// A body's length as rhun writes it: a plain decimal of 1 to 10 digits.
+fn body_len(s: &str) -> Option<usize> {
+    if s.is_empty() || s.len() > 10 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn parse_view_event(ev: &Event) -> Option<(View, ViewEvent)> {
