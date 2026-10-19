@@ -5,6 +5,10 @@
 // Usage: implement Handler, then call Run. Events arrive one at a time on a single goroutine;
 // requests may be made from any goroutine, including from inside an event handler, and block
 // until rhun answers.
+//
+// Built with GOOS=wasip1 GOARCH=wasm, an extension is one module rhun runs itself on every system
+// (run.wasm32-wasip1 in the manifest); Run then reads standard input non-blocking, so the other
+// goroutines keep running while it waits.
 package rhunext
 
 import (
@@ -37,7 +41,7 @@ type Range struct{ Start, End Pos }
 type Event struct {
 	Name string   // ready, setting, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover, action
 	Args []string // the fields after the name; the last may contain spaces
-	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f)
+	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f); the selections event's lines (1.1)
 }
 
 // Edit is one record of an edits event: at byte offset Start, Del bytes were deleted and Ins
@@ -96,11 +100,20 @@ const (
 	SevHint    Severity = "hint"
 )
 
-// Diagnostic is one mark: a half-open range, a severity and a one-line message.
+// Diagnostic is one mark: a half-open range, a severity and a one-line message. The other fields
+// travel only with Ext.FileDiagnostics (protocol 1.1): ID, a token of [A-Za-z0-9_.:-] unique in the
+// set, comes back in code-actions requests (CodeActionsRequest.Diagnostics); Code and Source show
+// as source(code); Href is an http(s) link explaining the code; Tags; Related places.
 type Diagnostic struct {
 	Range    Range
 	Severity Severity
 	Message  string
+	ID       string
+	Code     string
+	Source   string
+	Href     string
+	Tags     []DiagnosticTag
+	Related  []RelatedInfo
 }
 
 // Handler receives events. Methods are called on one goroutine, in order, so an extension's
@@ -164,6 +177,9 @@ type Ext struct {
 	fmu            sync.Mutex
 	agreed         map[string]bool // the features rhun agreed to (section 12), from the features event
 	closed         error           // set (under pmu) once rhun's end of the pipe is gone: requests fail at once
+	tmu            sync.Mutex
+	tprocs         map[int64]*testProc   // test-exec processes by EXEC (tests.go)
+	streams        map[int64]chan []byte // find-files and search-text: their "0 found ID" batches (files.go)
 }
 
 type result struct {
@@ -174,7 +190,7 @@ type result struct {
 // Run talks to rhun over stdin and stdout until rhun says bye or closes the pipe. It returns
 // nil on bye, io.EOF when rhun went away, or the protocol error that ended the exchange.
 func Run(h Handler) error {
-	return RunOn(os.Stdin, os.Stdout, os.Stderr, h)
+	return RunOn(stdin(), os.Stdout, os.Stderr, h)
 }
 
 // RunOn is Run on explicit streams (tests).
@@ -184,9 +200,11 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 
 // RunWith is Run asking for features (section 12 of the protocol): FeatureViews, FeatureComplete,
 // FeatureSignature, FeatureDefinition, FeatureReferences, FeatureSymbols, FeatureActions,
-// FeatureRename, FeatureFormat. Those rhun agrees to are in Ext.Has before Ready is called.
+// FeatureRename, FeatureFormat, and protocol 1.1's (FeatureWorkspaceEdits, FeatureFileOperations,
+// FeatureSelections, FeatureReveal, FeatureDiff, FeatureLinkedEditing, …). Those rhun agrees to
+// are in Ext.Has before Ready is called.
 func RunWith(features []string, h Handler) error {
-	return RunOnWith(os.Stdin, os.Stdout, os.Stderr, features, h)
+	return RunOnWith(stdin(), os.Stdout, os.Stderr, features, h)
 }
 
 // RunOnWith is RunWith on explicit streams (tests).
@@ -283,8 +301,50 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
-			ext.answer(h, ev.Args, ev.Body)
+			// the reader began a cancellable context for every request (query.go): answer ends
+			// it, and so does this for the requests answered elsewhere
+			switch {
+			case len(ev.Args) > 1 && (ev.Args[1] == "vkids" || ev.Args[1] == "vmore"):
+				ext.answerChildren(h, ev)
+			case len(ev.Args) > 1 && (ev.Args[1] == "tests-resolve" || ev.Args[1] == "test-run"):
+				ext.answerTests(h, ev.Args, ev.Body)
+			case ext.answerNotebook(h, ev.Args, ev.Body) || ext.answerEditor(h, ev.Args, ev.Body):
+			default:
+				ext.answer(h, ev.Args, ev.Body)
+				continue
+			}
+			if id, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil {
+				ext.finishLang(id)
+			}
+		case "test-cancel":
+			if c, ok := h.(TestController); ok {
+				if run, ok := ParseTestCancel(ev); ok {
+					c.CancelTests(ext, run)
+					continue
+				}
+			}
+			h.Event(ext, ev)
+		case "agent-stop":
+			if p, ok := h.(Prompter); ok {
+				if sid, ok := ParseAgentStop(ev); ok {
+					p.AgentStop(ext, sid)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		case "view":
+			if rv, ok := h.(RetainedViewer); ok {
+				if open, ok := parseViewOpen(ev); ok {
+					rv.ViewOpen(ext, open)
+					continue
+				}
+				if view, rev, ok := parseRetainedEvent(ev); ok {
+					rv.ViewEvent(ext, view, rev)
+					if rev.Kind != "closed" && rev.Kind != "focus" { // a picture's focus: Viewer too
+						continue
+					}
+				}
+			}
 			if v, ok := h.(Viewer); ok {
 				if view, vev, ok := parseViewEvent(ev); ok {
 					v.View(ext, view, vev)
@@ -298,7 +358,26 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				continue
 			}
 			h.Event(ext, ev)
+		case "notify":
+			if nl, ok := h.(NoteListener); ok {
+				if nev, ok := parseNoteEvent(ev); ok {
+					nl.NoteEvent(ext, nev)
+					continue
+				}
+			}
+			h.Event(ext, ev)
+		case "progress":
+			if pc, ok := h.(ProgressCanceller); ok {
+				if p, ok := parseProgressCancel(ev); ok {
+					pc.ProgressCancel(ext, p)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		default:
+			if ext.notebookEvent(h, ev) || ext.editorEvent(h, ev) {
+				continue
+			}
 			h.Event(ext, ev)
 		}
 	}
@@ -393,20 +472,50 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "cancel" && len(ev.Args) == 1 {
 			if id, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil && id > 0 {
 				e.cancelSource(id)
+				e.cancelLang(id)
 			}
 		}
 		if ev.Name == "bye" {
 			e.cancelSources(false)
+			e.cancelAllLang()
 		}
-		// edits (DOC VERSION LEN), action (LEN) and, with command-args, run (NAME DOC FROM LEN)
-		// are followed by a body
+		// tests: a process's output and end go to its streams here, never through the handler
+		if ev.Name == "test-out" && len(ev.Args) == 3 {
+			n, ok := bodyLen(ev.Args[2], MaxEventBody)
+			ex, err := strconv.ParseInt(ev.Args[0], 10, 64)
+			if !ok || err != nil {
+				return nil, fmt.Errorf("a test-out length %q", ev.Args[2])
+			}
+			body := make([]byte, n)
+			if _, err := io.ReadFull(br, body); err != nil {
+				return nil, err
+			}
+			e.testOut(ex, ev.Args[1], body)
+			return nil, nil
+		}
+		if ev.Name == "test-exit" && len(ev.Args) >= 2 {
+			if ex, err := strconv.ParseInt(ev.Args[0], 10, 64); err == nil {
+				e.testExit(ex, strings.Join(ev.Args[1:], " "))
+				return nil, nil
+			}
+		}
+		// edits (DOC VERSION LEN), selections (DOC N LEN), action (LEN), link (ID LEN) and, with
+		// command-args, run (NAME DOC FROM LEN) are followed by a body
 		lenAt := -1
-		if ev.Name == "edits" && len(ev.Args) >= 3 {
+		if (ev.Name == "edits" || ev.Name == "selections") && len(ev.Args) >= 3 {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "view" && len(ev.Args) >= 3 && viewEventHasBody(ev.Args[1]) {
+			lenAt = len(ev.Args) - 1 // retained views: the last field is the body's length
+		} else if ev.Name == "nb-run" && len(ev.Args) == 5 {
+			lenAt = 4 // a cell's source, at most 4 MB
 		} else if ev.Name == "run" && len(ev.Args) == 4 {
 			lenAt = 3
+		} else if (ev.Name == "link" || ev.Name == "found") && len(ev.Args) == 2 {
+			lenAt = 1
+		} else if ev.Name == "editor-path" && len(ev.Args) == 2 {
+			lenAt = 1 // a custom editor's new path
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
@@ -418,6 +527,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			ev.Body = make([]byte, n)
 			if _, err := io.ReadFull(br, ev.Body); err != nil {
 				return nil, err
+			}
+		}
+		// a batch of a find or search goes to the request waiting for it, not to the handler
+		if ev.Name == "found" && len(ev.Args) == 2 {
+			id, _ := strconv.ParseInt(ev.Args[0], 10, 64)
+			e.pmu.Lock()
+			s := e.streams[id]
+			e.pmu.Unlock()
+			if s != nil {
+				s <- ev.Body
+				return nil, nil
 			}
 		}
 		// the last field of opened and project may contain spaces: fields are rejoined there
@@ -443,6 +563,60 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 	// a request from rhun (section 12): answered on the handler's goroutine, in order with events
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
 		ev := &Event{Name: hostRequest, Args: fields}
+		if len(fields) > 2 && (fields[1] == "vkids" || fields[1] == "vmore") {
+			// retained views: the node id follows (its length is the last field)
+			n, ok := bodyLen(fields[len(fields)-1], 4096)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		if len(fields) > 2 && (fields[1] == "tests-resolve" || fields[1] == "test-run") {
+			n, ok := bodyLen(fields[len(fields)-1], MaxEventBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		// a tool call and a prompt carry their input (at most 4 MB)
+		if len(fields) > 2 && (fields[1] == "tool" || fields[1] == "agent-prompt") {
+			n, ok := bodyLen(fields[len(fields)-1], MaxAIBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		if len(fields) == 4 && (fields[1] == "nb-open" || fields[1] == "nb-save") {
+			// a notebook body (and its path): 64 MB at most
+			n, ok := bodyLen(fields[3], NbBodyMax+65536)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[3])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		if len(fields) == 7 && fields[1] == "editor-open" {
+			// the editor's file's path
+			n, ok := bodyLen(fields[6], 65536)
+			if !ok {
+				return nil, fmt.Errorf("an editor-open length %q", fields[6])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
 		if len(fields) > 1 && fields[1] == "save-actions" {
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err
@@ -476,6 +650,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 				return nil, err
 			}
 		}
+		if len(fields) > 2 && bodiedRequests[fields[1]] {
+			n, ok := bodyLen(fields[len(fields)-1], MaxRequestBody)
+			if !ok {
+				return nil, fmt.Errorf("a %s request's length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
+		e.beginLang(id)
 		return ev, nil
 	}
 	return nil, nil
@@ -542,6 +727,7 @@ func (e *Ext) failPending(err error) {
 	clear(e.outstanding)
 	e.pmu.Unlock()
 	e.cancelSources(false)
+	e.testsGone()
 }
 
 func (e *Ext) write(line string, body []byte) error {

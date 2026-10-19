@@ -18,6 +18,9 @@ Standard library only.  One program, many behaviours, driven by the environment:
   CONF_HEARTBEAT=1    log "alive" every 100 ms, so the runner can tell when the process died
   CONF_SLOT_EXIT=SUF  scenario "slot": the extension whose name ends in SUF exits after 1.5 s
 
+Operations include `waitfor TEXT [SECONDS]`: read until a line from rhun holds TEXT (a request
+rhun sends, such as test-run, which is logged and never answered).
+
 Log record format: "<epoch-seconds> <KIND> <text>" where KIND is
   <  a line received from rhun (CR and non-ASCII escaped)
   >  a line we sent
@@ -413,6 +416,13 @@ class Ext:
                 log('X', 'got-run %s %d' % self.runs.pop(0))
             else:
                 log('X', 'no-run')
+        elif name == 'waitfor':         # read until a line from rhun holds op[1] (op[2] s at most)
+            end = time.time() + (op[2] if len(op) > 2 else 20)
+            seen = False
+            while not seen and time.time() < end:
+                t = self.pump(max(0.05, end - time.time()))
+                seen = t is not None and op[1] in t
+            log('X', 'waitfor %s %s' % (op[1], 'seen' if seen else 'timeout'))
         elif name == 'exit':
             finish('requested', op[1])
         elif name == 'close':

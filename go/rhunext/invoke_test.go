@@ -11,7 +11,7 @@ type invokeProbe struct {
 	ready chan *Ext
 	invs  chan Invocation
 	runs  chan string
-	calls chan Call
+	calls chan CallRequest
 	wait  bool
 }
 
@@ -19,7 +19,7 @@ func (p *invokeProbe) Ready(e *Ext, _ string)            { p.ready <- e }
 func (p *invokeProbe) Run(_ *Ext, command string, _ Doc) { p.runs <- command }
 func (p *invokeProbe) Event(*Ext, Event)                 {}
 func (p *invokeProbe) Invoke(_ *Ext, inv Invocation)     { p.invs <- inv }
-func (p *invokeProbe) Call(_ *Ext, c Call) ([]byte, error) {
+func (p *invokeProbe) Call(_ *Ext, c CallRequest) ([]byte, error) {
 	p.calls <- c
 	switch {
 	case p.wait:
@@ -35,7 +35,7 @@ func (p *invokeProbe) Call(_ *Ext, c Call) ([]byte, error) {
 
 func newInvokeProbe() *invokeProbe {
 	return &invokeProbe{ready: make(chan *Ext, 1), invs: make(chan Invocation, 8), runs: make(chan string, 8),
-		calls: make(chan Call, 8)}
+		calls: make(chan CallRequest, 8)}
 }
 
 func TestRunBodiesWithFromAndTargets(t *testing.T) {
@@ -104,16 +104,16 @@ func TestMenuTargets(t *testing.T) {
 }
 
 func TestCommandRefs(t *testing.T) {
-	b, err := CommandRef("run_task", []byte("all\nx"))
+	b, err := EncodeCommandRef("run_task", []byte("all\nx"))
 	if err != nil || string(b) != "command run_task 5\nall\nx" {
 		t.Fatalf("%q %v", b, err)
 	}
 	for _, name := range []string{"", "Run", "a.b", "x y", strings.Repeat("a", 41)} {
-		if _, err := CommandRef(name, nil); err == nil {
+		if _, err := EncodeCommandRef(name, nil); err == nil {
 			t.Fatalf("name %q accepted", name)
 		}
 	}
-	if _, err := CommandRef("a", make([]byte, MaxRefArgs+1)); err == nil {
+	if _, err := EncodeCommandRef("a", make([]byte, MaxRefArgs+1)); err == nil {
 		t.Fatal("8193 bytes of args accepted")
 	}
 }

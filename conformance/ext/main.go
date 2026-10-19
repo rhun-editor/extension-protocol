@@ -33,7 +33,8 @@ import (
 )
 
 var verbose = flag.Bool("v", false, "print the whole exchange")
-var target = flag.String("target", "", "the run.* target to use (default: this machine)")
+var target = flag.String("target", "", "the run.* target to use (default: this machine; wasm32-wasip1 runs the module in rhun)")
+var rhunExe = flag.String("rhun", "rhun", "rhun's executable, which runs a run.wasm32-wasip1 module (rhun --wasm-host)")
 
 type manifest struct {
 	name, owner, title, version string
@@ -49,8 +50,32 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
+	views                       map[string]string // [views] KEY.FIELD -> value (views.go)
+	top                         map[string]string // top-level keys of later features (idle, runs)
+	tools                       []string          // [tools] names (protocol 1.1)
+	pack                        string            // a pack's members: OWNER/NAME, space separated
 	cmdOptions                  map[string]string // [command-options] NAME.FIELD -> value
 	statusItems                 int               // [status] items
+}
+
+// packProblem says what is wrong with a manifest's pack list, or "": at most 16 names, each
+// OWNER/NAME of [A-Za-z0-9._-] (neither part starting with a dot), none of them the pack itself.
+func packProblem(m *manifest) string {
+	names := strings.Fields(m.pack)
+	if len(names) > 16 {
+		return fmt.Sprintf("pack lists %d extensions (16 at most)", len(names))
+	}
+	part := regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`)
+	for _, n := range names {
+		owner, name, ok := strings.Cut(n, "/")
+		if !ok || !part.MatchString(owner) || !part.MatchString(name) {
+			return fmt.Sprintf("pack: %q is not OWNER/NAME", n)
+		}
+		if owner == m.owner && name == m.name {
+			return "pack lists the pack itself"
+		}
+	}
+	return ""
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -58,7 +83,7 @@ func readManifest(dir string) (*manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}}
+	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}, top: map[string]string{}}
 	section := ""
 	statusSeen := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -104,6 +129,10 @@ func readManifest(dir string) (*manifest, error) {
 				m.icon = v
 			case k == "color":
 				m.color = v
+			case k == "idle" || k == "idle.after" || k == "runs":
+				m.top[k] = v
+			case k == "pack":
+				m.pack = v
 			}
 		case "settings":
 			key, field, ok := strings.Cut(k, ".")
@@ -130,6 +159,15 @@ func readManifest(dir string) (*manifest, error) {
 			m.subscribe[k] = v
 		case "provides":
 			m.provides[k] = v
+		case "views":
+			if m.views == nil {
+				m.views = map[string]string{}
+			}
+			m.views[k] = v
+		case "tools":
+			if !strings.Contains(k, ".") {
+				m.tools = append(m.tools, k)
+			}
 		case "command-options":
 			if m.cmdOptions == nil {
 				m.cmdOptions = map[string]string{}
@@ -197,9 +235,33 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
-	scm         scmState        // version control panels: scmpanel.go
-	contextKeys map[string]bool // context-keys: set-context keys (true: set, false: removed)
-	statusItems map[string]bool // status-items: runtime items
+	rviews      map[int64]*rview     // retained views it was given (views.go)
+	notes       map[int64]*noteState // notifications open (notify.go)
+	progs       map[int64]*progState // progress not ended
+	noteSeq     int64
+	images      map[int64]bool    // view-images handles (views.go)
+	patches     int               // vpatch requests that passed
+	secrets     map[string][]byte // secret-set values (resources.go)
+
+	warnedConsent bool               // said once that a disk change needs the user's consent
+	diffs         map[int64]string   // the diff tabs it opened: "LEFT RIGHT TITLE"
+	selectionsSet map[int64][]string // select-many's selections per document
+
+	// protocol 1.1 language features (query.go)
+	asked       map[string]bool   // the features hello named
+	scope       map[string]string // [provides] values set by provides, "-" for withdrawn
+	scoped      bool              // a provides was served (said once)
+	queries     map[int64]*query  // rhun's requests: parts, progress, the hard limit
+	withdrawn   map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
+	lastAsk     int64             // the last request asked
+	scm         scmState          // version control panels: scmpanel.go
+	contextKeys map[string]bool   // context-keys: set-context keys (true: set, false: removed)
+	statusItems map[string]bool   // status-items: runtime items
+	tests       *testState        // feature tests (tests.go)
+
+	problems      map[string]int // file-diagnostics: the sets kept, by target
+	fileDiagsSaid bool           // a set was kept (said once)
+	askedItem     []byte         // the PATH of the hierarchy item asked about (calls-out's sites are there)
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -304,12 +366,31 @@ func (h *host) start() error {
 		}
 		prog = p
 		args = append(args, filepath.Join(h.dir, h.m.script))
-	} else {
-		rel, ok := h.m.run[*target]
-		if !ok {
-			return fmt.Errorf("no run.%s in the manifest", *target)
-		}
+	} else if rel, ok := h.m.run[*target]; ok && *target != "wasm32-wasip1" {
 		prog = filepath.Join(h.dir, rel)
+	} else if rel, ok := h.m.run["wasm32-wasip1"]; ok {
+		// a WebAssembly module (no program for the target, or -target wasm32-wasip1): rhun runs
+		// it, with the folders its [needs] allow, as rhun itself does
+		p, err := exec.LookPath(*rhunExe)
+		if err != nil {
+			return fmt.Errorf("run.wasm32-wasip1 needs rhun to run it: %s not found (-rhun)", *rhunExe)
+		}
+		prog = p
+		args = append(args, "--wasm-host", "--dir", h.state, "--dir-ro", h.dir)
+		switch h.m.needs["project"] {
+		case "read":
+			args = append(args, "--dir-ro", h.project)
+		case "write":
+			args = append(args, "--dir", h.project)
+		}
+		if h.m.needs["home"] == "read" {
+			if home, err := os.UserHomeDir(); err == nil {
+				args = append(args, "--dir-ro", home)
+			}
+		}
+		args = append(args, filepath.Join(h.dir, rel))
+	} else {
+		return fmt.Errorf("no run.%s in the manifest", *target)
 	}
 	if h.m.args != "" {
 		args = append(args, strings.Fields(h.m.args)...)
@@ -375,7 +456,14 @@ type message struct {
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
 	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
-	"run-command": true, "status-item": true} // commands.go
+	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, "vimage": true, // retained views, notifications, progress: views.go, notify.go
+	"secret-set": true, "open-url": true, "external-uri": true, "find-files": true, "search-text": true, // resources: resources.go
+	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
+	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
+	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go
+	"query-part": true, "query-progress": true, "file-diagnostics": true, // language features: query.go, langfeat.go
+	"run-command": true, "status-item": true, // commands.go
+	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true} // test controllers: tests.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -393,7 +481,18 @@ func (h *host) reader() {
 		// stops an extension whose answer is over 4 MB (a workspace edit's cap): the checker reads
 		// such a body (up to 64 MB) only to stay in step
 		if len(f) == 3 && f[0] == "ok" {
-			if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
+			id, _ := strconv.ParseInt(f[1], 10, 64)
+			if _, big := bigReplies.Load(id); big {
+				// nb-open's and nb-save's answers carry up to 64 MB
+				if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n > 64<<20 {
+					m.err = fmt.Errorf("LEN %q is not 0 to 64 MB", f[2])
+				} else {
+					m.body = make([]byte, n)
+					if _, e := io.ReadFull(h.stdout, m.body); e != nil {
+						m.err = fmt.Errorf("the body of %q ended early: %w", s, e)
+					}
+				}
+			} else if n, e := strconv.ParseInt(f[2], 10, 64); e != nil || n < 0 || n >= 64<<20 {
 				m.err = fmt.Errorf("LEN %q is not 0 to 4 MB (rhun stops an extension whose answer is over 4 MB)", f[2])
 			} else if n > 4<<20 {
 				m.err = fmt.Errorf("a body of %d bytes: rhun stops an extension whose answer is over 4 MB", n)
@@ -501,7 +600,11 @@ func (h *host) handle(msg message) {
 	rerr := func(code, text string) { reply(fmt.Sprintf("error %d %s %s", id, code, text)) }
 	if h.errOnce > 0 {
 		h.errOnce--
-		rerr("refused", "conformance: an error reply the extension must survive")
+		why := "conformance: an error reply the extension must survive"
+		if verb == "apply" && h.features["workspace-edits"] {
+			why = "0 " + why // error ID CODE ENTRY TEXT
+		}
+		rerr("refused", why)
 		return
 	}
 	need := func(level string) bool {
@@ -541,6 +644,9 @@ func (h *host) handle(msg message) {
 			return nil, false
 		}
 		return msg.body, true
+	}
+	if h.resourcesRequest(verb, id, args, body, reply, rerr) {
+		return
 	}
 	switch verb {
 	case "text":
@@ -1061,16 +1167,89 @@ func (h *host) handle(msg message) {
 		reply(fmt.Sprintf("ok %d", id))
 	case "cancel":
 		reply(fmt.Sprintf("ok %d", id))
+	case "agent-sessions", "agent-changed", "propose", "unpropose", "tools", "tool-call", "agent-ask":
+		var b []byte
+		ok := true
+		if bodyVerbs[verb] {
+			if len(args) == 0 {
+				rerr("syntax", "cannot parse the line")
+				return
+			}
+			b, ok = body(args[len(args)-1])
+		}
+		h.aiRequest(id, verb, args, b, ok, reply, rerr)
 	case "view", "draw", "unview":
+		if verb == "unview" && h.retainedUnview(id, args, reply) {
+			return
+		}
 		h.viewRequest(id, verb, args, msg.body, reply, rerr)
+	case "nb-state", "nb-output", "nb-stream", "nb-kernel-label", "nb-exec", "nb-exec-signal":
+		h.nbRequest(id, verb, args, msg.body, reply, rerr)
+	case "notify", "notify-set", "unnotify", "progress", "progress-set", "progress-end":
+		h.notifyRequest(id, verb, args, msg.body, reply, rerr)
+	case "vimage", "unimage":
+		h.imageRequest(id, verb, args, msg.body, reply, rerr)
+	case "editor-read", "editor-dirty":
+		h.edRequest(id, verb, args, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
+	case "vpatch", "vshow", "vreveal", "vtab":
+		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
+	case "select-many", "reveal", "show-locations", "diff", "diff-close":
+		h.editorRequest(id, verb, args, msg, reply, rerr)
+	case "query-part", "query-progress":
+		if len(args) == 0 {
+			h.fail("request grammar", verb+" takes LEN last")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[len(args)-1])
+		if !ok {
+			return
+		}
+		if verb == "query-part" {
+			h.queryPart(args, b, reply, rerr, id)
+		} else {
+			h.queryProgress(args, b, reply, rerr, id)
+		}
+	case "provides":
+		h.providesRequest(line, reply, rerr, id)
 	case "scm-register", "scm-update", "scm-input", "scm-input-set":
 		h.scmRequest(id, verb, args, msg, reply, rerr)
 	case "run-command", "set-context", "status-item", "status-remove":
 		h.commandRequest(id, verb, args, msg, reply, rerr)
+	case "test-items", "test-remove", "test-update", "test-coverage", "test-end", "test-exec":
+		h.testRequest(id, verb, args, msg, reply, rerr)
+	case "file-diagnostics":
+		if !h.features["file-diagnostics"] {
+			h.fail("features", "file-diagnostics without file-diagnostics agreed after hello")
+			rerr("unknown", "no such request")
+			return
+		}
+		if len(args) != 4 {
+			h.fail("request grammar", "file-diagnostics takes VERSION N TARGET_LEN LEN")
+			rerr("syntax", "cannot parse the line")
+			return
+		}
+		b, ok := body(args[3])
+		if !ok || !need("read") {
+			return
+		}
+		h.fileDiagnostics(args, b, reply, rerr, id)
+	case "file-diagnostics-reset":
+		switch {
+		case !h.features["file-diagnostics"]:
+			h.fail("features", "file-diagnostics-reset without file-diagnostics agreed after hello")
+			rerr("unknown", "no such request")
+		case len(args) != 0:
+			h.fail("request grammar", "file-diagnostics-reset takes nothing")
+			rerr("syntax", "cannot parse the line")
+		default:
+			h.problems = nil
+			reply(fmt.Sprintf("ok %d", id))
+		}
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1201,6 +1380,7 @@ func (h *host) catchUp() {
 	if h.m.subscribe["cursor"] != "" && h.m.subscribe["cursor"] != "no" {
 		h.write(fmt.Sprintf("0 cursor %d 1 1\n", h.active))
 	}
+	h.sendEditorEvents(h.docs[h.active])
 }
 
 // sendSettings sends each of the manifest's settings with its default, as rhun does after ready.
@@ -1244,6 +1424,7 @@ func (h *host) expectHello() bool {
 	}
 	h.ok("hello 1 as the first line")
 	h.views, h.hostReqs, h.hostAnswers = map[int64]bool{}, map[int64]string{}, map[int64]message{}
+	h.scope, h.scoped, h.queries, h.withdrawn = map[string]string{}, false, map[int64]*query{}, map[int64]bool{}
 	h.contextKeys, h.statusItems = map[string]bool{}, map[string]bool{}
 	h.agree(line)
 	return true
@@ -1324,12 +1505,28 @@ func main() {
 	if m.protocol != 1 {
 		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
 	}
-	if len(m.commands) == 0 {
-		h.fail("manifest", "no [commands]: the extension can never be started on a command")
+	// a pack without a program: its members are installed with it and it never starts
+	programless := len(m.run) == 0 && m.runtime == "" && m.script == ""
+	if m.pack != "" {
+		if why := packProblem(m); why != "" {
+			h.fail("manifest", why)
+		} else {
+			h.ok(fmt.Sprintf("pack lists %d extensions", len(strings.Fields(m.pack))))
+		}
+	}
+	provider := false // started by a file its [provides] patterns match (or by Testing)
+	for k, v := range m.provides {
+		if !strings.Contains(k, ".") && strings.TrimSpace(v) != "" && strings.TrimSpace(v) != "no" {
+			provider = true
+		}
+	}
+	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) {
+		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
 	schemaFails := 0
 	bad := func(why string) { schemaFails++; h.fail("manifest schema", why) }
+	resourcesManifest(m, bad)
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(m.name) {
 		bad(fmt.Sprintf("name %q is not [a-z0-9][a-z0-9-]*", m.name))
 	}
@@ -1341,12 +1538,12 @@ func main() {
 	}
 	for t := range m.run {
 		switch t {
-		case "linux-x86_64", "macos-arm64", "windows-x64":
+		case "linux-x86_64", "macos-arm64", "windows-x64", "wasm32-wasip1":
 		default:
-			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64)", t))
+			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64, wasm32-wasip1)", t))
 		}
 	}
-	if len(m.run) == 0 && (m.runtime == "" || m.script == "") {
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) {
 		bad("no run.TARGET entry and no runtime with run")
 	}
 	for _, w := range strings.Fields(m.on) {
@@ -1369,18 +1566,30 @@ func main() {
 			bad(fmt.Sprintf("[subscribe] %s is not an event with a subscription", k))
 		}
 	}
-	for k := range m.provides {
+	for k, v := range m.provides {
+		notebook := k == "notebook" || k == "notebook.title" || k == "notebook.kernel" // v1.1 notebooks
+		if k == "editor.model" && m.provides[k] != "text" && m.provides[k] != "owned" {
+			bad("[provides] editor.model is text or owned")
+		}
+		if k == "editor.priority" && m.provides[k] != "default" && m.provides[k] != "option" {
+			bad("[provides] editor.priority is default or option")
+		}
+		notebook = notebook || k == "editor" || k == "editor.title" || k == "editor.model" || k == "editor.priority"
+		if notebook && k == "notebook.kernel" && v != "yes" && v != "no" {
+			bad("[provides] notebook.kernel is yes or no")
+		}
 		if k == "commit_message" || k == "scm" { // source control: yes or no
-			if v := m.provides[k]; v != "yes" && v != "no" {
+			if v != "yes" && v != "no" {
 				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))
 			}
 			continue
 		}
-		if k == "quickdiff" {
+		// keys of other features: quickdiff (scm.go), schemes (resources.go), linked (editor.go), tests (tests.go)
+		if k == "quickdiff" || k == "schemes" || k == "linked" || k == "tests" || k == "tests.profiles" || notebook {
 			continue
 		}
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
-			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
+		if why := providesKeyProblem(k, v); why != "" {
+			bad(why)
 		}
 	}
 	for k, v := range m.needs {
@@ -1390,12 +1599,21 @@ func main() {
 			ok = v == "none" || v == "read" || v == "write"
 		case "home":
 			ok = v == "none" || v == "read"
-		case "network", "terminal":
+		case "network", "terminal", "secrets":
 			ok = v == "no" || v == "yes"
 		case "run":
 			ok = true
 		case "git": // source control: the project's Git data through rhun
 			ok = v == "none" || v == "read"
+		case "kernels": // notebooks: programs rhun starts as the user (nb-exec)
+			ok = v != ""
+		case "tests":
+			// programs test-exec may start: bare names, at most 16 of 64 bytes
+			w := strings.Fields(v)
+			ok = len(w) > 0 && len(w) <= 16
+			for _, x := range w {
+				ok = ok && bareName.MatchString(x)
+			}
 		}
 		if !ok {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
@@ -1436,6 +1654,10 @@ func main() {
 	if schemaFails == 0 {
 		h.ok("manifest follows v1.json")
 	}
+	if m.pack != "" && programless {
+		h.ok("a pack without a program: nothing to start")
+		report(h)
+	}
 	work, _ := os.MkdirTemp("", "rhun-ext-check-")
 	defer os.RemoveAll(work)
 	h.state = filepath.Join(work, "state")
@@ -1463,6 +1685,7 @@ func main() {
 	h.write("0 ready " + h.project + "\n")
 	h.sendSettings()
 	h.catchUp()
+	h.openRetained()
 	h.serve(300 * time.Millisecond)
 	if len(h.fails) == 0 {
 		h.ok("ready and catch-up accepted")
@@ -1471,6 +1694,9 @@ func main() {
 	// 2. each command once, on each document
 	for _, c := range m.commands {
 		for _, d := range []int64{1, 2, 3, 4} {
+			if h.docs[d] == nil {
+				continue // a workspace edit renamed or deleted it
+			}
 			before := len(h.requests)
 			h.activate(d)
 			h.write(h.runLine(m.name+"."+c, d))
@@ -1497,8 +1723,7 @@ func main() {
 
 	// 2b. the user types into main.go and saves it: the edits stream (and saved) for subscribers;
 	// then the pointer rests
-	if h.sub("edits") || h.sub("hover") {
-		d := h.docs[2]
+	if d := h.docs[2]; d != nil && (h.sub("edits") || h.sub("hover")) {
 		h.activate(d.id)
 		h.serve(200 * time.Millisecond)
 		typed := []byte("\n// typed\n")
@@ -1531,14 +1756,32 @@ func main() {
 		}
 	}
 
+	// 2b'. protocol 1.1: every selection, for an extension that agreed selections and subscribes
+	// to selection
+	if h.features["selections"] && h.sub("selection") {
+		h.sendEditorEvents(h.docs[2])
+		h.serve(500 * time.Millisecond)
+		if h.cmdExited() {
+			h.fail("selections", "the program exited on a selections event")
+			report(h)
+		}
+		h.ok("takes the selections event")
+	}
+
 	// 2c. section 12: the requests rhun sends (completion, signature help, definition, references,
 	// symbols, code actions, rename, format), and the views it opened
 	h.checkFeatures()
+	h.checkAI()
 
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
-	h.write(h.runLine(m.name+"."+m.commands[0], 1))
+	// a command, or (an extension without commands, one that [provides] only) an event it hears anyway
+	runFirst := "0 active 1\n"
+	if len(m.commands) > 0 {
+		runFirst = h.runLine(m.name+"."+m.commands[0], 1)
+	}
+	h.write(runFirst)
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1548,7 +1791,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + h.runLine(m.name+"."+m.commands[0], 1)
+	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + runFirst
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)
