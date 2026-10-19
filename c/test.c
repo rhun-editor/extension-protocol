@@ -1918,6 +1918,174 @@ static void actions_requests(void) {
     rx_buf_free(&got);
     rx_buf_free(&want);
 }
+
+/* ---- tests (feature "tests") */
+
+static rx_buf t_out;
+static char t_log[256];
+
+static void t_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    rx_test_items l;
+    memset(&l, 0, sizeof l);
+    rx_test_item(&l, "group", "pkg", "pkg", NULL, NULL, "lazy", NULL, NULL);
+    int r = rx_test_items_send(ext, "", &l, 1);
+    const char *gone[] = {"old"};
+    int g = rx_test_remove(ext, gone, 1);
+    snprintf(t_log, sizeof t_log, "ready %d %d %s", r, g, r < 0 ? rx_error(ext) : "");
+}
+
+static int t_resolve(rx_ext *ext, const char *parent, rx_test_items *out, void *user) {
+    (void)ext, (void)user;
+    if (!*parent) {
+        rx_test_item(out, "group", "pkg", "pkg", NULL, NULL, "lazy", NULL, NULL);
+    } else if (strcmp(parent, "pkg") == 0) {
+        rx_range r = R(3, 1, 5, 2);
+        rx_test_item(out, "test", "pkg/A", "A", "/p/a.c", &r, NULL, "d", NULL);
+    } else {
+        return rx_test_refuse(out, "no such item");
+    }
+    return 1;
+}
+
+static const char *t_run(rx_ext *ext, const rx_test_run *run, void *user) {
+    (void)user;
+    if (strcmp(run->profile, "debug") == 0) return "busy the debugger is busy";
+    assert(run->run == 1 && run->nitems == 1 && strcmp(run->items[0], "pkg/A") == 0);
+    const char *args[] = {"-v"}, *env[] = {"A=1"};
+    int64_t ex = rx_test_exec(ext, run->run, "cc", NULL, args, 1, env, 1);
+    assert(ex == 9);
+    return NULL;
+}
+
+static void t_test_out(rx_ext *ext, int64_t exec, int err, const unsigned char *data, size_t len, void *user) {
+    (void)ext, (void)user;
+    assert(exec == 9 && !err);
+    rx_buf_add(&t_out, data, len);
+}
+
+static void t_test_exit(rx_ext *ext, int64_t exec, const char *code, void *user) {
+    (void)user;
+    assert(exec == 9 && strcmp(code, "0") == 0);
+    rx_test_results r;
+    memset(&r, 0, sizeof r);
+    rx_test_result(&r, "pkg/A", "failed", 12);
+    rx_test_message(&r, "boom", 4);
+    rx_test_location(&r, "/p/a.c", R(4, 5, 4, 5));
+    rx_test_expected(&r, "1", 1);
+    rx_test_actual(&r, "2", 1);
+    rx_test_result(&r, "", NULL, -1);
+    rx_test_output(&r, t_out.data, t_out.len);
+    assert(rx_test_update(ext, 1, &r) == 0 && r.n == 0);
+    rx_test_coverage c;
+    memset(&c, 0, sizeof c);
+    rx_coverage_file(&c, "/p/a.c");
+    rx_coverage_lines(&c, 3, 5, 1);
+    assert(rx_test_coverage_send(ext, 1, &c) == 0);
+    assert(rx_test_end(ext, 1) == 0);
+}
+
+static void t_cancel(rx_ext *ext, int64_t run, void *user) {
+    (void)ext, (void)user;
+    snprintf(t_log + strlen(t_log), sizeof t_log - strlen(t_log), " cancel %lld", (long long)run);
+}
+
+static void test_builders(void) {
+    rx_test_items l;
+    memset(&l, 0, sizeof l);
+    rx_test_item(&l, "test", "a\nb", "x", NULL, NULL, NULL, NULL, NULL);
+    rx_buf out = {NULL, 0, 0};
+    assert(rx_test_items_finish(&l, "", &out) == -1 && strcmp(l.fail, "syntax") == 0);
+    rx_test_items_free(&l);
+    rx_range bad = R(2, 5, 2, 4);
+    rx_test_item(&l, "test", "a", "x", "/f", &bad, NULL, NULL, NULL);
+    assert(l.fail && strcmp(l.fail, "badpos") == 0);
+    rx_test_items_free(&l);
+    rx_test_item(&l, "suite", "s", "S", NULL, NULL, "nodebug", NULL, "broken");
+    assert(rx_test_items_finish(&l, "p", &out) == 0);
+    same(&out, "1 1\npsuite 0 0 0 0 nodebug 1 1 0 14\nsSerror 6\nbroken");
+    rx_test_items_free(&l);
+    rx_buf_free(&out);
+    rx_test_results r;
+    memset(&r, 0, sizeof r);
+    rx_test_result(&r, "", "passed", 1);
+    assert(rx_test_results_finish(&r, &out) == -1 && strcmp(r.fail, "syntax") == 0);
+    rx_test_results_free(&r);
+    rx_test_message(&r, "x", 1);
+    assert(r.fail && strcmp(r.why, "an extra before its record") == 0);
+    rx_test_results_free(&r);
+    rx_test_result(&r, "t", "skipped", -1);
+    rx_test_result(&r, "u", "started", 5);
+    assert(rx_test_results_finish(&r, &out) == 0);
+    same(&out, "2\nskipped - 1 0\ntstarted 5 1 0\nu");
+    rx_test_results_free(&r);
+    rx_buf_free(&out);
+}
+
+static void tests_feature(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = t_ready;
+    h.resolve_tests = t_resolve;
+    h.run_tests = t_run;
+    h.test_out = t_test_out;
+    h.test_exit = t_test_exit;
+    h.cancel_tests = t_cancel;
+    rx_buf got = {NULL, 0, 0}, want = {NULL, 0, 0};
+    run("tests", &h,
+        "0 features tests\n"
+        "0 ready -\n"
+        "ok 1\n"
+        "ok 2\n"
+        "5 tests-resolve 0\n"
+        "6 tests-resolve 3\npkg"
+        "7 test-run 1 run 1 6\npkg/A\n"
+        "0 test-out 9 out 3\nok\n"   /* arrives while test-exec waits: kept for later */
+        "ok 3 9\n"
+        "0 test-exit 9 0\n"
+        "ok 4\n"
+        "ok 5\n"
+        "ok 6\n"
+        "8 test-run 2 debug 0 0\n"
+        "0 test-cancel 2\n"
+        "9 tests-resolve 1\nx"
+        "10 test-run x run 0 0\n"
+        "0 bye\n",
+        &got);
+    const char *roots = "0 1\ngroup 0 0 0 0 lazy 3 3 0 0\npkgpkg";
+    const char *kids = "3 1\npkgtest 3 1 5 2 - 5 1 6 8\npkg/AA/p/a.cdesc 1\nd";
+    const char *exec = "2 0 1 1\ncc2\n-v3\nA=1";
+    const char *update = "2\nfailed 12 5 61\npkg/Amessage 4\nboomlocation 4 5 4 5 6\n/p/a.cexpected 1\n1actual 1\n2"
+                         "- - 0 12\noutput 3\nok\n";
+    const char *cov = "1\n6 1\n/p/a.c3 5 1\n";
+    rx_buf_fmt(&want, "hello 1 tests\n1 test-items replace %zu\n%s", strlen(roots), roots);
+    rx_buf_fmt(&want, "2 test-remove 1 4\nold\n");
+    rx_buf_fmt(&want, "ok 5 %zu\n%s", strlen(roots), roots);
+    rx_buf_fmt(&want, "ok 6 %zu\n%s", strlen(kids), kids);
+    rx_buf_fmt(&want, "3 test-exec 1 %zu\n%s", strlen(exec), exec);
+    rx_buf_fmt(&want, "ok 7 0\n");
+    rx_buf_fmt(&want, "4 test-update 1 %zu\n%s", strlen(update), update);
+    rx_buf_fmt(&want, "5 test-coverage 1 %zu\n%s", strlen(cov), cov);
+    rx_buf_fmt(&want, "6 test-end 1\n");
+    rx_buf_fmt(&want, "error 8 busy the debugger is busy\n");
+    rx_buf_fmt(&want, "error 9 refused no such item\n");
+    rx_buf_fmt(&want, "error 10 syntax a bad test-run\n");
+    if (got.len != want.len || memcmp(got.data, want.data, got.len) != 0)
+        fprintf(stderr, "got:\n[%s]\nwant:\n[%s]\n", got.data, want.data);
+    same(&got, want.data);
+    assert(strcmp(t_log, "ready 0 0  cancel 2") == 0);
+    rx_buf_free(&got);
+    rx_buf_free(&want);
+
+    /* without agreement: nothing is sent, requests are unknown, Cancel is not delivered */
+    t_log[0] = 0;
+    run("tests", &h, "0 features\n0 ready -\n3 tests-resolve 0\n0 test-cancel 1\n4 test-run 1 run 0 0\n0 bye\n", &got);
+    same(&got, "hello 1 tests\nerror 3 unknown no such request\nerror 4 unknown no such request\n");
+    assert(strcmp(t_log, "ready -1 -1 unknown tests was not agreed") == 0);
+    rx_buf_free(&got);
+    rx_buf_free(&t_out);
+}
+
 int main(void) {
     retained_patches();
     ai_bodies();
@@ -1940,6 +2108,7 @@ int main(void) {
     cuts();
     transactions();
     ordered();
+    test_builders();
     dispatch();                 /* last: standard output goes to a file from here on */
     editor_model();
     uri_sides();
@@ -1952,6 +2121,7 @@ int main(void) {
     notebooks();
     query_requests();
     actions_requests();
+    tests_feature();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

@@ -23,7 +23,7 @@ import (
 )
 
 // providerFeatures are the features that name files in [provides] (all but views)
-var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions", "linked-editing"}
+var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions", "linked-editing", "tests"}
 
 // provideKey is a provider feature's key in [provides]
 func provideKey(f string) string {

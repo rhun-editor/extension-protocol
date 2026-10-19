@@ -360,3 +360,37 @@ status-head  = ( "left" / "right" ) SP [ "-" ] num SP len SP len SP len LF
               ; EXTRA records: command-ref, "color" SP color SP "0" LF, "background" SP
               ; ( "error" / "warning" ) SP "0" LF, "when" SP len LF + the clause
 color        = "fg" / "muted" / "accent" / "error" / "warning" / "success"
+
+; Test controllers require agreed tests. Bodies follow LEN lines exactly; see v1.1.md.
+feature      =/ "tests"
+host-request =/ id SP "tests-resolve" SP len
+              ; followed by PARENT (an item id, empty for the roots); answered with an items body
+host-request =/ id SP "test-run" SP num SP t-profile SP num SP len
+              ; RUN PROFILE N, then N item ids each ending in LF; answered "ok" SP id SP "0"
+t-profile    = "run" / "debug" / "coverage"
+request      =/ id SP "test-items" SP ( "replace" / "add" ) SP len
+request      =/ id SP "test-remove" SP num SP len
+request      =/ id SP "test-update" SP num SP len
+request      =/ id SP "test-end" SP num
+request      =/ id SP "test-coverage" SP num SP len
+request      =/ id SP "test-exec" SP num SP len
+              ; answered "ok" SP id SP EXEC
+event        =/ "0" SP "test-cancel" SP num
+event        =/ "0" SP "test-out" SP num SP ( "out" / "err" ) SP len
+              ; followed by LEN bytes of the program's output, at most 64 KiB
+event        =/ "0" SP "test-exit" SP num SP ( num / "signal" SP num / "killed" )
+t-items      = len SP num LF *OCTET *t-item
+              ; PARENT_LEN N, PARENT, then N items
+t-item       = t-kind SP num SP num SP num SP num SP t-flags SP len SP len SP len SP len LF
+              ; L1 C1 L2 C2 (all 0: no range), then ID LABEL PATH EXTRA of those lengths
+t-kind       = "group" / "file" / "suite" / "test"
+t-flags      = "-" / t-flag *( "," t-flag )
+t-flag       = "lazy" / "nodebug"
+t-results    = num LF *t-record
+t-record     = t-state SP ( num / "-" ) SP len SP len LF
+              ; ITEM and EXTRA of those lengths; extra records: message, location, expected,
+              ; actual, output (NAME ARGS LEN LF and LEN bytes)
+t-state      = "queued" / "started" / "passed" / "failed" / "errored" / "skipped" / "-"
+t-coverage   = num LF *( len SP num LF *OCTET *( num SP num SP num LF ) )
+t-command    = len SP len SP num SP num LF
+              ; PROGRAM CWD, then ARGC arguments and ENVC NAME=VALUE variables, each LEN LF bytes

@@ -29,7 +29,8 @@ var knownFeatures = []string{"views", "complete", "signature", "definition", "re
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
 	"notebooks",                                                                                                                            // notebooks: notebook.go
 	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions", // language features: query.go, actions.go
-	"command-args", "context-keys", "status-items"} // commands.go
+	"command-args", "context-keys", "status-items", // commands.go
+	"tests"} // test controllers: tests.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -418,6 +419,10 @@ func (h *host) checkFeatures() {
 		return
 	}
 	h.checkNotebooks()
+	if h.cmdExited() {
+		return
+	}
+	h.checkTests()
 	if h.cmdExited() {
 		return
 	}

@@ -30,7 +30,8 @@
  * "complete-items" (rx_list_item_extra, complete_resolve), "signature-list" (signatures),
  * "navigation" (declaration, type_definition, implementation), "prepare-rename" (prepare_rename),
  * "partial-format" (range_format, type_format) and "code-actions" (code_actions with
- * rx_code_action, code_action_resolve).
+ * rx_code_action, code_action_resolve), and "tests" for a test controller (rx_test_item,
+ * rx_test_update, rx_test_exec and the tests handlers).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * The same source builds for wasm32-wasip1 (clang --target=wasm32-wasip1 with a WASI sysroot), one
  * module rhun runs itself on every system: run.wasm32-wasip1 = bin/NAME.wasm in the manifest.
@@ -238,6 +239,22 @@ typedef struct rx_nb_open { int64_t id, nb; const char *path; const unsigned cha
 typedef struct rx_nb_save { int64_t id, nb; const char *path; const unsigned char *body; size_t len; } rx_nb_save;
 typedef struct rx_nb_run { int64_t nb, cell, run; const char *lang; const unsigned char *source; size_t len; } rx_nb_run;
 
+/* Tests (1.1, feature "tests"; v1.1.md "Feature: tests"): items under one parent, built with
+ * rx_test_item; a run rhun asks for (profile run, debug or coverage; no items: everything);
+ * results of a run, built with rx_test_result and the extras after it; coverage, built with
+ * rx_coverage_file and rx_coverage_lines. Zero them to start; the fields are the builders' own. */
+typedef struct rx_test_items { rx_buf recs; int n; const char *fail; char why[256]; } rx_test_items;
+typedef struct rx_test_run { int64_t run; const char *profile; int nitems; const char *const *items; } rx_test_run;
+typedef struct rx_test_results {
+    rx_buf recs, extra, item;
+    int n, open;
+    const char *state;
+    long long ms;
+    const char *fail;
+    char why[256];
+} rx_test_results;
+typedef struct rx_test_coverage { rx_buf recs, ranges, path; int files, nranges, open; } rx_test_coverage;
+
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -358,6 +375,17 @@ typedef struct {
      * rhun; link is the whole link with the path and query the browser added (len bytes, NUL
      * after them). */
     void (*link)(rx_ext *ext, int64_t id, const char *link, size_t len, void *user);
+    /* Tests (1.1, feature "tests"; types below). resolve_tests: parent's children ("" the roots)
+     * in out, return 1 (rx_test_refuse(out, why) shows why on the row instead), 0 for "unknown".
+     * run_tests: start the run and return NULL, or "CODE TEXT" to refuse it ("busy ..."); report
+     * with rx_test_update and end with rx_test_end, here or from later handlers. cancel_tests: the
+     * user's Cancel (stop, then rx_test_end). test_out and test_exit: a test_exec program's output
+     * (err 1: its standard error), as read, and its end: code "0", "1", "signal N" or "killed". */
+    int (*resolve_tests)(rx_ext *ext, const char *parent, struct rx_test_items *out, void *user);
+    const char *(*run_tests)(rx_ext *ext, const struct rx_test_run *run, void *user);
+    void (*cancel_tests)(rx_ext *ext, int64_t run, void *user);
+    void (*test_out)(rx_ext *ext, int64_t exec, int err, const unsigned char *data, size_t len, void *user);
+    void (*test_exit)(rx_ext *ext, int64_t exec, const char *code, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -1092,6 +1120,46 @@ rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at);
  * "opened DOC VERSION LANG PATH" (a path may hold spaces, which argv splits) */
 const char *rx_event_tail(const rx_event *ev, int n);
 
+/* Tests (feature "tests"). An item: kind group, file, suite or test; id unique and stable (1 to
+ * 512 bytes, one line); path "" or absolute (or "#DOC"); range NULL for none (it needs a path);
+ * flags NULL, "lazy" (rhun asks for its children with resolve_tests), "nodebug" or
+ * "lazy,nodebug"; desc and error NULL for none. A bad item fails the list (fail, why). */
+void rx_test_item(rx_test_items *l, const char *kind, const char *id, const char *label, const char *path,
+                  const rx_range *range, const char *flags, const char *desc, const char *error);
+int rx_test_refuse(rx_test_items *l, const char *why);         /* returns 1, for resolve_tests */
+int rx_test_items_finish(rx_test_items *l, const char *parent, rx_buf *out);   /* 0, or -1: fail */
+void rx_test_items_free(rx_test_items *l);
+/* publishes the items under parent ("" the roots): replace makes them its only children, in this
+ * order; otherwise they are added or updated. The list is used up. */
+int rx_test_items_send(rx_ext *ext, const char *parent, rx_test_items *l, int replace);
+int rx_test_remove(rx_ext *ext, const char *const *ids, int n);
+/* A result record: item "" for the run itself (state NULL or "errored"); state queued, started,
+ * passed, failed, errored, skipped, or NULL for output only; ms -1 for no duration. The extras
+ * after it belong to it: a message starts a new one, location, expected and actual describe the
+ * current message, output is appended to the item's (the run's) output. */
+void rx_test_result(rx_test_results *r, const char *item, const char *state, long long ms);
+void rx_test_message(rx_test_results *r, const char *text, size_t len);
+void rx_test_location(rx_test_results *r, const char *path, rx_range range);
+void rx_test_expected(rx_test_results *r, const void *data, size_t len);
+void rx_test_actual(rx_test_results *r, const void *data, size_t len);
+void rx_test_output(rx_test_results *r, const void *data, size_t len);
+int rx_test_results_finish(rx_test_results *r, rx_buf *out);  /* 0, or -1: fail (syntax, toobig) */
+void rx_test_results_free(rx_test_results *r);
+/* sends the results (at most 2,000 records and 1 MiB a message: send as you go) and empties them */
+int rx_test_update(rx_ext *ext, int64_t run, rx_test_results *r);
+int rx_test_end(rx_ext *ext, int64_t run);                     /* the run is over */
+/* lines from to to (one-based, inclusive) of the current file ran count times (0: not run) */
+void rx_coverage_file(rx_test_coverage *c, const char *path);
+void rx_coverage_lines(rx_test_coverage *c, int from, int to, long long count);
+void rx_test_coverage_finish(rx_test_coverage *c, rx_buf *out);
+void rx_test_coverage_free(rx_test_coverage *c);
+int rx_test_coverage_send(rx_ext *ext, int64_t run, rx_test_coverage *c);      /* empties it */
+/* starts a program as the user for the run: a bare name from [needs] tests, its folder (NULL or
+ * "" for the project), argc arguments and envc NAME=VALUE variables (rhun may ask the user first;
+ * the call waits). Its EXEC, or -1; its output and end come to test_out and test_exit. */
+int64_t rx_test_exec(rx_ext *ext, int64_t run, const char *program, const char *dir,
+                     const char *const *argv, int argc, const char *const *env, int envc);
+
 #ifdef __cplusplus
 }
 #endif
@@ -1276,18 +1344,20 @@ static int rx_nfields(const char *line) {
 }
 
 /* the messages followed by a body, LEN their last field: the events edits (6a), action (12f),
- * selections, link, retained views' (1.1) and run with command-args (0 run EXT.NAME DOC FROM LEN),
- * and the requests below */
+ * selections, link, test-out, retained views' (1.1) and run with command-args (0 run EXT.NAME DOC
+ * FROM LEN), and the requests below */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
         strncmp(line, "0 selections ", 13) == 0 || strncmp(line, "0 nb-run ", 9) == 0 ||
-        strncmp(line, "0 link ", 7) == 0)
+        strncmp(line, "0 link ", 7) == 0 || strncmp(line, "0 test-out ", 11) == 0)
         return 1;
     if (strncmp(line, "0 run ", 6) == 0) return rx_nfields(line) == 6;    /* command-args */
     if (line[0] >= '1' && line[0] <= '9') {
         /* requests: ID commit-message ... LEN; vkids, vmore (the node id follows); tool and
-         * agent-prompt (their input); nb-open and nb-save: rx_host_body */
-        static const char *const req[] = {"commit-message ", "vkids ", "vmore ", "tool ", "agent-prompt ", NULL};
+         * agent-prompt (their input); tests-resolve and test-run (tests); nb-open and nb-save:
+         * rx_host_body */
+        static const char *const req[] = {"commit-message ", "vkids ", "vmore ", "tool ", "agent-prompt ",
+                                          "tests-resolve ", "test-run ", NULL};
         const char *v = strchr(line, ' ');
         if (!v) return 0;
         if (strncmp(v + 1, "call ", 5) == 0) return rx_nfields(line) == 6;   /* ID call EXT.NAME DOC CALLER LEN */
@@ -4594,6 +4664,397 @@ int rx_resolved_finish(rx_resolved *r, rx_buf *out) {
     return bad ? -1 : 0;
 }
 
+/* ---- tests */
+
+/* s is one line of at most max bytes (and not empty unless allowed) */
+static int rx_test_text(const char *s, size_t max, int allow_empty) {
+    size_t n = s ? strlen(s) : 0;
+    if (n > max || (!allow_empty && n == 0)) return 0;
+    return !s || strpbrk(s, "\n\r") == NULL;
+}
+
+static void rx_test_fail(const char **fail, char *why, size_t cap, const char *code, const char *text) {
+    if (*fail) return;
+    size_t n = strlen(text);
+    if (n > cap - 1) {
+        n = cap - 1;
+        while (n > 0 && ((unsigned char)text[n] & 0xc0) == 0x80) n--;
+    }
+    memmove(why, text, n);
+    why[n] = 0;
+    for (char *c = why; *c; c++)
+        if (*c == '\n' || *c == '\r') *c = ' ';
+    *fail = code;
+}
+
+void rx_test_item(rx_test_items *l, const char *kind, const char *id, const char *label, const char *path,
+                  const rx_range *range, const char *flags, const char *desc, const char *error) {
+    if (l->fail) return;
+    label = label ? label : "";
+    path = path ? path : "";
+    desc = desc ? desc : "";
+    error = error ? error : "";
+    if (!kind || (strcmp(kind, "group") && strcmp(kind, "file") && strcmp(kind, "suite") && strcmp(kind, "test"))) {
+        rx_test_fail(&l->fail, l->why, sizeof l->why, "syntax", "a bad item kind");
+        return;
+    }
+    if (!rx_test_text(id, 512, 0) || !rx_test_text(label, 200, 1) || !rx_test_text(path, 4095, 1) ||
+        !rx_test_text(desc, 200, 1) || strlen(error) > 1000 ||
+        (flags && *flags && strcmp(flags, "lazy") && strcmp(flags, "nodebug") && strcmp(flags, "lazy,nodebug"))) {
+        rx_test_fail(&l->fail, l->why, sizeof l->why, "syntax", "a bad item");
+        return;
+    }
+    if (l->n >= 10000) {
+        rx_test_fail(&l->fail, l->why, sizeof l->why, "toobig", "10000 items per body");
+        return;
+    }
+    int l1 = 0, c1 = 0, l2 = 0, c2 = 0;
+    if (range) {
+        l1 = range->start.line, c1 = range->start.col, l2 = range->end.line, c2 = range->end.col;
+        if (l1 < 1 || c1 < 1 || c2 < 1 || l2 < l1 || (l2 == l1 && c2 < c1) || !*path) {
+            rx_test_fail(&l->fail, l->why, sizeof l->why, "badpos", "a bad item range");
+            return;
+        }
+    }
+    rx_buf extra = {NULL, 0, 0};
+    if (*desc) rx_buf_fmt(&extra, "desc %zu\n%s", strlen(desc), desc);
+    if (*error) rx_buf_fmt(&extra, "error %zu\n%s", strlen(error), error);
+    rx_buf_fmt(&l->recs, "%s %d %d %d %d %s %zu %zu %zu %zu\n", kind, l1, c1, l2, c2,
+               flags && *flags ? flags : "-", strlen(id), strlen(label), strlen(path), extra.len);
+    rx_buf_str(&l->recs, id);
+    rx_buf_str(&l->recs, label);
+    rx_buf_str(&l->recs, path);
+    if (extra.len) rx_buf_add(&l->recs, extra.data, extra.len);
+    rx_buf_free(&extra);
+    l->n++;
+}
+
+int rx_test_refuse(rx_test_items *l, const char *why) {
+    l->fail = NULL;
+    rx_buf_free(&l->recs);
+    l->n = 0;
+    rx_test_fail(&l->fail, l->why, sizeof l->why, "refused", why ? why : "");
+    return 1;
+}
+
+int rx_test_items_finish(rx_test_items *l, const char *parent, rx_buf *out) {
+    parent = parent ? parent : "";
+    if (!l->fail && *parent && !rx_test_text(parent, 512, 0))
+        rx_test_fail(&l->fail, l->why, sizeof l->why, "syntax", "a bad parent id");
+    if (!l->fail && l->recs.len > (4u << 20))
+        rx_test_fail(&l->fail, l->why, sizeof l->why, "toobig", "4 MiB per body");
+    if (l->fail) return -1;
+    rx_buf_fmt(out, "%zu %d\n", strlen(parent), l->n);
+    rx_buf_str(out, parent);
+    if (l->recs.len) rx_buf_add(out, l->recs.data, l->recs.len);
+    return 0;
+}
+
+void rx_test_items_free(rx_test_items *l) {
+    rx_buf_free(&l->recs);
+    l->n = 0;
+    l->fail = NULL;
+    l->why[0] = 0;
+}
+
+/* a request whose body was built here: fails locally with code and why when it could not be */
+static int rx_test_local(rx_ext *ext, const char *code, const char *why) {
+    snprintf(ext->error, sizeof ext->error, "%s %s", code, why);
+    return -1;
+}
+
+static int rx_tests_agreed(rx_ext *ext) {
+    if (rx_has(ext, "tests")) return 1;
+    rx_test_local(ext, "unknown", "tests was not agreed");
+    return 0;
+}
+
+int rx_test_items_send(rx_ext *ext, const char *parent, rx_test_items *l, int replace) {
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    int r;
+    if (!rx_tests_agreed(ext)) r = -1;
+    else if (rx_test_items_finish(l, parent, &body) < 0) r = rx_test_local(ext, l->fail, l->why);
+    else {
+        rx_buf_fmt(&line, "test-items %s %zu", replace ? "replace" : "add", body.len);
+        r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    }
+    rx_buf_free(&body);
+    rx_buf_free(&line);
+    rx_test_items_free(l);
+    return r;
+}
+
+int rx_test_remove(rx_ext *ext, const char *const *ids, int n) {
+    if (!rx_tests_agreed(ext)) return -1;
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    for (int i = 0; i < n; i++) {
+        if (!rx_test_text(ids[i], 512, 0)) {
+            rx_buf_free(&body);
+            return rx_test_local(ext, "syntax", "a bad id");
+        }
+        rx_buf_str(&body, ids[i]);
+        rx_buf_add(&body, "\n", 1);
+    }
+    rx_buf_fmt(&line, "test-remove %d %zu", n, body.len);
+    int r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    rx_buf_free(&body);
+    rx_buf_free(&line);
+    return r;
+}
+
+/* the open record goes into recs */
+static void rx_test_close(rx_test_results *r) {
+    if (!r->open) return;
+    r->open = 0;
+    if (r->fail) return;
+    char ms[32];
+    if (r->state && r->ms >= 0) snprintf(ms, sizeof ms, "%lld", r->ms);
+    else snprintf(ms, sizeof ms, "-");
+    rx_buf_fmt(&r->recs, "%s %s %zu %zu\n", r->state ? r->state : "-", ms, r->item.len, r->extra.len);
+    if (r->item.len) rx_buf_add(&r->recs, r->item.data, r->item.len);
+    if (r->extra.len) rx_buf_add(&r->recs, r->extra.data, r->extra.len);
+    r->extra.len = 0;
+    r->item.len = 0;
+    r->n++;
+}
+
+void rx_test_result(rx_test_results *r, const char *item, const char *state, long long ms) {
+    static const char *states[] = {"queued", "started", "passed", "failed", "errored", "skipped"};
+    rx_test_close(r);
+    if (r->fail) return;
+    item = item ? item : "";
+    const char *st = NULL;
+    for (size_t i = 0; state && i < sizeof states / sizeof *states; i++)
+        if (strcmp(state, states[i]) == 0) st = states[i];
+    if ((state && !st) || !rx_test_text(item, 512, 1) || (!*item && st && strcmp(st, "errored") != 0)) {
+        rx_test_fail(&r->fail, r->why, sizeof r->why, "syntax", "a bad result record");
+        return;
+    }
+    if (r->n >= 2000) {
+        rx_test_fail(&r->fail, r->why, sizeof r->why, "toobig", "2000 records per body");
+        return;
+    }
+    r->open = 1;
+    r->state = st;
+    r->ms = ms;
+    r->item.len = 0;
+    rx_buf_str(&r->item, item);
+}
+
+static void rx_test_extra(rx_test_results *r, const char *head, const void *data, size_t len) {
+    if (r->fail) return;
+    if (!r->open) {
+        rx_test_fail(&r->fail, r->why, sizeof r->why, "syntax", "an extra before its record");
+        return;
+    }
+    rx_buf_fmt(&r->extra, "%s %zu\n", head, len);
+    rx_buf_add(&r->extra, data, len);
+}
+
+void rx_test_message(rx_test_results *r, const char *text, size_t len) { rx_test_extra(r, "message", text, len); }
+void rx_test_expected(rx_test_results *r, const void *data, size_t len) { rx_test_extra(r, "expected", data, len); }
+void rx_test_actual(rx_test_results *r, const void *data, size_t len) { rx_test_extra(r, "actual", data, len); }
+void rx_test_output(rx_test_results *r, const void *data, size_t len) { rx_test_extra(r, "output", data, len); }
+
+void rx_test_location(rx_test_results *r, const char *path, rx_range g) {
+    char head[96];
+    snprintf(head, sizeof head, "location %d %d %d %d", g.start.line, g.start.col, g.end.line, g.end.col);
+    rx_test_extra(r, head, path, strlen(path));
+}
+
+int rx_test_results_finish(rx_test_results *r, rx_buf *out) {
+    rx_test_close(r);
+    if (!r->fail && r->recs.len + 16 > (1u << 20))
+        rx_test_fail(&r->fail, r->why, sizeof r->why, "toobig", "1 MiB per body");
+    if (r->fail) return -1;
+    rx_buf_fmt(out, "%d\n", r->n);
+    if (r->recs.len) rx_buf_add(out, r->recs.data, r->recs.len);
+    return 0;
+}
+
+void rx_test_results_free(rx_test_results *r) {
+    rx_buf_free(&r->recs);
+    rx_buf_free(&r->extra);
+    rx_buf_free(&r->item);
+    r->n = r->open = 0;
+    r->state = NULL;
+    r->fail = NULL;
+    r->why[0] = 0;
+}
+
+int rx_test_update(rx_ext *ext, int64_t run, rx_test_results *r) {
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    int res;
+    if (!rx_tests_agreed(ext)) res = -1;
+    else if (rx_test_results_finish(r, &body) < 0) res = rx_test_local(ext, r->fail, r->why);
+    else {
+        rx_buf_fmt(&line, "test-update %lld %zu", (long long)run, body.len);
+        res = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    }
+    rx_buf_free(&body);
+    rx_buf_free(&line);
+    rx_test_results_free(r);
+    return res;
+}
+
+int rx_test_end(rx_ext *ext, int64_t run) {
+    if (!rx_tests_agreed(ext)) return -1;
+    char line[64];
+    snprintf(line, sizeof line, "test-end %lld", (long long)run);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+static void rx_coverage_close(rx_test_coverage *c) {
+    if (!c->open) return;
+    c->open = 0;
+    rx_buf_fmt(&c->recs, "%zu %d\n", c->path.len, c->nranges);
+    if (c->path.len) rx_buf_add(&c->recs, c->path.data, c->path.len);
+    if (c->ranges.len) rx_buf_add(&c->recs, c->ranges.data, c->ranges.len);
+    c->path.len = c->ranges.len = 0;
+    c->nranges = 0;
+    c->files++;
+}
+
+void rx_coverage_file(rx_test_coverage *c, const char *path) {
+    rx_coverage_close(c);
+    c->open = 1;
+    c->path.len = 0;
+    rx_buf_str(&c->path, path);
+}
+
+void rx_coverage_lines(rx_test_coverage *c, int from, int to, long long count) {
+    if (!c->open) return;
+    rx_buf_fmt(&c->ranges, "%d %d %lld\n", from, to, count);
+    c->nranges++;
+}
+
+void rx_test_coverage_finish(rx_test_coverage *c, rx_buf *out) {
+    rx_coverage_close(c);
+    rx_buf_fmt(out, "%d\n", c->files);
+    if (c->recs.len) rx_buf_add(out, c->recs.data, c->recs.len);
+}
+
+void rx_test_coverage_free(rx_test_coverage *c) {
+    rx_buf_free(&c->recs);
+    rx_buf_free(&c->ranges);
+    rx_buf_free(&c->path);
+    c->files = c->nranges = c->open = 0;
+}
+
+int rx_test_coverage_send(rx_ext *ext, int64_t run, rx_test_coverage *c) {
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    int r = -1;
+    if (rx_tests_agreed(ext)) {
+        rx_test_coverage_finish(c, &body);
+        if (body.len > (4u << 20)) r = rx_test_local(ext, "toobig", "4 MiB per message: send per file");
+        else {
+            rx_buf_fmt(&line, "test-coverage %lld %zu", (long long)run, body.len);
+            r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+        }
+    }
+    rx_buf_free(&body);
+    rx_buf_free(&line);
+    rx_test_coverage_free(c);
+    return r;
+}
+
+int64_t rx_test_exec(rx_ext *ext, int64_t run, const char *program, const char *dir,
+                     const char *const *argv, int argc, const char *const *env, int envc) {
+    if (!rx_tests_agreed(ext)) return -1;
+    dir = dir ? dir : "";
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0}, fields = {NULL, 0, 0};
+    rx_buf_fmt(&body, "%zu %zu %d %d\n", strlen(program), strlen(dir), argc, envc);
+    rx_buf_str(&body, program);
+    rx_buf_str(&body, dir);
+    for (int i = 0; i < argc; i++) {
+        rx_buf_fmt(&body, "%zu\n", strlen(argv[i]));
+        rx_buf_str(&body, argv[i]);
+    }
+    for (int i = 0; i < envc; i++) {
+        rx_buf_fmt(&body, "%zu\n", strlen(env[i]));
+        rx_buf_str(&body, env[i]);
+    }
+    rx_buf_fmt(&line, "test-exec %lld %zu", (long long)run, body.len);
+    int64_t ex = -1;
+    if (rx_request(ext, line.data, body.data, body.len, &fields, NULL) == 0) {
+        if (!fields.data || !rx_positive_num(fields.data, INT64_MAX, &ex) || ex <= 0) {
+            ex = -1;
+            rx_test_local(ext, "syntax", "test-exec: a bad reply");
+        }
+    }
+    rx_buf_free(&body);
+    rx_buf_free(&line);
+    rx_buf_free(&fields);
+    return ex;
+}
+
+/* tests-resolve LEN + PARENT, test-run RUN PROFILE N LEN + ids: answered here */
+static void rx_test_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                           const unsigned char *body, size_t len) {
+    rx_buf line = {NULL, 0, 0}, out = {NULL, 0, 0};
+    int tests = rx_has(ext, "tests");
+    if (tests && strcmp(f[1], "tests-resolve") == 0 && n == 3 && h->resolve_tests) {
+        char *parent = (char *)malloc(len + 1);
+        if (!parent) abort();
+        if (len) memcpy(parent, body, len);
+        parent[len] = 0;
+        rx_test_items l;
+        memset(&l, 0, sizeof l);
+        int ok = strlen(parent) == len && h->resolve_tests(ext, parent, &l, user);
+        if (ok && rx_test_items_finish(&l, parent, &out) == 0) {
+            rx_buf_fmt(&line, "ok %s %zu", f[0], out.len);
+            rx_write(line.data, out.data, out.len);
+        } else if (ok) {
+            rx_buf_fmt(&line, "error %s %s %s", f[0], l.fail, l.why);
+            rx_write(line.data, NULL, 0);
+        } else {
+            rx_buf_fmt(&line, "error %s unknown no such request", f[0]);
+            rx_write(line.data, NULL, 0);
+        }
+        rx_test_items_free(&l);
+        free(parent);
+    } else if (tests && strcmp(f[1], "test-run") == 0 && n == 6 && h->run_tests) {
+        rx_test_run run;
+        int64_t count = 0;
+        if (!rx_positive_num(f[2], INT64_MAX, &run.run) || run.run <= 0 ||
+            !rx_positive_num(f[4], 1000000, &count)) {
+            rx_buf_fmt(&line, "error %s syntax a bad test-run", f[0]);
+            rx_write(line.data, NULL, 0);
+        } else {
+            /* the ids, each ending in LF, in a copy of the body */
+            char *ids = (char *)malloc(len + 1);
+            const char **items = (const char **)calloc((size_t)count + 1, sizeof *items);
+            if (!ids || !items) abort();
+            if (len) memcpy(ids, body, len);
+            ids[len] = 0;
+            int k = 0;
+            for (char *p = ids; *p && k < count;) {
+                char *nl = strchr(p, '\n');
+                if (nl) *nl = 0;
+                items[k++] = p;
+                if (!nl) break;
+                p = nl + 1;
+            }
+            run.profile = f[3];
+            run.nitems = k;
+            run.items = items;
+            const char *why = h->run_tests(ext, &run, user);
+            if (why) rx_buf_fmt(&line, "error %s %s", f[0], why);
+            else rx_buf_fmt(&line, "ok %s 0", f[0]);
+            for (char *c = line.data; *c; c++)
+                if (*c == '\n' || *c == '\r') *c = ' ';
+            rx_write(line.data, NULL, 0);
+            free(items);
+            free(ids);
+        }
+    } else {
+        rx_buf_fmt(&line, "error %s unknown no such request", f[0]);
+        rx_write(line.data, NULL, 0);
+    }
+    rx_buf_free(&line);
+    rx_buf_free(&out);
+}
+
 /* ---- the loop */
 
 /* fields f[from] to f[to - 1] are numbers: digits only */
@@ -5646,6 +6107,13 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 else if (strcmp(f[3], "closed") == 0) h->note_event(ext, atoll(f[2]), 0, user);
             } else if (strcmp(f[1], "progress") == 0 && n >= 4 && strcmp(f[3], "cancel") == 0 && h->progress_cancel) {
                 h->progress_cancel(ext, atoll(f[2]), user);
+            } else if (strcmp(f[1], "test-out") == 0 && n == 5 && h->test_out) {
+                h->test_out(ext, atoll(f[2]), strcmp(f[3], "err") == 0,
+                            m->body ? m->body : (const unsigned char *)"", m->body_len, user);
+            } else if (strcmp(f[1], "test-exit") == 0 && n >= 4 && h->test_exit) {
+                h->test_exit(ext, atoll(f[2]), rx_event_tail(&ev, 1), user);
+            } else if (strcmp(f[1], "test-cancel") == 0 && n == 3 && h->cancel_tests && rx_has(ext, "tests")) {
+                h->cancel_tests(ext, atoll(f[2]), user);
             } else if (strcmp(f[1], "bye") == 0) {
                 if (h->bye) h->bye(ext, user);
                 done = 1;
@@ -5655,6 +6123,9 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
             rx_children_answer(ext, h, user, f, n, m->body, m->body_len);
         } else if (n == 4 && f[0][0] >= '1' && f[0][0] <= '9' && rx_host_body(m->line)) {
             rx_nb_answer(ext, h, user, f, m->body, m->body_len);
+        } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9' &&
+                   (strcmp(f[1], "tests-resolve") == 0 || strcmp(f[1], "test-run") == 0)) {
+            rx_test_answer(ext, h, user, f, n, m->body, m->body_len);
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9') {
             rx_answer(ext, h, user, f, n, m->body, m->body_len);
         }

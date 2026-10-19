@@ -175,6 +175,11 @@
         "kernels": {
           "type": "string",
           "description": "notebooks: programs rhun may start as the user for this extension's notebooks (nb-exec), names space separated"
+        },
+        "tests": {
+          "type": "string",
+          "description": "Protocol 1.1: programs rhun may start for this extension as the user during a test run (test-exec): bare names, space separated, at most 16 of 64 bytes",
+          "pattern": "^[A-Za-z0-9._+-]{1,64}( [A-Za-z0-9._+-]{1,64}){0,15}$"
         }
       },
       "additionalProperties": false
@@ -368,6 +373,15 @@
         "document_links": {
           "$ref": "#/$defs/patterns",
           "description": "links under ctrl+hover; requires negotiated document-links"
+        },
+        "tests": {
+          "$ref": "#/$defs/patterns",
+          "description": "Protocol 1.1: the files this test controller has tests in (feature tests)."
+        },
+        "tests.profiles": {
+          "type": "string",
+          "description": "run kinds the controller offers besides run, space separated",
+          "pattern": "^(debug|coverage)( (debug|coverage))*$|^run( (debug|coverage))*$"
         }
       },
       "additionalProperties": false

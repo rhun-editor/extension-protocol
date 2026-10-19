@@ -256,6 +256,7 @@ type host struct {
 	scm         scmState          // version control panels: scmpanel.go
 	contextKeys map[string]bool   // context-keys: set-context keys (true: set, false: removed)
 	statusItems map[string]bool   // status-items: runtime items
+	tests       *testState        // feature tests (tests.go)
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -456,7 +457,8 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
 	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go
 	"query-part": true, "query-progress": true, // language features: query.go
-	"run-command": true, "status-item": true} // commands.go
+	"run-command": true, "status-item": true, // commands.go
+	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true} // test controllers: tests.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1209,6 +1211,8 @@ func (h *host) handle(msg message) {
 		h.scmRequest(id, verb, args, msg, reply, rerr)
 	case "run-command", "set-context", "status-item", "status-remove":
 		h.commandRequest(id, verb, args, msg, reply, rerr)
+	case "test-items", "test-remove", "test-update", "test-coverage", "test-end", "test-exec":
+		h.testRequest(id, verb, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1473,7 +1477,13 @@ func main() {
 			h.ok(fmt.Sprintf("pack lists %d extensions", len(strings.Fields(m.pack))))
 		}
 	}
-	if len(m.commands) == 0 && len(m.provides) == 0 && !(m.pack != "" && programless) {
+	provider := false // started by a file its [provides] patterns match (or by Testing)
+	for k, v := range m.provides {
+		if !strings.Contains(k, ".") && strings.TrimSpace(v) != "" && strings.TrimSpace(v) != "no" {
+			provider = true
+		}
+	}
+	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) {
 		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
@@ -1530,8 +1540,8 @@ func main() {
 			}
 			continue
 		}
-		// keys of other features: quickdiff (scm.go), schemes (resources.go), linked (editor.go)
-		if k == "quickdiff" || k == "schemes" || k == "linked" || notebook {
+		// keys of other features: quickdiff (scm.go), schemes (resources.go), linked (editor.go), tests (tests.go)
+		if k == "quickdiff" || k == "schemes" || k == "linked" || k == "tests" || k == "tests.profiles" || notebook {
 			continue
 		}
 		if why := providesKeyProblem(k, v); why != "" {
@@ -1553,6 +1563,13 @@ func main() {
 			ok = v == "none" || v == "read"
 		case "kernels": // notebooks: programs rhun starts as the user (nb-exec)
 			ok = v != ""
+		case "tests":
+			// programs test-exec may start: bare names, at most 16 of 64 bytes
+			w := strings.Fields(v)
+			ok = len(w) > 0 && len(w) <= 16
+			for _, x := range w {
+				ok = ok && bareName.MatchString(x)
+			}
 		}
 		if !ok {
 			bad(fmt.Sprintf("[needs] %s = %s is not a value section 5 lists", k, v))
@@ -1715,12 +1732,12 @@ func main() {
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
-	// an extension without commands (one that [provides] only) gets a command it does not have
-	first := "nothing"
+	// a command, or (an extension without commands, one that [provides] only) an event it hears anyway
+	runFirst := "0 active 1\n"
 	if len(m.commands) > 0 {
-		first = m.commands[0]
+		runFirst = h.runLine(m.name+"."+m.commands[0], 1)
 	}
-	h.write(h.runLine(m.name+"."+first, 1))
+	h.write(runFirst)
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1730,7 +1747,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + h.runLine(m.name+"."+first, 1)
+	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + runFirst
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)
