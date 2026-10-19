@@ -446,18 +446,186 @@ impl TextEdit {
 /// The edits of one file, all made against one text: the open document at `version`, or the
 /// file on disk (`version` `None`). They must not overlap; insertions at one position keep their
 /// order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileEdit {
     pub target: Target,
     pub version: Option<i64>,
     pub edits: Vec<TextEdit>,
+    /// With feature `workspace-edits` and `version` `None`: the 64-bit FNV-1a hash of the file's
+    /// bytes on disk ([`fnv1a64`]), which the file must still hash to (PRE `fnv1a64:HEX`).
+    /// Without the feature it is sent as `-`.
+    pub hash: Option<u64>,
 }
 
-/// Edits across files (section 12g): rhun checks all of them before it changes anything, opens
-/// the files that are not open, and applies each file's edits as one undo step. Nothing is saved.
+impl Default for Target {
+    fn default() -> Target {
+        Target::Path(String::new())
+    }
+}
+
+/// The 64-bit FNV-1a hash of some bytes: offset basis `0xcbf29ce484222325`, prime
+/// `0x100000001b3`. A text group's `fnv1a64:HEX` precondition is this hash of the file's bytes on
+/// disk (CR included).
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// How a `create` entry treats a path that exists (feature `file-operations`). `overwrite` wins
+/// over `ignore_existing`; with neither, an existing path refuses the edit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Create {
+    /// Replace an existing file with an empty one.
+    pub overwrite: bool,
+    /// Skip the entry when the path exists.
+    pub ignore_existing: bool,
+}
+
+/// How a `rename` entry treats a target that exists (feature `file-operations`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rename {
+    /// Replace an existing file at the target (a folder is never replaced).
+    pub overwrite: bool,
+    /// Skip the entry when the target exists.
+    pub ignore_existing: bool,
+}
+
+/// How a `delete` entry treats folders and missing paths (feature `file-operations`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Delete {
+    /// A folder and everything in it; without it only a file or an empty folder.
+    pub recursive: bool,
+    /// Skip the entry when the path does not exist.
+    pub ignore_missing: bool,
+}
+
+/// A file operation of a workspace edit (feature `file-operations`). Paths are absolute; a
+/// create path ending in `/` makes a folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileOp {
+    Create {
+        path: String,
+        opts: Create,
+    },
+    Rename {
+        from: String,
+        to: String,
+        opts: Rename,
+    },
+    Delete {
+        path: String,
+        opts: Delete,
+    },
+}
+
+fn flags(pairs: &[(bool, &str)]) -> String {
+    let words: Vec<&str> = pairs.iter().filter(|p| p.0).map(|p| p.1).collect();
+    if words.is_empty() {
+        "-".to_string()
+    } else {
+        words.join(",")
+    }
+}
+
+impl FileOp {
+    /// Its phase: creates first, renames after the text groups, deletes last.
+    fn phase(&self) -> u8 {
+        match self {
+            FileOp::Create { .. } => 0,
+            FileOp::Rename { .. } => 2,
+            FileOp::Delete { .. } => 3,
+        }
+    }
+
+    fn paths(&self) -> Vec<&str> {
+        match self {
+            FileOp::Create { path, .. } | FileOp::Delete { path, .. } => vec![path],
+            FileOp::Rename { from, to, .. } => vec![from, to],
+        }
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            FileOp::Create { path, opts } => {
+                let f = flags(&[
+                    (opts.overwrite, "overwrite"),
+                    (opts.ignore_existing, "ignore-existing"),
+                ]);
+                out.extend_from_slice(format!("create {} {f}\n{path}", path.len()).as_bytes());
+            }
+            FileOp::Rename { from, to, opts } => {
+                let f = flags(&[
+                    (opts.overwrite, "overwrite"),
+                    (opts.ignore_existing, "ignore-existing"),
+                ]);
+                out.extend_from_slice(
+                    format!("rename {} {} {f}\n{from}{to}", from.len(), to.len()).as_bytes(),
+                );
+            }
+            FileOp::Delete { path, opts } => {
+                let f = flags(&[
+                    (opts.recursive, "recursive"),
+                    (opts.ignore_missing, "ignore-missing"),
+                ]);
+                out.extend_from_slice(format!("delete {} {f}\n{path}", path.len()).as_bytes());
+            }
+        }
+    }
+}
+
+/// The longest label rhun shows (longer is cut there; the encoder cuts it at a character).
+pub const MAX_LABEL: usize = 200;
+
+/// Edits across files (section 12g): rhun checks all of them before it changes anything. Without
+/// feature `workspace-edits` it opens the files that are not open and applies each file's edits
+/// as one undo step, saving nothing; with it the edit is one transaction (files that are not open
+/// are written on disk, undone as one step), and with `file-operations` it may also create,
+/// rename and delete files.
+///
+/// The body lists the entries in rhun's phases: the creates, then the text groups (`files`),
+/// then the renames, then the deletes, each in the order added. [`WorkspaceEdit::entry`] maps
+/// an error's ENTRY back to them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceEdit {
     pub files: Vec<FileEdit>,
+    /// File operations (feature `file-operations`).
+    pub ops: Vec<FileOp>,
+    /// Names the change in the confirmation list, toasts and Undo (feature `workspace-edits`).
+    pub label: Option<String>,
+    /// Show the confirmation list even when the extension may write (feature `workspace-edits`).
+    pub confirm: bool,
+}
+
+/// What an entry of a workspace edit's body is: [`WorkspaceEdit::entry`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    /// `files[i]`
+    File(usize),
+    /// `ops[i]`
+    Op(usize),
+}
+
+/// Which parts of the grammar the receiving rhun agreed to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EditCaps {
+    pub ws: bool,
+    pub ops: bool,
+}
+
+impl EditCaps {
+    pub(crate) const ALL: EditCaps = EditCaps {
+        ws: true,
+        ops: true,
+    };
+    /// 12g's grammar: format and save-actions answers keep it whatever was agreed.
+    pub(crate) const V1: EditCaps = EditCaps {
+        ws: false,
+        ops: false,
+    };
 }
 
 impl WorkspaceEdit {
@@ -471,68 +639,202 @@ impl WorkspaceEdit {
             target: Target::Doc(doc),
             version: Some(version),
             edits,
+            hash: None,
         });
         self
     }
 
     /// Edits for a file by its path: the open document at `version`, or with `None` the file as
-    /// it is on disk (rhun opens it).
+    /// it is on disk (rhun opens it; with `workspace-edits`, edits it on disk).
     pub fn file(mut self, path: &str, version: Option<i64>, edits: Vec<TextEdit>) -> WorkspaceEdit {
         self.files.push(FileEdit {
             target: Target::Path(path.to_string()),
             version,
             edits,
+            hash: None,
         });
         self
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.files.iter().all(|f| f.edits.is_empty())
+    /// Edits for a file that is not open, made against `disk`, its bytes as read from disk (CR
+    /// included): with `workspace-edits` the file must still hash to them (`fnv1a64:HEX`), else
+    /// the edit is `stale`. Positions refer to rhun's text of it (CR before LF dropped).
+    pub fn file_hashed(mut self, path: &str, disk: &[u8], edits: Vec<TextEdit>) -> WorkspaceEdit {
+        self.files.push(FileEdit {
+            target: Target::Path(path.to_string()),
+            version: None,
+            edits,
+            hash: Some(fnv1a64(disk)),
+        });
+        self
     }
 
-    /// The body rhun reads, or why it cannot be one (over [`MAX_EDIT_BODY`], [`MAX_EDIT_FILES`]
-    /// or [`MAX_EDITS`]): an edit cut short would leave the files half changed, so none is sent.
+    /// Creates a file (empty) or, with a path ending in `/`, a folder (feature `file-operations`).
+    pub fn create(mut self, path: &str, opts: Create) -> WorkspaceEdit {
+        self.ops.push(FileOp::Create {
+            path: path.to_string(),
+            opts,
+        });
+        self
+    }
+
+    /// Renames a file or folder (feature `file-operations`); text groups name it by `from`.
+    pub fn rename(mut self, from: &str, to: &str, opts: Rename) -> WorkspaceEdit {
+        self.ops.push(FileOp::Rename {
+            from: from.to_string(),
+            to: to.to_string(),
+            opts,
+        });
+        self
+    }
+
+    /// Deletes a file or folder (feature `file-operations`).
+    pub fn delete(mut self, path: &str, opts: Delete) -> WorkspaceEdit {
+        self.ops.push(FileOp::Delete {
+            path: path.to_string(),
+            opts,
+        });
+        self
+    }
+
+    /// Names the change for the user (one line, cut at 200 bytes).
+    pub fn label(mut self, label: &str) -> WorkspaceEdit {
+        self.label = Some(field(label, MAX_LABEL));
+        self
+    }
+
+    /// Asks rhun to show the confirmation list even when the extension may write.
+    pub fn confirm(mut self) -> WorkspaceEdit {
+        self.confirm = true;
+        self
+    }
+
+    /// Whether it changes nothing: no file operation and no edit.
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty() && self.files.iter().all(|f| f.edits.is_empty())
+    }
+
+    /// The entries in the order the body lists them (rhun's phases).
+    pub(crate) fn order(&self) -> Vec<Entry> {
+        let mut out = Vec::with_capacity(self.files.len() + self.ops.len());
+        for phase in 0..4u8 {
+            if phase == 1 {
+                out.extend((0..self.files.len()).map(Entry::File));
+                continue;
+            }
+            for (i, op) in self.ops.iter().enumerate() {
+                if op.phase() == phase {
+                    out.push(Entry::Op(i));
+                }
+            }
+        }
+        out
+    }
+
+    /// What the body's 1-based entry `n` is (an apply error's ENTRY), or `None` for 0 and past
+    /// the last.
+    pub fn entry(&self, n: u32) -> Option<Entry> {
+        if n == 0 {
+            return None;
+        }
+        self.order().get(n as usize - 1).copied()
+    }
+
+    /// The body rhun reads with `workspace-edits` and `file-operations` agreed, or why it cannot
+    /// be one (over [`MAX_EDIT_BODY`], [`MAX_EDIT_FILES`] entries or [`MAX_EDITS`], a path that is
+    /// empty or over [`MAX_PATH`] bytes): an edit cut short would leave the files half changed,
+    /// so none is sent. Without file operations, hashes, a label or `confirm` it is exactly the
+    /// 12g body.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
-        if self.files.len() > MAX_EDIT_FILES {
-            return Err(format!(
-                "{} files: at most {MAX_EDIT_FILES}",
-                self.files.len()
+        self.encode_with(EditCaps::ALL).map_err(|e| e.1)
+    }
+
+    /// The body for a rhun that agreed `caps`: without `workspace-edits` hashes go as `-` and the
+    /// label and `confirm` are left out; file operations it did not agree are an error
+    /// (`unknown`). Errors carry the code to answer with.
+    pub(crate) fn encode_with(&self, caps: EditCaps) -> Result<Vec<u8>, (&'static str, String)> {
+        if !(self.ops.is_empty() || caps.ws && caps.ops) {
+            return Err((
+                "unknown",
+                "file operations need the workspace-edits and file-operations features".into(),
+            ));
+        }
+        let entries = self.files.len() + self.ops.len();
+        if entries > MAX_EDIT_FILES {
+            return Err((
+                "toobig",
+                format!("{entries} entries: at most {MAX_EDIT_FILES}"),
             ));
         }
         let edits: usize = self.files.iter().map(|f| f.edits.len()).sum();
         if edits > MAX_EDITS {
-            return Err(format!("{edits} edits: at most {MAX_EDITS}"));
+            return Err(("toobig", format!("{edits} edits: at most {MAX_EDITS}")));
         }
-        let mut out = format!("{}\n", self.files.len()).into_bytes();
-        for f in &self.files {
-            let p = f.target.encode();
-            if p.is_empty() || p.len() > MAX_PATH {
-                return Err(format!("a path of {} bytes: 1 to {MAX_PATH}", p.len()));
-            }
-            let v = f
-                .version
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            out.extend_from_slice(format!("{} {} {}\n", p.len(), v, f.edits.len()).as_bytes());
-            out.extend_from_slice(p.as_bytes());
-            for e in &f.edits {
-                let r = e.range;
-                out.extend_from_slice(
-                    format!(
-                        "{} {} {} {} {}\n",
-                        r.start.line,
-                        r.start.col,
-                        r.end.line,
-                        r.end.col,
-                        e.text.len()
-                    )
-                    .as_bytes(),
-                );
-                out.extend_from_slice(e.text.as_bytes());
+        let mut out = format!("{entries}\n").into_bytes();
+        for e in self.order() {
+            match e {
+                Entry::Op(i) => {
+                    let op = &self.ops[i];
+                    for p in op.paths() {
+                        if p.is_empty() || p.len() > MAX_PATH {
+                            return Err((
+                                "toobig",
+                                format!("a path of {} bytes: 1 to {MAX_PATH}", p.len()),
+                            ));
+                        }
+                    }
+                    op.encode(&mut out);
+                }
+                Entry::File(i) => {
+                    let f = &self.files[i];
+                    let p = f.target.encode();
+                    if p.is_empty() || p.len() > MAX_PATH {
+                        return Err((
+                            "toobig",
+                            format!("a path of {} bytes: 1 to {MAX_PATH}", p.len()),
+                        ));
+                    }
+                    let pre = match (f.version, f.hash) {
+                        (Some(v), _) => v.to_string(),
+                        (None, Some(h)) if caps.ws => format!("fnv1a64:{h:016x}"),
+                        _ => "-".to_string(),
+                    };
+                    out.extend_from_slice(
+                        format!("{} {} {}\n", p.len(), pre, f.edits.len()).as_bytes(),
+                    );
+                    out.extend_from_slice(p.as_bytes());
+                    for e in &f.edits {
+                        let r = e.range;
+                        out.extend_from_slice(
+                            format!(
+                                "{} {} {} {} {}\n",
+                                r.start.line,
+                                r.start.col,
+                                r.end.line,
+                                r.end.col,
+                                e.text.len()
+                            )
+                            .as_bytes(),
+                        );
+                        out.extend_from_slice(e.text.as_bytes());
+                    }
+                }
             }
             if out.len() > MAX_EDIT_BODY {
-                return Err(format!("over {} bytes", MAX_EDIT_BODY));
+                return Err(("toobig", format!("over {} bytes", MAX_EDIT_BODY)));
             }
+        }
+        if caps.ws {
+            if let Some(l) = &self.label {
+                let l = field(l, MAX_LABEL);
+                out.extend_from_slice(format!("label {}\n{l}", l.len()).as_bytes());
+            }
+            if self.confirm {
+                out.extend_from_slice(b"confirm 0\n");
+            }
+        }
+        if out.len() > MAX_EDIT_BODY {
+            return Err(("toobig", format!("over {} bytes", MAX_EDIT_BODY)));
         }
         Ok(out)
     }
@@ -573,11 +875,17 @@ impl CodeAction {
 /// The body for a list of code actions. Actions past [`MAX_ACTIONS`] or [`MAX_ACTIONS_BODY`],
 /// and those whose edit cannot be encoded, are left out.
 pub fn encode_actions(actions: &[CodeAction]) -> Vec<u8> {
+    encode_actions_with(actions, EditCaps::ALL)
+}
+
+/// [`encode_actions`] for a rhun that agreed `caps`: an action whose edit needs a feature it did
+/// not agree is left out.
+pub(crate) fn encode_actions_with(actions: &[CodeAction], caps: EditCaps) -> Vec<u8> {
     let mut recs = Vec::new();
     let mut n = 0;
     for a in actions {
         let edit = match &a.edit {
-            Some(e) => match e.encode() {
+            Some(e) => match e.encode_with(caps) {
                 Ok(b) => b,
                 Err(_) => continue,
             },
@@ -701,6 +1009,109 @@ mod tests {
         assert!(big.encode().is_err());
         assert!(WorkspaceEdit::new().is_empty());
         assert_eq!(WorkspaceEdit::new().encode().unwrap(), b"0\n".to_vec());
+    }
+
+    #[test]
+    fn fnv1a64_is_the_standard_hash() {
+        assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a64(b"foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn transactions_are_framed_as_the_spec_says() {
+        let e = WorkspaceEdit::new()
+            .label("Rename to 'total'\nnow")
+            .delete(
+                "/p/old.rs",
+                Delete {
+                    recursive: true,
+                    ignore_missing: true,
+                },
+            )
+            .file_hashed(
+                "/p/calc.rs",
+                b"a\r\nb\r\n",
+                vec![TextEdit::new(r(2, 1, 2, 2), "B")],
+            )
+            .rename(
+                "/p/util.rs",
+                "/p/helpers.rs",
+                Rename {
+                    overwrite: true,
+                    ignore_existing: false,
+                },
+            )
+            .doc(3, 9, vec![TextEdit::new(r(1, 1, 1, 1), "x")])
+            .create("/p/new/", Create::default())
+            .create(
+                "/p/new/a.rs",
+                Create {
+                    overwrite: false,
+                    ignore_existing: true,
+                },
+            )
+            .confirm();
+        let h = format!("{:016x}", fnv1a64(b"a\r\nb\r\n"));
+        let want = format!(
+            "6\ncreate 7 -\n/p/new/create 11 ignore-existing\n/p/new/a.rs\
+             10 fnv1a64:{h} 1\n/p/calc.rs2 1 2 2 1\nB2 9 1\n#31 1 1 1 1\nx\
+             rename 10 13 overwrite\n/p/util.rs/p/helpers.rs\
+             delete 9 recursive,ignore-missing\n/p/old.rs\
+             label 21\nRename to 'total' nowconfirm 0\n"
+        );
+        assert_eq!(String::from_utf8(e.encode().unwrap()).unwrap(), want);
+        // entries are numbered in that order
+        assert_eq!(e.entry(1), Some(Entry::Op(2)));
+        assert_eq!(e.entry(2), Some(Entry::Op(3)));
+        assert_eq!(e.entry(3), Some(Entry::File(0)));
+        assert_eq!(e.entry(4), Some(Entry::File(1)));
+        assert_eq!(e.entry(5), Some(Entry::Op(1)));
+        assert_eq!(e.entry(6), Some(Entry::Op(0)));
+        assert_eq!(e.entry(0), None);
+        assert_eq!(e.entry(7), None);
+        // a rhun without file-operations gets no body; without workspace-edits the hash is "-"
+        // and the label and confirm are left out
+        let ws = EditCaps {
+            ws: true,
+            ops: false,
+        };
+        assert_eq!(e.encode_with(ws).unwrap_err().0, "unknown");
+        let plain = WorkspaceEdit::new()
+            .label("L")
+            .file_hashed("/p/a", b"x", vec![])
+            .confirm();
+        assert_eq!(
+            plain
+                .encode_with(EditCaps {
+                    ws: false,
+                    ops: false
+                })
+                .unwrap(),
+            b"1\n4 - 0\n/p/a".to_vec()
+        );
+        assert_eq!(
+            String::from_utf8(plain.encode_with(ws).unwrap()).unwrap(),
+            format!(
+                "1\n4 fnv1a64:{:016x} 0\n/p/alabel 1\nLconfirm 0\n",
+                fnv1a64(b"x")
+            )
+        );
+        // a label is one line of at most 200 bytes, cut at a character
+        let long = WorkspaceEdit::new().label(&format!("{}é", "x".repeat(199)));
+        assert_eq!(long.label.as_deref(), Some("x".repeat(199).as_str()));
+        // file operations count as entries, and their paths are checked
+        let many = (0..1001).fold(WorkspaceEdit::new(), |e, i| {
+            e.delete(&format!("/p/{i}"), Delete::default())
+        });
+        assert_eq!(many.encode_with(EditCaps::ALL).unwrap_err().0, "toobig");
+        assert!(WorkspaceEdit::new()
+            .create("", Create::default())
+            .encode()
+            .is_err());
+        assert!(!WorkspaceEdit::new()
+            .create("/p/x", Create::default())
+            .is_empty());
     }
 
     #[test]

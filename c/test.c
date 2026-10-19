@@ -947,6 +947,226 @@ static void transform_requests(void) {
         rx_buf_free(&out);rx_buf_free(&input);
     }
 }
+/* ---- protocol 1.1: workspace edit transactions, ordered changes, the editor model */
+
+static void transactions(void) {
+    assert(rx_fnv1a64("", 0) == 0xcbf29ce484222325ull && rx_fnv1a64("a", 1) == 0xaf63dc4c8601ec8cull &&
+           rx_fnv1a64("foobar", 6) == 0x85944171f73967e8ull);
+    rx_wedit e = {0};
+    rx_buf b = {NULL, 0, 0}, want = {NULL, 0, 0};
+    rx_wedit_label(&e, "Rename to 'total'\nnow");
+    rx_wedit_delete(&e, "/p/old.c", RX_RECURSIVE | RX_IGNORE_MISSING);
+    rx_wedit_file_hashed(&e, "/p/calc.c", "a\r\nb\r\n", 6);
+    rx_wedit_edit(&e, R(2, 1, 2, 2), "B", 1);
+    rx_wedit_rename(&e, "/p/util.c", "/p/helpers.c", RX_OVERWRITE);
+    rx_wedit_file(&e, NULL, 3, 9);
+    rx_wedit_edit(&e, R(1, 1, 1, 1), "x", 1);
+    rx_wedit_create(&e, "/p/new/", 0);
+    rx_wedit_create(&e, "/p/new/a.c", RX_IGNORE_EXISTING);
+    rx_wedit_confirm(&e);
+    assert(rx_wedit_finish(&e, &b) == 0);
+    rx_buf_fmt(&want, "6\ncreate 7 -\n/p/new/create 10 ignore-existing\n/p/new/a.c"
+                      "9 fnv1a64:%016llx 1\n/p/calc.c2 1 2 2 1\nB2 9 1\n#31 1 1 1 1\nx"
+                      "rename 9 12 overwrite\n/p/util.c/p/helpers.c"
+                      "delete 8 recursive,ignore-missing\n/p/old.c"
+                      "label 21\nRename to 'total' nowconfirm 0\n",
+               (unsigned long long)rx_fnv1a64("a\r\nb\r\n", 6));
+    same(&b, want.data);
+    /* without workspace-edits the hash goes as "-", the label and confirm are left out; without
+     * file-operations an edit with operations fails as unknown */
+    rx_buf_clear(&b);
+    rx_wedit_label(&e, "L");
+    rx_wedit_file_hashed(&e, "/p/a", "x", 1);
+    rx_wedit_file_hashed(&e, "/p/b", "y", 1);
+    rx_wedit_confirm(&e);
+    assert(rx_wedit_finish_caps(&e, &b, 0, 0) == 0);
+    same(&b, "2\n4 - 0\n/p/a4 - 0\n/p/b");
+    rx_buf_clear(&b);
+    rx_wedit_create(&e, "/p/x", 0);
+    assert(rx_wedit_finish_caps(&e, &b, 1, 0) == -1 && strcmp(e.fail, "unknown") == 0 && b.len == 0);
+    rx_wedit_free(&e);
+    rx_wedit_delete(&e, "/p/x", RX_OVERWRITE);
+    assert(rx_wedit_finish(&e, &b) == -1 && strcmp(e.fail, "syntax") == 0);
+    rx_wedit_free(&e);
+    for (int i = 0; i < 1001; i++) rx_wedit_delete(&e, "/p/x", 0);
+    assert(rx_wedit_finish(&e, &b) == -1 && strcmp(e.why, "more than 1000 entries") == 0);
+    rx_wedit_free(&e);
+    rx_buf_free(&b);
+    rx_buf_free(&want);
+}
+
+/* a change of kind k */
+static rx_change chg(int kind, const char *path, const char *to, int n, const rx_range *r, const char *const *t) {
+    rx_change c;
+    memset(&c, 0, sizeof c);
+    c.kind = kind, c.path = path, c.to = to, c.version = RX_ON_DISK, c.hashed = 1, c.hash = 7;
+    c.ranges = r, c.texts = t, c.nedits = n;
+    return c;
+}
+
+static void ordered(void) {
+    rx_range x1 = R(1, 1, 1, 1), y2 = R(1, 2, 1, 2), at11 = R(1, 1, 1, 1);
+    const char *tx[] = {"x"}, *ty[] = {"y"}, *tc[] = {"c"}, *tm[] = {"fn main() {}\n"}, *tg[] = {"g"};
+    rx_change cs[10];
+    cs[0] = chg(RX_CHANGE_EDIT, "/p/a.rs", NULL, 1, &x1, tx);
+    cs[1] = chg(RX_CHANGE_RENAME, "/p/a.rs", "/p/b.rs", 0, NULL, NULL);
+    cs[2] = chg(RX_CHANGE_EDIT, "/p/b.rs", NULL, 1, &y2, ty);
+    cs[3] = chg(RX_CHANGE_EDIT, "/p/c.rs", NULL, 1, &at11, tc);
+    cs[4] = chg(RX_CHANGE_CREATE, "/p/new.rs", NULL, 0, NULL, NULL);
+    cs[5] = chg(RX_CHANGE_EDIT, "/p/new.rs", NULL, 1, &at11, tm);
+    cs[6] = chg(RX_CHANGE_RENAME, "/p/dir", "/p/dir2", 0, NULL, NULL);
+    cs[7] = chg(RX_CHANGE_EDIT, "/p/dir2/m.rs", NULL, 1, &at11, tx);
+    cs[8] = chg(RX_CHANGE_EDIT, "/p/gone.rs", NULL, 1, &at11, tg);
+    cs[9] = chg(RX_CHANGE_DELETE, "/p/gone.rs", NULL, 0, NULL, NULL);
+    rx_wedit e = {0};
+    rx_buf b = {NULL, 0, 0};
+    int origins[10], bad = 99;
+    char why[200];
+    assert(rx_wedit_from_ordered(&e, cs, 10, origins, &bad, why, sizeof why) == 0);
+    assert(rx_wedit_finish(&e, &b) == 0);
+    same(&b, "8\ncreate 9 -\n/p/new.rs7 fnv1a64:0000000000000007 2\n/p/a.rs1 1 1 1 1\nx1 1 1 1 1\ny"
+             "7 fnv1a64:0000000000000007 1\n/p/c.rs1 1 1 1 1\nc9 - 1\n/p/new.rs1 1 1 1 13\nfn main() {}\n"
+             "11 fnv1a64:0000000000000007 1\n/p/dir/m.rs1 1 1 1 1\nx"
+             "rename 7 7 -\n/p/a.rs/p/b.rsrename 6 7 -\n/p/dir/p/dir2delete 10 -\n/p/gone.rs");
+    int wantorig[8] = {4, 0, 3, 5, 7, 1, 6, 9};
+    assert(memcmp(origins, wantorig, sizeof wantorig) == 0);
+    /* what the phases cannot express */
+    rx_range xy = R(1, 1, 1, 1);
+    const char *txy[] = {"XY"}, *tbang[] = {"!"};
+    rx_change bad1[2] = {chg(RX_CHANGE_DELETE, "/p/a", NULL, 0, NULL, NULL), chg(RX_CHANGE_EDIT, "/p/a", NULL, 1, &x1, tx)};
+    rx_change bad2[2] = {chg(RX_CHANGE_RENAME, "/p/a", "/p/b", 0, NULL, NULL), chg(RX_CHANGE_RENAME, "/p/b", "/p/c", 0, NULL, NULL)};
+    rx_change bad3[2] = {chg(RX_CHANGE_EDIT, "/p/b", NULL, 1, &x1, tx), chg(RX_CHANGE_RENAME, "/p/a", "/p/b", 0, NULL, NULL)};
+    rx_change bad4[2] = {chg(RX_CHANGE_RENAME, "/p/d", "/p/e", 0, NULL, NULL), chg(RX_CHANGE_DELETE, "/p/d/f", NULL, 0, NULL, NULL)};
+    rx_change bad5[2] = {chg(RX_CHANGE_EDIT, "/p/a", NULL, 1, &xy, txy), chg(RX_CHANGE_EDIT, "/p/a", NULL, 1, &y2, tbang)};
+    const rx_change *bads[5] = {bad1, bad2, bad3, bad4, bad5};
+    const char *parts[5] = {"after it was renamed away or deleted", "two file operations", "after an edit", "folder", "earlier edit"};
+    for (int i = 0; i < 5; i++) {
+        rx_wedit_free(&e);
+        bad = 99;
+        assert(rx_wedit_from_ordered(&e, bads[i], 2, NULL, &bad, why, sizeof why) == -1);
+        if (bad != 1 || !strstr(why, parts[i])) {
+            fprintf(stderr, "case %d: %d %s\n", i, bad, why);
+            abort();
+        }
+    }
+    /* where an edit's text comes from */
+    char src[64];
+    int created;
+    assert(rx_locate(cs, 2, "/p/b.rs", src, sizeof src, &created) == 0 && strcmp(src, "/p/a.rs") == 0 && !created);
+    assert(rx_locate(cs, 5, "/p/new.rs", src, sizeof src, &created) == 0 && created);
+    assert(rx_locate(cs, 2, "/p/a.rs", src, sizeof src, &created) == -1);
+    rx_wedit_free(&e);
+    rx_buf_free(&b);
+}
+
+static char model_seen[512];
+
+static void model_note(const char *s) {
+    assert(strlen(model_seen) + strlen(s) + 2 < sizeof model_seen);
+    strcat(model_seen, s);
+    strcat(model_seen, "|");
+}
+
+static void on_model_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    rx_selection sels[2] = {{{1, 1}, {1, 4}}, {{2, 3}, {2, 3}}};
+    assert(rx_select_many(ext, 4, sels, 2) == 0);
+    assert(rx_select_many(ext, 4, sels, 0) == -1 && strncmp(rx_error(ext), "toobig", 6) == 0);
+    rx_pos at = {2, 3};
+    assert(rx_reveal(ext, 4, at, "center-if-outside") == 0);
+    assert(rx_reveal(ext, 4, at, "middle") == -1 && strncmp(rx_error(ext), "syntax", 6) == 0);
+    rx_locations l;
+    memset(&l, 0, sizeof l);
+    rx_location(&l, NULL, 4, R(2, 3, 2, 3), NULL);
+    assert(rx_show_locations(ext, "Callers", &l) == -1 && strcmp(rx_error(ext), "busy the palette is open") == 0);
+    int64_t tab = rx_diff(ext, 4, 5, "HEAD\nwork", 1);
+    assert(tab == 77 && rx_diff_close(ext, tab) == 0);
+    rx_wedit e = {0};
+    rx_wedit_label(&e, "Move");
+    rx_wedit_rename(&e, "/p/a.c", "/p/b.c", 0);
+    rx_wedit_create(&e, "/p/c.c", 0);
+    rx_wedit_file_hashed(&e, "/p/a.c", "x", 1);
+    rx_wedit_edit(&e, R(2, 3, 2, 3), "y", 1);
+    assert(rx_apply(ext, &e) == -1);
+    const rx_apply_error *a = rx_last_apply_error(ext);
+    assert(strcmp(a->code, "stale") == 0 && a->entry == 2 && strcmp(a->text, "/p/a.c changed on disk") == 0);
+    model_note("ready");
+}
+
+static void on_model_event(rx_ext *ext, const rx_event *ev, void *user) {
+    (void)ext, (void)user;
+    rx_selection s[4];
+    rx_lines v[4];
+    rx_doc d;
+    char note[128];
+    int n;
+    if ((n = rx_parse_selections(ev, &d, s, 4)) > 0) {
+        snprintf(note, sizeof note, "sel %lld %d %d:%d-%d:%d %d:%d", (long long)d, n, s[0].anchor.line, s[0].anchor.col,
+                 s[0].cursor.line, s[0].cursor.col, s[1].cursor.line, s[1].cursor.col);
+        model_note(note);
+    }
+    if ((n = rx_parse_visible(ev, &d, v, 4)) > 0) {
+        snprintf(note, sizeof note, "vis %lld %d %d-%d", (long long)d, n, v[0].first, v[0].last);
+        model_note(note);
+    }
+}
+
+static int on_model_linked(rx_ext *ext, const rx_linked_ask *req, rx_linked *out, void *user) {
+    (void)ext, (void)user;
+    assert(req->id == 9 && req->doc == 4 && req->version == 7 && req->at.line == 3 && req->at.col == 2);
+    rx_linked_range(out, R(3, 2, 3, 5));
+    rx_linked_range(out, R(4, 3, 4, 6));
+    rx_linked_word(out, "-_\n-\xc3\xa9:");
+    return 1;
+}
+
+static void editor_model(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_model_ready;
+    h.event = on_model_event;
+    h.linked = on_model_linked;
+    rx_buf got = {NULL, 0, 0}, want = {NULL, 0, 0};
+    const char *feats = "workspace-edits file-operations selections reveal diff linked-editing";
+    run(feats, &h,
+        "0 features workspace-edits file-operations selections reveal diff linked-editing\n"
+        "0 ready -\n"
+        "ok 1\n"
+        "ok 2\n"
+        "error 3 busy the palette is open\n"
+        "ok 4 77\n"
+        "ok 5\n"
+        "error 6 stale 2 /p/a.c changed on disk\n"
+        "0 selections 4 2 16\n3 1 3 5\n1 2 1 2\n"
+        "0 visible 4 1 1 40\n"
+        "9 linked 4 7 3 2\n"
+        "0 bye\n",
+        &got);
+    char edit[256];
+    snprintf(edit, sizeof edit, "3\ncreate 6 -\n/p/c.c6 fnv1a64:%016llx 1\n/p/a.c2 3 2 3 1\nyrename 6 6 -\n/p/a.c/p/b.clabel 4\nMove",
+             (unsigned long long)rx_fnv1a64("x", 1));
+    rx_buf_fmt(&want, "hello 1 %s\n", feats);
+    rx_buf_str(&want, "1 select-many 4 2 16\n1 1 1 4\n2 3 2 3\n");
+    rx_buf_str(&want, "2 reveal 4 2 3 center-if-outside\n");
+    rx_buf_str(&want, "3 show-locations 24\nCallers\n1\n2 3 2 3 2 0\n#4");
+    rx_buf_str(&want, "4 diff 4 5 background 9\nHEAD work");
+    rx_buf_str(&want, "5 diff-close 77\n");
+    rx_buf_fmt(&want, "6 apply %zu\n%s", strlen(edit), edit);
+    ok(&want, 9, "2\n3 2 3 5\n4 3 4 6\nword 3\n-_:");
+    same(&got, want.data);
+    assert(strcmp(model_seen, "ready|sel 4 2 3:1-3:5 1:2|vis 4 1 1-40|") == 0);
+
+    /* without the features: refused before sending, linked unknown, the body still read */
+    rx_buf_clear(&got);
+    rx_buf_clear(&want);
+    memset(&h, 0, sizeof h);
+    h.linked = on_model_linked;
+    run("", &h, "0 selections 4 1 8\n1 1 1 1\n9 linked 4 7 3 2\n0 bye\n", &got);
+    same(&got, "hello 1\nerror 9 unknown no such request\n");
+    rx_buf_free(&got);
+    rx_buf_free(&want);
+}
+
 int main(void) {
     snippet_transform_wire();
     snippet_transform_programs();
@@ -962,7 +1182,10 @@ int main(void) {
     wedits();
     actions();
     cuts();
+    transactions();
+    ordered();
     dispatch();                 /* last: standard output goes to a file from here on */
+    editor_model();
     save_actions();
     snippet_requests();
     transform_requests();
