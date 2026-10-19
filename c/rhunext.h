@@ -719,7 +719,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
-                     strncmp(verb_args, "git-show ", 9) == 0;
+                     strncmp(verb_args, "git-show ", 9) == 0 || strncmp(verb_args, "editor-read ", 12) == 0;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {

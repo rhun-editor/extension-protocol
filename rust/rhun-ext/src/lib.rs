@@ -1157,6 +1157,7 @@ impl Ext {
                                 | "git-blame"
                                 | "git-log"
                                 | "git-show"
+                                | "editor-read"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
