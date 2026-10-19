@@ -2605,7 +2605,8 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
             (strcmp(f[3], "launch") == 0 || strcmp(f[3], "attach") == 0) &&
             rx_debug_config_parse(rbody, rbody_len, &req.config, &req.ctx) == 0) {
-            rx_debug_config out = {0};
+            rx_debug_config out;
+            memset(&out, 0, sizeof out);
             rx_buf why = {NULL, 0, 0};
             int r = h->debug_resolve(ext, &req, &out, &why, user);
             ok = 1;
