@@ -147,9 +147,14 @@
         "terminal": {
           "enum": [
             "no",
-            "yes"
+            "yes",
+            "suggest",
+            "run",
+            "input",
+            "output"
           ],
-          "default": "no"
+          "default": "no",
+          "description": "yes = suggest: propose a line for the user's terminal; run: also run programs in terminal tabs once allowed per project (features terminals, tasks); input: also type into them; output: also read what they show"
         },
         "run": {
           "type": "string",

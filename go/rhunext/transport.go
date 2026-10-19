@@ -181,6 +181,12 @@ func (e *Ext) closeConnection(err error) {
 // RequestContext sends one request and waits for its reply. Cancellation releases the caller;
 // a reply body already on the wire is still consumed to preserve framing for later requests.
 func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args ...string) (Reply, error) {
+	return e.requestContext(ctx, verb, body, nil, args...)
+}
+
+// requestContext is RequestContext telling onID the request's id before it is sent (a start that
+// may wait for the approval dialog cancels it by that id: tasks.go).
+func (e *Ext) requestContext(ctx context.Context, verb string, body []byte, onID func(int64), args ...string) (Reply, error) {
 	if err := ctx.Err(); err != nil {
 		return Reply{}, err
 	}
@@ -190,7 +196,7 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		e.pmu.Unlock()
 		return Reply{}, err
 	}
-	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output" ||
+	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "terminal-screen" ||
 		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()
@@ -219,13 +225,10 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		}
 		e.replyBodyCaps[id] = MaxSnippetBody
 	}
-	if verb == "task-output" {
-		if e.replyBodyCaps == nil {
-			e.replyBodyCaps = make(map[int64]int64)
-		}
-		e.replyBodyCaps[id] = MaxTaskOutput
-	}
 	e.pmu.Unlock()
+	if onID != nil {
+		onID(id)
+	}
 	line := itoa(id) + " " + verb
 	for _, arg := range args {
 		line += " " + arg

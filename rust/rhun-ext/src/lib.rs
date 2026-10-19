@@ -40,6 +40,7 @@ pub mod scm;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
+pub mod tasks;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -158,6 +159,12 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Programs in terminal tabs: [`Ext::open_terminal`] and the other terminal verbs, the
+    /// events [`tasks::parse_terminal_event`] decodes; needs `[needs] terminal = run`.
+    Terminals,
+    /// Published tasks: [`Ext::set_tasks`], [`Ext::start_task`], [`Ext::run_task`] (agreed only with
+    /// [`Feature::Terminals`]).
+    Tasks,
 }
 
 impl Feature {
@@ -181,6 +188,8 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::Terminals => "terminals",
+            Feature::Tasks => "tasks",
         }
     }
 }
@@ -192,7 +201,7 @@ pub struct Event {
     pub fields: Vec<String>,
     /// The rest of the line after the name, for events whose last field may hold spaces (paths).
     pub rest: String,
-    /// The body, for `edits` and `action`.
+    /// The body, for `edits`, `action` and `terminal-output`.
     pub body: Vec<u8>,
 }
 
@@ -1091,6 +1100,7 @@ impl Ext {
                                 | "git-blame"
                                 | "git-log"
                                 | "git-show"
+                                | "terminal-screen"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1134,7 +1144,10 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" {
+                    if ev.name == "edits"
+                        || ev.name == "action"
+                        || ev.name == "terminal-output" && ev.fields.len() == 3
+                    {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {

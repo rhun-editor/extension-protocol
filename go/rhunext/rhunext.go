@@ -37,7 +37,7 @@ type Range struct{ Start, End Pos }
 type Event struct {
 	Name string   // ready, setting, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover, action
 	Args []string // the fields after the name; the last may contain spaces
-	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f)
+	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f); terminal-output's lines
 }
 
 // Edit is one record of an edits event: at byte offset Start, Del bytes were deleted and Ins
@@ -390,12 +390,15 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "bye" {
 			e.cancelSources(false)
 		}
-		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
+		// edits (DOC VERSION LEN), action (LEN) and terminal-output (TERM DROPPED LEN) are followed
+		// by a body
 		lenAt := -1
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "terminal-output" && len(ev.Args) == 3 {
+			lenAt = 2
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the

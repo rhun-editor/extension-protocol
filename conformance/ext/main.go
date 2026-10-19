@@ -184,6 +184,10 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
+
+	terms    map[uint64]*checkerTerm // terminals and tasks: terminals.go
+	tasks    publishedTasks          // its published tasks
+	nextTerm uint64
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -357,7 +361,8 @@ type message struct {
 
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
-	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true} // source control: scm.go
+	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
+	"terminal-open": true, "terminal-input": true, "tasks-set": true, "task-run": true} // terminals and tasks: terminals.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1007,7 +1012,7 @@ func (h *host) handle(msg message) {
 		if !ok {
 			return
 		}
-		if h.m.needs["terminal"] != "yes" {
+		if terminalLevel(h.m.needs["terminal"]) < 1 {
 			h.fail("needs", "term needs terminal=yes but the manifest does not say so")
 			rerr("needs", "terminal=yes")
 			return
@@ -1034,9 +1039,14 @@ func (h *host) handle(msg message) {
 		if needsCap == "write" && !need("write") {
 			return
 		}
-		if needsCap == "terminal" && h.m.needs["terminal"] != "yes" {
+		if needsCap == "terminal" && terminalLevel(h.m.needs["terminal"]) < 1 {
 			h.fail("needs", fmt.Sprintf("cmd %s needs terminal=yes but the manifest does not say so", args[0]))
 			rerr("needs", "terminal=yes")
+			return
+		}
+		if needsCap == "terminal-run" && terminalLevel(h.m.needs["terminal"]) < 2 {
+			h.fail("needs", fmt.Sprintf("cmd %s needs terminal=run but the manifest does not say so", args[0]))
+			rerr("needs", "terminal=run")
 			return
 		}
 		h.cmds = append(h.cmds, args[0])
@@ -1049,6 +1059,9 @@ func (h *host) handle(msg message) {
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
+	case "terminal-open", "terminal-stop", "terminal-restart", "terminal-close", "terminal-show", "terminal-input",
+		"terminal-screen", "tasks-set", "task-start", "task-run":
+		h.termRequest(id, verb, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1121,6 +1134,9 @@ var cmdAllowed = func() map[string]string {
 	}
 	for _, n := range strings.Fields(`toggle_terminal new_terminal clear_terminal`) {
 		m[n] = "terminal"
+	}
+	for _, n := range strings.Fields(`run_task run_build_task run_test_task rerun_last_task restart_task stop_task show_task`) {
+		m[n] = "terminal-run" // terminals and tasks: with terminal = run
 	}
 	for _, n := range strings.Fields(`select_all select_line select_next find replace find_next find_prev find_in_files
 		goto_line quick_open command_palette next_tab prev_tab reveal_file focus_explorer toggle_sidebar toggle_agents
@@ -1367,8 +1383,10 @@ func main() {
 			ok = v == "none" || v == "read" || v == "write"
 		case "home":
 			ok = v == "none" || v == "read"
-		case "network", "terminal":
+		case "network":
 			ok = v == "no" || v == "yes"
+		case "terminal": // no, yes = suggest, run, input, output (terminals and tasks)
+			ok = v == "no" || terminalLevel(v) > 0
 		case "run":
 			ok = true
 		case "git": // source control: the project's Git data through rhun
