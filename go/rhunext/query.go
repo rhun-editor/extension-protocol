@@ -371,14 +371,31 @@ func (l SignatureList) Encode() []byte {
 		fmt.Fprintf(&recs, "%d %d %d %d\n%s%s", a, b, len(label), len(s.Doc), label, s.Doc)
 	}
 	out := append([]byte(fmt.Sprintf("%d %d\n", len(sigs), active)), recs.Bytes()...)
-	if len(out) > 65536 {
-		// documentation goes first, then overloads, until it fits
-		for i := range sigs {
-			sigs[i].Doc = ""
-		}
-		return SignatureList{Signatures: sigs[:max(1, len(sigs)/2)], Active: 0}.Encode()
+	if len(out) <= 65536 {
+		return out
 	}
-	return out
+	// too long: documentation goes first, then overloads, until it fits; one overload that does
+	// not fit on its own is no answer (it hides the help)
+	docs := false
+	for _, s := range sigs {
+		docs = docs || s.Doc != ""
+	}
+	if docs {
+		bare := make([]SignatureInfo, len(sigs))
+		for i, s := range sigs {
+			s.Doc = ""
+			bare[i] = s
+		}
+		return SignatureList{Signatures: bare, Active: active}.Encode()
+	}
+	if len(sigs) == 1 {
+		return nil
+	}
+	keep := sigs[:len(sigs)/2]
+	if active >= len(keep) {
+		active = 0
+	}
+	return SignatureList{Signatures: keep, Active: active}.Encode()
 }
 
 // SignatureLister answers signatures requests (feature signature-list) instead of Signature.

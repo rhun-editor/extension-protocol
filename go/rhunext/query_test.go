@@ -11,8 +11,8 @@ type queryProbe struct {
 	cancelled chan bool
 }
 
-func (q *queryProbe) Ready(ext *Ext, project string)       {}
-func (q *queryProbe) Event(ext *Ext, ev Event)             {}
+func (q *queryProbe) Ready(ext *Ext, project string)        {}
+func (q *queryProbe) Event(ext *Ext, ev Event)              {}
 func (q *queryProbe) Run(ext *Ext, command string, doc Doc) {}
 
 func (q *queryProbe) LocationsStream(ext *Ext, kind string, req PosRequest, out *Stream) []Location {
@@ -131,6 +131,6 @@ func TestProvidesNeedsTheFeature(t *testing.T) {
 
 type readyHook struct{ fn func(*Ext) }
 
-func (r *readyHook) Ready(ext *Ext, project string)       { go r.fn(ext) }
-func (r *readyHook) Event(ext *Ext, ev Event)             {}
+func (r *readyHook) Ready(ext *Ext, project string)        { go r.fn(ext) }
+func (r *readyHook) Event(ext *Ext, ev Event)              {}
 func (r *readyHook) Run(ext *Ext, command string, doc Doc) {}
