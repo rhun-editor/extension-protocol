@@ -235,6 +235,10 @@
         "save_actions": {
           "$ref": "#/$defs/patterns",
           "description": "Source code actions before saving; requires negotiated save-actions and documents=write."
+        },
+        "schemes": {
+          "type": "string",
+          "description": "URI schemes whose documents it provides (feature uris), space separated: the extension name or NAME-x"
         }
       },
       "additionalProperties": false

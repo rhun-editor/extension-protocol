@@ -118,6 +118,13 @@ typedef struct {
     char why[256];                  /* syntax) and why, one line */
 } rx_wedit;
 
+/* a virtual document's text (feature uris): lang a grammar name or "", title or "", text_len bytes
+ * of UTF-8 (at most 4 MiB); the pointers stay the handler's */
+typedef struct {
+    const char *lang, *title, *text;
+    size_t text_len;
+} rx_content;
+
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -143,6 +150,11 @@ typedef struct {
     int (*rename)(rx_ext *ext, const rx_rename_ask *req, rx_wedit *out, void *user);
     int (*format)(rx_ext *ext, const rx_format_ask *req, rx_wedit *out, void *user);
     int (*save_actions)(rx_ext *ext, const rx_save_actions_ask *req, rx_wedit *out, void *user);
+    /* Resources group, feature uris: fill out for a URI of one of the schemes in [provides]
+     * schemes and return 1, or return 0 for "nofile"; content_closed: the last tab showing it
+     * closed. */
+    int (*content)(rx_ext *ext, const char *uri, rx_content *out, void *user);
+    void (*content_closed)(rx_ext *ext, const char *uri, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -180,6 +192,10 @@ int rx_secret_set(rx_ext *ext, const char *key, const void *value, size_t len);
 int rx_secret_delete(rx_ext *ext, const char *key);
 char *rx_secret_keys(rx_ext *ext, size_t *len);
 int rx_secret_key_valid(const char *key);
+/* Feature uris: SCHEME:REST, SCHEME [a-z][a-z0-9+.-] of 2 to 32 bytes, REST 1 to 4095 bytes
+ * without LF, CR or NUL. rx_open takes a URI too; rx_content_changed asks rhun to read again. */
+int rx_uri_valid(const char *uri);
+int rx_content_changed(rx_ext *ext, const char *uri);
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -748,6 +764,31 @@ int rx_busy(rx_ext *ext, int busy) {
         return -1;
     }
     return rx_request(ext, busy ? "busy yes" : "busy no", NULL, 0, NULL, NULL);
+}
+
+int rx_uri_valid(const char *uri) {
+    const char *colon = uri ? strchr(uri, ':') : NULL;
+    if (!colon || colon - uri < 2 || colon - uri > 32 || uri[0] < 'a' || uri[0] > 'z') return 0;
+    for (const char *p = uri; p < colon; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || *p == '+' || *p == '.' || *p == '-')) return 0;
+    size_t rest = strlen(colon + 1);
+    return rest >= 1 && rest <= 4095 && !strpbrk(colon + 1, "\r\n");
+}
+
+int rx_content_changed(rx_ext *ext, const char *uri) {
+    if (!rx_has(ext, "uris")) {
+        snprintf(ext->error, sizeof ext->error, "unknown uris feature was not agreed");
+        return -1;
+    }
+    if (!rx_uri_valid(uri)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid URI");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "content-changed %s", uri);
+    int r = rx_request(ext, line.data, NULL, 0, NULL, NULL);
+    rx_buf_free(&line);
+    return r;
 }
 
 int rx_secret_key_valid(const char *key) {
@@ -2122,6 +2163,32 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.tab_width = atoi(f[4]);
         req.spaces = strcmp(f[5], "yes") == 0;
         if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish(&e, &body);
+    } else if (strcmp(verb, "content") == 0 && n >= 3 && h->content && rx_has(ext, "uris")) {
+        rx_buf uri = {NULL, 0, 0};
+        for (int i = 2; i < n; i++) {
+            if (i > 2) rx_buf_add(&uri, " ", 1);
+            rx_buf_str(&uri, f[i]);
+        }
+        rx_content c;
+        memset(&c, 0, sizeof c);
+        if (h->content(ext, uri.data, &c, user)) {
+            const char *lang = c.lang ? c.lang : "", *title = c.title ? c.title : "";
+            if (strlen(lang) > 255 || strlen(title) > 255 || c.text_len > (4u << 20)) {
+                e.fail = "toobig";
+                snprintf(e.why, sizeof e.why, "a language or title over 255 bytes or a text over 4 MiB");
+            } else {
+                rx_buf_fmt(&body, "%zu %zu %zu\n", strlen(lang), strlen(title), c.text_len);
+                for (const char *p = lang; *p; p++) rx_buf_add(&body, *p == ' ' ? "_" : p, 1);
+                rx_buf_str(&body, title);
+                rx_buf_add(&body, c.text ? c.text : "", c.text_len);
+            }
+            ok = 1;
+        } else {
+            e.fail = "nofile";
+            snprintf(e.why, sizeof e.why, "no such document");
+            ok = 1;
+        }
+        rx_buf_free(&uri);
     } else if (strcmp(verb, "save-actions") == 0 && n == 5 && h->save_actions && rx_has(ext, "save-actions")) {
         rx_save_actions_ask req;
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
@@ -2209,6 +2276,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
                 h->command(ext, dot ? dot + 1 : f[2], atoll(f[3]), user);
             } else if (strcmp(f[1], "view") == 0 && h->view) {
                 rx_view_dispatch(ext, h, user, f, n);
+            } else if (strcmp(f[1], "content-closed") == 0 && h->content_closed) {
+                h->content_closed(ext, ev.rest, user);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "bye") == 0) {

@@ -484,6 +484,16 @@ func (e *Ext) answer(h Handler, f []string) {
 	var rerr *Error
 	known := false
 	switch f[1] {
+	case "content":
+		if c, is := h.(ContentProvider); is && e.Has(FeatureURIs) && len(f) >= 3 {
+			known = true
+			content, err := c.Content(e, strings.Join(f[2:], " "))
+			if err != nil {
+				rerr = &Error{Code: "nofile", Text: err.Error()}
+			} else if body, err = content.Encode(); err != nil {
+				rerr = &Error{Code: "toobig", Text: err.Error()}
+			}
+		}
 	case "save-actions":
 		id, _ := strconv.ParseInt(f[0], 10, 64)
 		source := e.sourceFor(id)

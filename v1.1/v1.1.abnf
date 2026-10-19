@@ -68,3 +68,14 @@ r-secret-set = "secret-set" SP secret-key SP len
 r-secret-delete = "secret-delete" SP secret-key
 r-secret-keys = "secret-keys"
               ; ok ID LEN + the keys, each followed by LF
+
+; uris: resources SCHEME:REST; a provider declares [provides] schemes.
+feature      =/ "uris"
+uri          = uri-scheme ":" 1*4095( %x01-09 / %x0B-0C / %x0E-FF )
+uri-scheme   = %x61-7A 1*31( %x61-7A / DIGIT / "+" / "." / "-" )
+request      =/ id SP "open" SP num SP num SP uri / id SP r-content-changed
+r-content-changed = "content-changed" SP uri
+host-request =/ id SP "content" SP uri
+content-head = len SP len SP len LF
+              ; LANG TITLE TEXT lengths, then exactly those bytes; TEXT UTF-8, at most 4 MiB
+event        =/ "0" SP "content-closed" SP uri

@@ -1,16 +1,19 @@
 package rhunext
 
-// The resources group of protocol 1.1: staying alive while busy (feature "idle") and passwords
-// and tokens in the system keychain (feature "secrets", with [needs] secrets = yes).
+// The resources group of protocol 1.1: staying alive while busy (feature "idle"), passwords
+// and tokens in the system keychain (feature "secrets", with [needs] secrets = yes), and URIs
+// with virtual documents (feature "uris", with [provides] schemes).
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
 const (
 	FeatureIdle    = "idle"
 	FeatureSecrets = "secrets"
+	FeatureURIs    = "uris"
 	// SecretValueMax is the most bytes one value holds.
 	SecretValueMax = 8192
 )
@@ -108,4 +111,81 @@ func (e *Ext) SecretKeysContext(ctx context.Context) ([]string, error) {
 		}
 	}
 	return keys, nil
+}
+
+// ValidURI says whether uri is SCHEME:REST as rhun takes it: SCHEME [a-z][a-z0-9+.-] of 2 to 32
+// bytes, REST 1 to 4095 bytes without LF, CR or NUL.
+func ValidURI(uri string) bool {
+	i := strings.IndexByte(uri, ':')
+	if i < 2 || i > 32 || uri[0] < 'a' || uri[0] > 'z' {
+		return false
+	}
+	for j := 0; j < i; j++ {
+		c := uri[j]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '.' || c == '-') {
+			return false
+		}
+	}
+	rest := uri[i+1:]
+	return len(rest) >= 1 && len(rest) <= 4095 && !strings.ContainsAny(rest, "\n\r\x00")
+}
+
+// Content is a virtual document's text, the answer to rhun's content request.
+type Content struct {
+	Lang  string // a grammar name, or "" to choose by the URI's last segment
+	Title string // the tab's title, or "" for the URI's last segment
+	Text  string // at most 4 MiB of UTF-8
+}
+
+// Encode is the content answer's body: LANG_LEN TITLE_LEN TEXT_LEN LF and the three.
+func (c Content) Encode() ([]byte, error) {
+	lang := strings.ReplaceAll(c.Lang, " ", "_")
+	if len(lang) > 255 || len(c.Title) > 255 || strings.ContainsAny(c.Title, "\n\r") {
+		return nil, fmt.Errorf("a language or title over 255 bytes or with a line break")
+	}
+	if len(c.Text) > 4<<20 {
+		return nil, fmt.Errorf("the text is over 4 MiB")
+	}
+	return []byte(fmt.Sprintf("%d %d %d\n%s%s%s", len(lang), len(c.Title), len(c.Text), lang, c.Title, c.Text)), nil
+}
+
+// ContentProvider answers content requests for the schemes in [provides] schemes (feature uris).
+// An error shows in the document's tab.
+type ContentProvider interface {
+	Content(ext *Ext, uri string) (Content, error)
+}
+
+// OpenURIContext opens a virtual document (feature uris); a file: URI opens that file.
+func (e *Ext) OpenURIContext(ctx context.Context, uri string, at Pos) (Doc, error) {
+	if !e.Has(FeatureURIs) {
+		return 0, notAgreed(FeatureURIs)
+	}
+	if !ValidURI(uri) {
+		return 0, &Error{Code: "syntax", Text: "invalid URI"}
+	}
+	r, err := e.RequestContext(ctx, "open", nil, itoa(int64(at.Line)), itoa(int64(at.Col)), uri)
+	if err != nil {
+		return 0, err
+	}
+	return Doc(argInt(r, 0)), nil
+}
+
+// ContentChangedContext says the virtual documents open for uri changed: rhun asks again.
+func (e *Ext) ContentChangedContext(ctx context.Context, uri string) error {
+	if !e.Has(FeatureURIs) {
+		return notAgreed(FeatureURIs)
+	}
+	if !ValidURI(uri) {
+		return &Error{Code: "syntax", Text: "invalid URI"}
+	}
+	_, err := e.RequestContext(ctx, "content-changed", nil, uri)
+	return err
+}
+
+// ParseContentClosed reads "0 content-closed URI": the last tab showing it closed.
+func ParseContentClosed(ev Event) (string, bool) {
+	if ev.Name != "content-closed" || len(ev.Args) == 0 {
+		return "", false
+	}
+	return strings.Join(ev.Args, " "), true
 }

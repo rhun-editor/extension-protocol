@@ -1,6 +1,47 @@
-//! The resources group of protocol 1.1: staying alive while busy (feature `idle`) and passwords
-//! and tokens in the system keychain (feature `secrets`, with `[needs] secrets = yes`).
-use crate::{Error, Ext, Feature};
+//! The resources group of protocol 1.1: staying alive while busy (feature `idle`), passwords
+//! and tokens in the system keychain (feature `secrets`, with `[needs] secrets = yes`), and
+//! URIs with virtual documents (feature `uris`, with `[provides] schemes`).
+use crate::{Doc, Error, Ext, Feature, Pos};
+
+/// A URI rhun takes for a resource: `SCHEME:REST`, SCHEME `[a-z][a-z0-9+.-]` of 2 to 32 bytes,
+/// REST 1 to 4095 bytes without LF, CR or NUL.
+pub fn valid_uri(uri: &str) -> bool {
+    let Some((scheme, rest)) = uri.split_once(':') else { return false };
+    let b = scheme.as_bytes();
+    (2..=32).contains(&b.len())
+        && b[0].is_ascii_lowercase()
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'+' | b'.' | b'-'))
+        && (1..=4095).contains(&rest.len())
+        && !rest.bytes().any(|c| matches!(c, b'\n' | b'\r' | 0))
+}
+
+/// A virtual document's text, the answer to rhun's content request (feature `uris`).
+#[derive(Clone, Debug, Default)]
+pub struct Content {
+    /// A grammar name ("Rust"), or empty to choose by the URI's last segment.
+    pub lang: String,
+    /// The tab's title, or empty for the URI's last segment.
+    pub title: String,
+    /// At most 4 MiB of UTF-8.
+    pub text: String,
+}
+
+impl Content {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let lang = self.lang.replace(' ', "_");
+        if lang.len() > 255 || self.title.len() > 255 || self.title.contains('\n') {
+            return Err("a language or title over 255 bytes or with a line break".into());
+        }
+        if self.text.len() > 4 << 20 {
+            return Err("the text is over 4 MiB".into());
+        }
+        let mut out = format!("{} {} {}\n", lang.len(), self.title.len(), self.text.len()).into_bytes();
+        out.extend_from_slice(lang.as_bytes());
+        out.extend_from_slice(self.title.as_bytes());
+        out.extend_from_slice(self.text.as_bytes());
+        Ok(out)
+    }
+}
 
 /// A key: 1 to 64 bytes of `a-z 0-9 _ . -`.
 pub fn valid_secret_key(key: &str) -> bool {
@@ -23,6 +64,30 @@ fn syntax(text: &str) -> Error {
 }
 
 impl Ext {
+    /// Opens a virtual document (feature `uris`): rhun asks the scheme's provider for its text.
+    /// A `file:` URI opens that file. [`Ext::open`] takes a URI as well.
+    pub fn open_uri(&self, uri: &str, at: Pos) -> Result<Doc, Error> {
+        if !self.has(Feature::Uris) {
+            return Err(not_agreed("uris"));
+        }
+        if !valid_uri(uri) {
+            return Err(syntax("invalid URI"));
+        }
+        self.open(uri, at)
+    }
+
+    /// The text of the virtual documents open for `uri` changed: rhun asks again.
+    pub fn content_changed(&self, uri: &str) -> Result<(), Error> {
+        if !self.has(Feature::Uris) {
+            return Err(not_agreed("uris"));
+        }
+        if !valid_uri(uri) {
+            return Err(syntax("invalid URI"));
+        }
+        self.request(&format!("content-changed {uri}"), None)?;
+        Ok(())
+    }
+
     /// `busy yes|no` (feature `idle`): while busy, an `idle = stop` extension is not stopped for
     /// idleness.
     pub fn busy(&self, busy: bool) -> Result<(), Error> {
@@ -90,6 +155,13 @@ impl Ext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn uris_and_content() {
+        assert!(valid_uri("lsp-expand:/a/main.rs") && valid_uri("git+show:x"));
+        assert!(!valid_uri("C:x") && !valid_uri("x") && !valid_uri("Ab:x") && !valid_uri("ab:") && !valid_uri("ab:a\nb"));
+        let c = Content { lang: "Visual Basic".into(), title: "t".into(), text: "hi\n".into() };
+        assert_eq!(c.encode().unwrap(), b"12 1 3\nVisual_Basicthi\n");
+    }
     #[test]
     fn keys_are_checked() {
         for k in ["token", "a", "github.token-2_x", &"k".repeat(64)] {

@@ -1350,7 +1350,7 @@ func main() {
 		}
 	}
 	for k := range m.provides {
-		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" {
+		if (!slices.Contains(providerFeatures, k) || k == "save-actions") && k != "save_actions" && k != "complete.triggers" && k != "signature.triggers" && k != "schemes" {
 			bad(fmt.Sprintf("[provides] %s is not a feature's patterns or triggers (section 12)", k))
 		}
 	}
