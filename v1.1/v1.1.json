@@ -55,7 +55,7 @@
     "runtime": {
       "type": "string",
       "minLength": 1,
-      "description": "a program found on PATH that runs the script named by 'run' (python3, node, \u2026)"
+      "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)"
     },
     "requires": {
       "type": "string",
