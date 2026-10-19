@@ -5,6 +5,10 @@
 // Usage: implement Handler, then call Run. Events arrive one at a time on a single goroutine;
 // requests may be made from any goroutine, including from inside an event handler, and block
 // until rhun answers.
+//
+// Built with GOOS=wasip1 GOARCH=wasm, an extension is one module rhun runs itself on every system
+// (run.wasm32-wasip1 in the manifest); Run then reads standard input non-blocking, so the other
+// goroutines keep running while it waits.
 package rhunext
 
 import (

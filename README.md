@@ -13,7 +13,7 @@ versions, a Go package that speaks it, and the conformance tools.
 | `rust/rhun-ext` | the Rust crate (the first choice): framing, requests, events, views with pictures and charts, and every language feature of section 12 |
 | `go/rhunext` | a Go package: framing, ids, bodies, requests that block until their reply, section 12 features |
 | `c/rhunext.h` | one header for C and C++: the same, with nothing but the C library |
-| `conformance/ext` | `rhun-ext-check DIR`: plays rhun against an extension and reports what it gets wrong |
+| `conformance/ext` | `rhun-ext-check DIR`: plays rhun against an extension and reports what it gets wrong (a `wasm32-wasip1` module through `rhun --wasm-host`) |
 | `conformance/host` | scripted extensions and headless scripts that check rhun itself against the spec |
 
 Status: **v1 is frozen** (2026-10-16, rhun 0.18.0). Later additions are features announced after
@@ -42,6 +42,22 @@ each answer as rhun reads it, applies the edits and serves `apply`) (`go run git
 where `DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` and `bin/`), then
 headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
+
+## WebAssembly
+
+An extension may ship one `wasm32-wasip1` module instead of (or besides) a binary per system:
+`run.wasm32-wasip1 = bin/NAME.wasm` in the manifest. rhun runs it itself on Linux, macOS and
+Windows, holding it to its `[needs]` through WASI preview 1 on every system (v1.1/v1.1.md, section
+"WebAssembly extensions"). The three SDKs work unchanged in such a build:
+
+```sh
+rustup target add wasm32-wasip1 && cargo build --release --target wasm32-wasip1   # rhun-ext reads without threads there
+GOOS=wasip1 GOARCH=wasm go build -o bin/NAME.wasm .                              # rhunext reads stdin non-blocking there
+clang --target=wasm32-wasip1 --sysroot=$WASI_SYSROOT -O2 main.c -o bin/NAME.wasm  # rhunext.h as is
+```
+
+The checker runs a module through rhun: `rhun-ext-check -target wasm32-wasip1 -rhun PATH DIR` (it
+picks the module by itself when the manifest names no program for this machine).
 
 ## Go request cancellation
 

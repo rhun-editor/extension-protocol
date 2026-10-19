@@ -33,7 +33,8 @@ import (
 )
 
 var verbose = flag.Bool("v", false, "print the whole exchange")
-var target = flag.String("target", "", "the run.* target to use (default: this machine)")
+var target = flag.String("target", "", "the run.* target to use (default: this machine; wasm32-wasip1 runs the module in rhun)")
+var rhunExe = flag.String("rhun", "rhun", "rhun's executable, which runs a run.wasm32-wasip1 module (rhun --wasm-host)")
 
 type manifest struct {
 	name, owner, title, version string
@@ -288,12 +289,31 @@ func (h *host) start() error {
 		}
 		prog = p
 		args = append(args, filepath.Join(h.dir, h.m.script))
-	} else {
-		rel, ok := h.m.run[*target]
-		if !ok {
-			return fmt.Errorf("no run.%s in the manifest", *target)
-		}
+	} else if rel, ok := h.m.run[*target]; ok && *target != "wasm32-wasip1" {
 		prog = filepath.Join(h.dir, rel)
+	} else if rel, ok := h.m.run["wasm32-wasip1"]; ok {
+		// a WebAssembly module (no program for the target, or -target wasm32-wasip1): rhun runs
+		// it, with the folders its [needs] allow, as rhun itself does
+		p, err := exec.LookPath(*rhunExe)
+		if err != nil {
+			return fmt.Errorf("run.wasm32-wasip1 needs rhun to run it: %s not found (-rhun)", *rhunExe)
+		}
+		prog = p
+		args = append(args, "--wasm-host", "--dir", h.state)
+		switch h.m.needs["project"] {
+		case "read":
+			args = append(args, "--dir-ro", h.project)
+		case "write":
+			args = append(args, "--dir", h.project)
+		}
+		if h.m.needs["home"] == "read" {
+			if home, err := os.UserHomeDir(); err == nil {
+				args = append(args, "--dir-ro", home)
+			}
+		}
+		args = append(args, filepath.Join(h.dir, rel))
+	} else {
+		return fmt.Errorf("no run.%s in the manifest", *target)
 	}
 	if h.m.args != "" {
 		args = append(args, strings.Fields(h.m.args)...)
@@ -1313,9 +1333,9 @@ func main() {
 	}
 	for t := range m.run {
 		switch t {
-		case "linux-x86_64", "macos-arm64", "windows-x64":
+		case "linux-x86_64", "macos-arm64", "windows-x64", "wasm32-wasip1":
 		default:
-			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64)", t))
+			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64, wasm32-wasip1)", t))
 		}
 	}
 	if len(m.run) == 0 && (m.runtime == "" || m.script == "") {

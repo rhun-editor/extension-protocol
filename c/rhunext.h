@@ -22,6 +22,8 @@
  * tabs of their own; "complete", "signature", "definition", "references", "symbols", "actions",
  * "rename" and "format" for language support ("views complete definition").
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
+ * The same source builds for wasm32-wasip1 (clang --target=wasm32-wasip1 with a WASI sysroot), one
+ * module rhun runs itself on every system: run.wasm32-wasip1 = bin/NAME.wasm in the manifest.
  * MIT license. */
 #ifndef RHUNEXT_H
 #define RHUNEXT_H
