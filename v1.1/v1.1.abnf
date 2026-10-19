@@ -83,4 +83,5 @@ request      =/ id SP "quickdiff-refresh" SP len               ; body: an absolu
 ; N LF, then N leaves KIND SP PATH_LEN SP VALUE_LEN LF PATH VALUE, then extra records
 feature      =/ "debug"
 request      =/ id SP "debug-start" SP len SP len           ; NAME_LEN LEN: NAME + a configuration body
+host-request =/ id SP "debug-resolve" SP 1*32( %x61-7A / DIGIT / "-" ) SP ( "launch" / "attach" ) SP ( "0" / "1" ) SP len
 event        =/ "0" SP "debug-ended" SP 1*DIGIT SP ( 1*DIGIT / "-" )
