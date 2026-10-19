@@ -22,7 +22,7 @@ import (
 )
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
-	"query-stream", "provider-scope", "complete-items", "signature-list"}
+	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions"}
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -319,10 +319,12 @@ func (h *host) checkFeatures() {
 		if h.features[f] && h.manifestPatterns(f) == "" {
 			h.fail("provides", f+" agreed after hello but [provides] has no "+f+" patterns: rhun never asks")
 		}
-		if !h.features[f] && h.manifestPatterns(f) != "" {
+		// a code-actions provider needs no actions feature (the key stays actions)
+		if !h.features[f] && h.manifestPatterns(f) != "" && !(f == "actions" && h.features["code-actions"]) {
 			h.fail("provides", "[provides] "+f+" without saying it after hello 1: rhun never asks")
 		}
 	}
+	h.checkKeyFeatures()
 	keys := make([]string, 0, len(h.m.provides))
 	for k := range h.m.provides {
 		keys = append(keys, k)
@@ -333,7 +335,7 @@ func (h *host) checkFeatures() {
 		if v := strings.TrimSpace(h.m.provides[k]); known && v != "" && v != "no" && !slices.Contains(providerFeatures, f) {
 			if !h.asked[f] {
 				h.warn("provides", fmt.Sprintf("[provides] %s without %s after hello 1: rhun never asks", k, f))
-			} else {
+			} else if !slices.Contains(askedKeyFeatures, f) {
 				h.note("[provides] %s: the checker does not ask %s requests", k, f)
 			}
 		}

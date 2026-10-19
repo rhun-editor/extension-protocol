@@ -70,6 +70,8 @@ var partKinds = map[string]partKind{
 // langWaits); a kind without one is not extended
 var langCeilings = map[string]time.Duration{
 	"definition": 30 * time.Second, "references": 120 * time.Second, "rename": 120 * time.Second, "format": 30 * time.Second,
+	"declaration": 30 * time.Second, "type-definition": 30 * time.Second, "implementation": 60 * time.Second,
+	"range-format": 30 * time.Second, "code-action-resolve": 60 * time.Second,
 }
 
 // query is one of rhun's requests to the extension: its line, when its hard limit is, and what
