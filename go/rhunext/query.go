@@ -436,7 +436,7 @@ func (e *Ext) answerQuery(h Handler, id int64, verb string, f []string, body []b
 			}
 		}
 	}
-	return nil, nil, false
+	return e.answerActions(h, id, verb, f, body)
 }
 
 // StreamingLocator answers definition, references, declaration, type-definition and
