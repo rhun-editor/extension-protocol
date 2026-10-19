@@ -174,7 +174,7 @@ type result struct {
 // Run talks to rhun over stdin and stdout until rhun says bye or closes the pipe. It returns
 // nil on bye, io.EOF when rhun went away, or the protocol error that ended the exchange.
 func Run(h Handler) error {
-	return RunOn(os.Stdin, os.Stdout, os.Stderr, h)
+	return RunOn(stdin(), os.Stdout, os.Stderr, h)
 }
 
 // RunOn is Run on explicit streams (tests).
@@ -186,7 +186,7 @@ func RunOn(r io.Reader, w io.Writer, logw io.Writer, h Handler) error {
 // FeatureSignature, FeatureDefinition, FeatureReferences, FeatureSymbols, FeatureActions,
 // FeatureRename, FeatureFormat. Those rhun agrees to are in Ext.Has before Ready is called.
 func RunWith(features []string, h Handler) error {
-	return RunOnWith(os.Stdin, os.Stdout, os.Stderr, features, h)
+	return RunOnWith(stdin(), os.Stdout, os.Stderr, features, h)
 }
 
 // RunOnWith is RunWith on explicit streams (tests).
