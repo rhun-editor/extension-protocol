@@ -195,9 +195,24 @@ type CommandRef struct {
 	Args []byte
 }
 
-// Encode is the record "command NAME ARGS_LEN" + ARGS.
+// validCommandName is a local command name: 1 to 40 of [a-z0-9_].
+func validCommandName(s string) bool {
+	if s == "" || len(s) > 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// Encode is the record "command NAME ARGS_LEN" + ARGS (nothing for a name rhun would refuse or
+// ARGS over 8192 bytes).
 func (c *CommandRef) Encode() []byte {
-	if c == nil || c.Name == "" || len(c.Args) > 8192 {
+	if c == nil || !validCommandName(c.Name) || len(c.Args) > 8192 {
 		return nil
 	}
 	return append([]byte(fmt.Sprintf("command %s %d\n", c.Name, len(c.Args))), c.Args...)
@@ -225,6 +240,21 @@ type CodeActionProvider2 interface {
 // CodeActionResolver answers code-action-resolve requests; an error says nothing comes.
 type CodeActionResolver interface {
 	ResolveCodeAction(ext *Ext, req CodeActionResolveRequest) (ResolvedAction, error)
+}
+
+// actionKind is a hierarchical kind as one field of at most 128 bytes (quickfix when empty).
+func actionKind(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r > ' ' && r != 0x7f {
+			b.WriteRune(r)
+		}
+	}
+	k := cut(b.String(), 128)
+	if k == "" {
+		return string(ActionQuickFix)
+	}
+	return k
 }
 
 // EncodeCodeActions is the code-actions answer. Actions without a title, doing nothing (no edit,
@@ -267,10 +297,7 @@ func EncodeCodeActions(actions []Action) []byte {
 		if len(edit) == 0 && len(a.Resolve) == 0 && len(cmd) == 0 && a.Disabled == "" {
 			continue
 		}
-		kind := word(a.Kind, string(ActionQuickFix))
-		if len(kind) > 128 {
-			kind = kind[:128]
-		}
+		kind := actionKind(a.Kind)
 		head := fmt.Sprintf("%s %d %d %d\n", kind, len(title), len(edit), extra.Len())
 		if n == MaxActions || recs.Len()+len(head)+len(title)+len(edit)+extra.Len()+16 > MaxActionsBody {
 			break
