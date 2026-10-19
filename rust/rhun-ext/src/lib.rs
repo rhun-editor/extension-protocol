@@ -46,6 +46,7 @@ pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
 pub mod views;
+pub mod testing;
 pub mod watch;
 pub mod resources;
 
@@ -75,6 +76,10 @@ pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
 };
 pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
+pub use testing::{
+    expected_actual, unquote, CoverageRange, FileCoverage, TestCommand, TestItem, TestKind,
+    TestMessage, TestProcess, TestReporter, TestResult, TestRun, TestState, TestStream,
+};
 
 #[cfg(test)]
 mod tests {
@@ -175,6 +180,9 @@ pub enum Feature {
     Secrets,
     /// URIs and virtual documents: [`Handler::content`], [`Ext::open_uri`], [`Ext::content_changed`].
     Uris,
+    /// Test controllers (protocol 1.1): [`Handler::resolve_tests`], [`Handler::run_tests`],
+    /// [`Ext::set_test_items`], [`Ext::test_exec`].
+    Tests,
 }
 
 impl Feature {
@@ -202,6 +210,7 @@ impl Feature {
             Feature::Idle => "idle",
             Feature::Secrets => "secrets",
             Feature::Uris => "uris",
+            Feature::Tests => "tests",
         }
     }
 }
@@ -609,6 +618,26 @@ pub trait Handler: Send {
     fn quickdiff(&mut self, _ext: &Ext, _req: &QuickDiffRequest) -> Option<Vec<u8>> {
         None
     }
+    /// rhun asks for the children of a test item (`""`: the controller's roots; feature
+    /// `tests`): they replace the item's children. An error's text shows on the item's row.
+    fn resolve_tests(&mut self, _ext: &Ext, _parent: &str) -> Result<Vec<TestItem>, Error> {
+        Err(Error {
+            code: "unknown".into(),
+            text: "no such request".into(),
+        })
+    }
+    /// rhun starts a run (feature `tests`). Return at once: report from a thread of your own
+    /// ([`TestReporter`]) and end the run with [`Ext::end_test_run`]. An error ends the run
+    /// errored and its text is shown (`busy`, `refused`).
+    fn run_tests(&mut self, _ext: &Ext, _run: &TestRun) -> Result<(), Error> {
+        Err(Error {
+            code: "refused".into(),
+            text: "this extension runs no tests".into(),
+        })
+    }
+    /// The user cancelled a run: stop it and end it with [`Ext::end_test_run`] (rhun stops its
+    /// processes after 2 s and ends it itself after 5 s).
+    fn cancel_tests(&mut self, _ext: &Ext, _run: u64) {}
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
     /// rhun asks for a virtual document's text (feature `uris`): a URI of one of the schemes in
@@ -626,7 +655,8 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
-        /// The body of a request that has one (`commit-message`, `vkids`, `vmore`).
+        /// The body of a request that has one (`commit-message`, `vkids`, `vmore`,
+        /// `tests-resolve`, `test-run`).
         body: Vec<u8>,
     },
     /// a reply went to the request waiting for it
@@ -669,6 +699,7 @@ pub struct Ext {
     pending: Arc<Mutex<Pending>>,
     features: Arc<Mutex<Vec<String>>>,
     inline: Option<Arc<Inline>>,
+    procs: testing::Procs,
 }
 
 /// Speaks the protocol over standard input and output until rhun stops the extension, with
@@ -693,6 +724,7 @@ where
         pending: Arc::new(Mutex::new(Pending::default())),
         features: Arc::new(Mutex::new(Vec::new())),
         inline: None,
+        procs: Arc::default(),
     };
     let mut hello = String::from("hello 1");
     for f in features {
@@ -1201,6 +1233,8 @@ impl Ext {
         for (_, (_, w)) in p.waiters.drain() {
             let _ = w.send(Err(closed_error()));
         }
+        drop(p);
+        testing::tests_gone(&self.procs);
     }
 
     /// Reads one message: a reply goes to its waiter (Delivered); End when rhun's input ends or
@@ -1285,6 +1319,28 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
+                    // tests: a process's output and end go to its streams here, never
+                    // through the handler (which may be waiting for them)
+                    if ev.name == "test-out" && ev.fields.len() == 3 {
+                        let len: usize = match ev.fields[2].parse() {
+                            Ok(n) if n <= 4 << 20 => n,
+                            _ => return Msg::End,
+                        };
+                        let mut body = vec![0; len];
+                        if input.read_exact(&mut body).is_err() {
+                            return Msg::End;
+                        }
+                        if let Ok(ex) = ev.fields[0].parse() {
+                            testing::test_out(&self.procs, ex, &ev.fields[1], &body);
+                        }
+                        continue;
+                    }
+                    if ev.name == "test-exit" && ev.fields.len() >= 2 {
+                        if let Ok(ex) = ev.fields[0].parse() {
+                            testing::test_exit(&self.procs, ex, &ev.fields[1..].join(" "));
+                        }
+                        continue;
+                    }
                     let view_body = ev.name == "view"
                         && ev.fields.get(1).is_some_and(|w| views::has_body(w));
                     if ev.name == "edits" || ev.name == "action" || view_body {
@@ -1315,6 +1371,8 @@ impl Ext {
                             "commit-message" => Some(4 << 20),
                             // vkids, vmore: the node id follows (at most 1000 bytes)
                             v if views::request_has_body(v) => Some(4096),
+                            // tests: the parent item's id, the run's items
+                            "tests-resolve" | "test-run" => Some(4 << 20),
                             _ => None,
                         };
                         let mut body = Vec::new();
@@ -1426,6 +1484,11 @@ impl Ext {
                         }
                         "action" => h.action(self, &ev.body),
                         "content-closed" => h.content_closed(self, &ev.rest),
+                        "test-cancel" if self.has(Feature::Tests) => {
+                            if let Some(run) = testing::parse_test_cancel(&ev) {
+                                h.cancel_tests(self, run);
+                            }
+                        }
                         "bye" => {
                             h.bye(self);
                             return false;
@@ -1505,6 +1568,24 @@ impl Ext {
                                 }
                             })
                         }
+                        "tests-resolve" if self.has(Feature::Tests) && fields.len() == 1 => {
+                            let parent = String::from_utf8_lossy(&req_body).into_owned();
+                            Some(match h.resolve_tests(self, &parent) {
+                                Ok(items) => testing::encode_test_items(&parent, &items)
+                                    .map_err(|e| (code_str(&e.code), e.text)),
+                                Err(e) => Err((code_str(&e.code), e.text)),
+                            })
+                        }
+                        "test-run" if self.has(Feature::Tests) => {
+                            match testing::parse_test_run(&fields, &req_body) {
+                                None => Some(Err(("syntax", "bad test-run".to_string()))),
+                                Some(run) => match h.run_tests(self, &run) {
+                                    // `ok ID 0`: the empty body
+                                    Ok(()) => Some(Ok(Vec::new())),
+                                    Err(e) => Some(Err((code_str(&e.code), e.text))),
+                                },
+                            }
+                        }
                         _ => None,
                     };
                     let _ = match body {
@@ -1536,6 +1617,23 @@ impl Ext {
             }
         }
         true
+    }
+}
+
+/// An error code from a handler as one of the codes of the spec (others become `refused`).
+fn code_str(code: &str) -> &'static str {
+    match code {
+        "unknown" => "unknown",
+        "syntax" => "syntax",
+        "busy" => "busy",
+        "toobig" => "toobig",
+        "badpos" => "badpos",
+        "stale" => "stale",
+        "cancelled" => "cancelled",
+        "nofile" => "nofile",
+        "nodoc" => "nodoc",
+        "timeout" => "timeout",
+        _ => "refused",
     }
 }
 
