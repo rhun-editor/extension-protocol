@@ -299,7 +299,7 @@ func (h *host) start() error {
 			return fmt.Errorf("run.wasm32-wasip1 needs rhun to run it: %s not found (-rhun)", *rhunExe)
 		}
 		prog = p
-		args = append(args, "--wasm-host", "--dir", h.state)
+		args = append(args, "--wasm-host", "--dir", h.state, "--dir-ro", h.dir)
 		switch h.m.needs["project"] {
 		case "read":
 			args = append(args, "--dir-ro", h.project)
