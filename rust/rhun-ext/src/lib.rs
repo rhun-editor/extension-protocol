@@ -165,6 +165,9 @@ pub enum Feature {
     /// Commands with where they came from and a body: [`Handler::command_args`]. A minimal hook
     /// (the run event's FROM and body); fuller command-args and run-command support replaces it.
     CommandArgs,
+    /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
+    /// its requests go through [`Ext::request`].
+    Named(&'static str),
 }
 
 impl Feature {
@@ -190,6 +193,7 @@ impl Feature {
             Feature::QuickDiff => "quickdiff",
             Feature::Scm => "scm",
             Feature::CommandArgs => "command-args",
+            Feature::Named(n) => n,
         }
     }
 }

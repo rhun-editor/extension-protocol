@@ -813,7 +813,11 @@ fn scm_panels_and_command_args() {
                 buf: Vec::new(),
             },
             ChanWriter(ext_out),
-            &[Feature::Scm, Feature::CommandArgs],
+            &[
+                Feature::Scm,
+                Feature::CommandArgs,
+                Feature::Named("decorations"),
+            ],
             Scm(tx),
         )
     });
@@ -824,8 +828,8 @@ fn scm_panels_and_command_args() {
         }),
         to_ext,
     };
-    assert_eq!(host.line(), "hello 1 scm command-args");
-    host.send("0 features scm command-args\n0 ready /r\n");
+    assert_eq!(host.line(), "hello 1 scm command-args decorations");
+    host.send("0 features scm command-args decorations\n0 ready /r\n");
     assert_eq!(host.line(), "1 scm-register 8");
     assert_eq!(host.body(8), "2 2\n/rHg");
     host.send("ok 1 3\n");
