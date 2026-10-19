@@ -475,7 +475,7 @@ type SignatureHelper interface {
 // answer replies to a request from rhun: "ok ID LEN" and the body; "error ID CODE TEXT" when
 // the handler refuses a rename or its edit cannot be encoded; "error ID unknown" for a verb the
 // handler does not answer or a request that does not parse.
-func (e *Ext) answer(h Handler, f []string) {
+func (e *Ext) answer(h Handler, f []string, hbody []byte) {
 	if len(f) < 2 {
 		return
 	}
@@ -521,6 +521,8 @@ func (e *Ext) answer(h Handler, f []string) {
 			}
 			known = true
 		}
+	case "agent-transcript", "tool", "agent-prompt":
+		body, rerr, known = e.answerAI(h, f, hbody)
 	default:
 		body, rerr, known = e.answerLang(h, f[1], f[2:])
 	}
