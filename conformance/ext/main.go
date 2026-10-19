@@ -49,6 +49,8 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
+	cmdOptions                  map[string]string // [command-options] NAME.FIELD -> value
+	statusItems                 int               // [status] items
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -58,6 +60,7 @@ func readManifest(dir string) (*manifest, error) {
 	}
 	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}}
 	section := ""
+	statusSeen := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' || line[0] == ';' {
@@ -127,6 +130,16 @@ func readManifest(dir string) (*manifest, error) {
 			m.subscribe[k] = v
 		case "provides":
 			m.provides[k] = v
+		case "command-options":
+			if m.cmdOptions == nil {
+				m.cmdOptions = map[string]string{}
+			}
+			m.cmdOptions[k] = v
+		case "status":
+			if item, _, _ := strings.Cut(k, "."); !statusSeen[item] {
+				statusSeen[item] = true
+				m.statusItems++
+			}
 		}
 	}
 	return m, nil
@@ -184,7 +197,9 @@ type host struct {
 	hostReqs    map[int64]string  // those waiting for an answer
 	hostAnswers map[int64]message // and the answers
 	saveScope   *saveScope
-	scm         scmState // version control panels: scmpanel.go
+	scm         scmState        // version control panels: scmpanel.go
+	contextKeys map[string]bool // context-keys: set-context keys (true: set, false: removed)
+	statusItems map[string]bool // status-items: runtime items
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -359,7 +374,8 @@ type message struct {
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
-	"scm-register": true, "scm-update": true, "scm-input-set": true} // version control panels: scmpanel.go
+	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
+	"run-command": true, "status-item": true} // commands.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1053,6 +1069,8 @@ func (h *host) handle(msg message) {
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
 	case "scm-register", "scm-update", "scm-input", "scm-input-set":
 		h.scmRequest(id, verb, args, msg, reply, rerr)
+	case "run-command", "set-context", "status-item", "status-remove":
+		h.commandRequest(id, verb, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1226,6 +1244,7 @@ func (h *host) expectHello() bool {
 	}
 	h.ok("hello 1 as the first line")
 	h.views, h.hostReqs, h.hostAnswers = map[int64]bool{}, map[int64]string{}, map[int64]message{}
+	h.contextKeys, h.statusItems = map[string]bool{}, map[string]bool{}
 	h.agree(line)
 	return true
 }
@@ -1454,7 +1473,7 @@ func main() {
 		for _, d := range []int64{1, 2, 3, 4} {
 			before := len(h.requests)
 			h.activate(d)
-			h.write(fmt.Sprintf("0 run %s.%s %d\n", m.name, c, d))
+			h.write(h.runLine(m.name+"."+c, d))
 			h.serve(700 * time.Millisecond)
 			did := h.requests[before:]
 			h.note("command %s on %s: %v", c, filepath.Base(h.docs[d].path), did)
@@ -1467,7 +1486,7 @@ func main() {
 	h.ok("every command handled on four documents without the program exiting")
 	for _, c := range h.rtcmds {
 		before := len(h.requests)
-		h.write(fmt.Sprintf("0 run %s 1\n", c))
+		h.write(h.runLine(c, 1))
 		h.serve(700 * time.Millisecond)
 		h.note("runtime command %s: %v", c, h.requests[before:])
 		if h.cmdExited() {
@@ -1519,7 +1538,7 @@ func main() {
 	// 3. an event it does not know, then an error reply it must survive
 	h.write("0 frobnicate 1 2 three\n")
 	h.errOnce = 1
-	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, m.commands[0]))
+	h.write(h.runLine(m.name+"."+m.commands[0], 1))
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1529,7 +1548,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, m.commands[0])
+	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + h.runLine(m.name+"."+m.commands[0], 1)
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)

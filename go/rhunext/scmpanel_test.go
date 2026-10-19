@@ -53,8 +53,12 @@ type scmProbe struct {
 func (p *scmProbe) Ready(e *Ext, _ string)          { p.ready <- e }
 func (p *scmProbe) Run(_ *Ext, cmd string, doc Doc) { p.runs <- "run " + cmd }
 func (p *scmProbe) Event(*Ext, Event)               {}
-func (p *scmProbe) RunArgs(_ *Ext, cmd string, doc Doc, from string, body []byte) {
-	p.runs <- "args " + cmd + " " + from + " " + string(body)
+func (p *scmProbe) Invoke(_ *Ext, inv Invocation) {
+	if inv.From == "" {
+		p.runs <- "run " + inv.Command
+		return
+	}
+	p.runs <- "args " + inv.Command + " " + inv.From + " " + string(inv.Body)
 }
 
 func TestScmRequestsAndCommandArgs(t *testing.T) {

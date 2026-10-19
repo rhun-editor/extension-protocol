@@ -285,14 +285,5 @@ func (e *Ext) ScmInputSet(ctx context.Context, scm int64, text string) error {
 	return err
 }
 
-// FeatureCommandArgs: commands learn where they were invoked from and receive a body
-// ("0 run EXT.NAME DOC FROM LEN" + body). A handler that implements ArgsRunner gets them;
-// otherwise Run is called as before. This is a minimal hook (the run event's FROM and body, for
-// panels' and menus' command references); fuller command-args and run-command support replaces it.
-const FeatureCommandArgs = "command-args"
-
-// ArgsRunner receives commands with their origin (palette, key, menu, ref) and body: a menu's
-// "TARGET" LF + the item's args, a command reference's ARGS, a key binding's ARGS.
-type ArgsRunner interface {
-	RunArgs(ext *Ext, command string, doc Doc, from string, body []byte)
-}
+// Panel buttons and clicks are command references: with FeatureCommandArgs their ARGS arrive as
+// an Invocation's Body (invoke.go).

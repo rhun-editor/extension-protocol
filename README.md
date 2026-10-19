@@ -88,9 +88,22 @@ and `ScmRegister`, `ScmUpdate` with an `ScmPanel`, `ScmInput`, `ScmInputSet`. Ru
 `scm_update` with an `ScmPanel`, `scm_input`, `scm_input_set`. C: `rx_git_*`, the
 `commit_message` and `quickdiff` handlers, `rx_quickdiff_refresh`, `rx_scm_register`,
 `rx_scm_update` with a body from the `rx_scm_*` appenders, `rx_scm_input`, `rx_scm_input_set`.
-Panel buttons and clicks run command references; a minimal `command-args` hook delivers their
-ARGS (Go `ArgsRunner`, Rust `Handler::command_args`, C `rx_handlers.command_args`) until fuller
-command-args support replaces it.
+Panel buttons and clicks run command references, whose ARGS arrive through `command-args`
+(below).
+
+## Commands with arguments, context keys and status items
+
+Protocol 1.1's `command-args` tells a command where it was invoked from (`palette`, `key`, `menu`,
+`ref`) and gives it a body: a key binding's ARGS, a menu's `TARGET` line and the item's args, or a
+command reference's ARGS. Go handlers implement `Invoker` (`Invocation.From`, `.Body`,
+`.Target()` for menus), build references with `CommandRef`, run built-ins and other extensions'
+callable commands with `RunCommand`, and answer calls with `Callee` (`Call.Context` ends on
+`cancel`). Rust has `Handler::invoke`, `command_ref`, `Ext::run_command` and `Handler::call`; C has
+`rx_handlers.invoke`, `rx_menu_target`, `rx_command_ref`, `rx_run_command` and `rx_handlers.call`.
+`context-keys` sets the extension's keys for when clauses (`SetContext` / `set_context` /
+`rx_set_context`), and `status-items` adds status bar items (`SetStatusItem` with `StatusItem` /
+`set_status_item` / `rx_set_status_item`). Without `command-args` the old `Run` / `command`
+handlers keep receiving every run.
 
 ## Prepared snippet fields
 
