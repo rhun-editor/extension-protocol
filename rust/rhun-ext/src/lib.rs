@@ -354,6 +354,9 @@ pub enum Feature {
     Urls,
     /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
     Files,
+    /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
+    /// its requests go through [`Ext::request`].
+    Named(&'static str),
 }
 
 impl Feature {
@@ -419,6 +422,7 @@ impl Feature {
             Feature::StatusItems => "status-items",
             Feature::Urls => "urls",
             Feature::Files => "files",
+            Feature::Named(n) => n,
         }
     }
 }
