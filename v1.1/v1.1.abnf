@@ -304,3 +304,48 @@ host-request =/ id SP "code-action-resolve" SP doc SP version SP len
               ; followed by the chosen action's LEN bytes of resolve data
 car-head     = len SP len LF
               ; EDIT_LEN EXTRA_LEN: the edit (a workspace edit, or empty), then cmd-ref records only
+
+; scm: version control panels (v1.1.md "Feature: scm"); bodies are length-framed
+feature      =/ "scm"
+request      =/ id SP "scm-register" SP len                    ; body: ROOT_LEN SP LABEL_LEN LF <ROOT><LABEL>
+             / id SP "scm-update" SP num SP len                ; SCM, then an scm-body
+             / id SP "scm-input" SP num                        ; ok ID LEN + the message box's text
+             / id SP "scm-input-set" SP num SP len             ; body: the text (at most 65536 bytes)
+scm-body     = len SP len SP num SP num LF                     ; STATUS_LEN PLACEHOLDER_LEN NACT (0-4) NGROUP (0-64), then their bytes
+scm-action   = "action" SP ( scm-word / "-" ) SP scm-cmd SP len SP len LF   ; ICON NAME ARGS_LEN LABEL_LEN, then ARGS LABEL
+scm-group    = "group" SP scm-word SP len SP num SP num LF     ; ID LABEL_LEN NACT (0-8) NRES, then LABEL
+scm-res      = "res" SP %x21-7E SP scm-color SP len SP num LF  ; CODE COLOR PATH_LEN NREC (0-64), then PATH
+scm-record   = "command" SP scm-cmd SP len LF                 ; the click (before the actions), then ARGS
+             / scm-action
+             / "tip" SP len LF                                 ; then at most 1000 bytes
+             / 1*( %x21-7E ) *( SP 1*( %x21-7E ) ) SP len LF   ; any other record, skipped with its LEN bytes
+scm-color    = "added" / "modified" / "deleted" / "conflict" / "untracked" / "ignored" / "-"
+scm-word     = 1*64( %x21-7E )
+scm-cmd      = 1*40( %x61-7A / DIGIT / "_" )                ; a command of the extension, its local name
+; command-args: runs carry where they came from and a body; command references inside bodies;
+; run-command (extension to rhun) and call (rhun to a callable command's owner)
+feature      =/ "command-args"
+event        =/ "0" SP "run" SP full-command SP doc SP from SP len   ; then LEN body bytes
+from         = "palette" / "key" / "menu" / "ref"
+full-command = name "." name
+command-ref  = "command" SP name SP len LF                ; then ARGS_LEN bytes, at most 8192
+request      =/ id SP "run-command" SP command-id SP len  ; ARGS body, at most 65536 bytes
+command-id   = 1*( %x21-7E )                              ; NAME, rhun.NAME, EXT.NAME, OWNER/EXT.NAME
+host-request =/ id SP "call" SP full-command SP doc SP caller SP len   ; ARGS body
+caller       = 1*( ALPHA / DIGIT / "-" ) "/" name
+              ; the reply to run-command and to call is ok ID LEN + RESULT (at most 1 MiB) or an error
+
+; context-keys: the extension's own keys for when clauses
+feature      =/ "context-keys"
+request      =/ id SP "set-context" SP context-key SP context-value
+context-key  = %x61-7A *39( ALPHA / DIGIT / "_" )
+context-value = 1*( %x20-7E / %x80-FF )                   ; at most 256 bytes of UTF-8, no control characters; "-" removes
+
+; status-items: status bar items
+feature      =/ "status-items"
+request      =/ id SP "status-item" SP name SP len / id SP "status-remove" SP name
+status-head  = ( "left" / "right" ) SP [ "-" ] num SP len SP len SP len LF
+              ; PRIORITY -1000..1000, TEXT_LEN TOOLTIP_LEN EXTRA_LEN, then the three parts;
+              ; EXTRA records: command-ref, "color" SP color SP "0" LF, "background" SP
+              ; ( "error" / "warning" ) SP "0" LF, "when" SP len LF + the clause
+color        = "fg" / "muted" / "accent" / "error" / "warning" / "success"

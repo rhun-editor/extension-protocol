@@ -1558,3 +1558,206 @@ fn navigation_rename_format_and_actions() {
     host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
+
+#[test]
+fn command_args_runs_calls_context_and_status_items() {
+    use rhun_ext::{CallRequest, Error, Invocation, StatusItem};
+    struct Cmds(Sender<String>);
+    impl Handler for Cmds {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            let r = ext.run_command("bob/tools.format", b"x y").unwrap();
+            let refused = ext.run_command("demo.self", b"").unwrap_err().code;
+            ext.set_context("mode", "insert here").unwrap();
+            ext.remove_context("mode").unwrap();
+            let bad = ext.set_context("Mode", "x").unwrap_err().code;
+            ext.set_status_item(&StatusItem {
+                name: "go".into(),
+                text: "Go".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            ext.remove_status_item("go").unwrap();
+            self.0
+                .send(format!(
+                    "ready {} {refused} {bad}",
+                    String::from_utf8_lossy(&r)
+                ))
+                .unwrap();
+        }
+        fn invoke(&mut self, _ext: &Ext, inv: &Invocation) {
+            let target = inv
+                .target()
+                .map(|(t, a)| format!(" {} {:?} {}", t.kind, t.path(), String::from_utf8_lossy(a)))
+                .unwrap_or_default();
+            self.0
+                .send(format!(
+                    "run {} {} {} {:?}{target}",
+                    inv.name,
+                    inv.doc,
+                    inv.from,
+                    String::from_utf8_lossy(&inv.body)
+                ))
+                .unwrap();
+        }
+        fn call(&mut self, _ext: &Ext, req: &CallRequest) -> Result<Vec<u8>, Error> {
+            match &req.args[..] {
+                b"nodoc" => Err(Error {
+                    code: "nodoc".into(),
+                    text: "no document".into(),
+                }),
+                b"BAD" => Err(Error {
+                    code: "Bad Code".into(),
+                    text: "why".into(),
+                }),
+                a => Ok([&b"got "[..], a, b" from ", req.caller.as_bytes()].concat()),
+            }
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, got) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[
+                Feature::CommandArgs,
+                Feature::ContextKeys,
+                Feature::StatusItems,
+            ],
+            Cmds(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(
+        host.line(),
+        "hello 1 command-args context-keys status-items"
+    );
+    host.send("0 features command-args context-keys status-items\n0 ready -\n");
+    assert_eq!(host.line(), "1 run-command bob/tools.format 3");
+    assert_eq!(host.body(3), "x y");
+    host.send("ok 1 4\ndone");
+    assert_eq!(host.line(), "2 run-command demo.self 0");
+    host.send("error 2 refused its own command\n");
+    assert_eq!(host.line(), "3 set-context mode insert here");
+    host.send("ok 3\n");
+    assert_eq!(host.line(), "4 set-context mode -");
+    host.send("ok 4\n");
+    assert_eq!(host.line(), "5 status-item go 16");
+    assert_eq!(host.body(16), "right 0 2 0 0\nGo");
+    host.send("ok 5\n");
+    assert_eq!(host.line(), "6 status-remove go");
+    host.send("ok 6\n");
+    let wait = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(wait(&got), "ready done refused syntax");
+    host.send(
+        "0 run demo.go 3 key 4\nfast0 run demo.copy 2 menu 13\nroot /p\nextra0 run demo.old 5\n",
+    );
+    assert_eq!(wait(&got), "run go 3 key \"fast\"");
+    assert_eq!(
+        wait(&got),
+        "run copy 2 menu \"root /p\\nextra\" root Some(\"/p\") extra"
+    );
+    assert_eq!(wait(&got), "run old 5  \"\"");
+    host.send("7 call demo.fmt 4 bob/tools 3\nabc");
+    assert_eq!(host.line(), "ok 7 22");
+    assert_eq!(host.body(22), "got abc from bob/tools");
+    host.send("8 call demo.fmt 0 bob/tools 5\nnodoc");
+    assert_eq!(host.line(), "error 8 nodoc no document");
+    host.send("9 call demo.fmt 0 bob/tools 3\nBAD");
+    assert_eq!(host.line(), "error 9 refused why");
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
+fn scm_panels_and_command_args() {
+    use rhun_ext::{Doc, ScmPanel};
+    struct Scm(Sender<String>);
+    impl Handler for Scm {
+        fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+            let h = ext.scm_register("/r", "Hg").unwrap();
+            ext.scm_update(
+                h,
+                &ScmPanel {
+                    status: "s".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let input = ext.scm_input(h).unwrap();
+            ext.scm_input_set(h, "").unwrap();
+            let _ = self.0.send(format!("{h} {input}"));
+        }
+        fn command(&mut self, _ext: &Ext, name: &str, _doc: Doc) {
+            let _ = self.0.send(format!("command {name}"));
+        }
+        fn invoke(&mut self, ext: &Ext, inv: &rhun_ext::Invocation) {
+            if inv.from.is_empty() {
+                return self.command(ext, &inv.name, inv.doc);
+            }
+            let _ = self.0.send(format!(
+                "args {} {} {}",
+                inv.name,
+                inv.from,
+                String::from_utf8_lossy(&inv.body)
+            ));
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (tx, results) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Scm, Feature::CommandArgs],
+            Scm(tx),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 scm command-args");
+    host.send("0 features scm command-args\n0 ready /r\n");
+    assert_eq!(host.line(), "1 scm-register 8");
+    assert_eq!(host.body(8), "2 2\n/rHg");
+    host.send("ok 1 3\n");
+    assert_eq!(host.line(), "2 scm-update 3 9");
+    assert_eq!(host.body(9), "1 0 0 0\ns");
+    host.send("ok 2\n");
+    assert_eq!(host.line(), "3 scm-input 3");
+    host.send("ok 3 3\nmsg");
+    assert_eq!(host.line(), "4 scm-input-set 3 0");
+    host.send("ok 4\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "3 msg"
+    );
+    host.send("0 run hg.open_change 0 ref 5\na.txt0 run hg.refresh 0\n0 bye\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "args open_change ref a.txt"
+    );
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "command refresh"
+    );
+    done.join().unwrap().unwrap();
+}

@@ -54,6 +54,8 @@ type manifest struct {
 	top                         map[string]string // top-level keys of later features (idle, runs)
 	tools                       []string          // [tools] names (protocol 1.1)
 	pack                        string            // a pack's members: OWNER/NAME, space separated
+	cmdOptions                  map[string]string // [command-options] NAME.FIELD -> value
+	statusItems                 int               // [status] items
 }
 
 // packProblem says what is wrong with a manifest's pack list, or "": at most 16 names, each
@@ -83,6 +85,7 @@ func readManifest(dir string) (*manifest, error) {
 	}
 	m := &manifest{run: map[string]string{}, needs: map[string]string{}, subscribe: map[string]string{}, provides: map[string]string{}, top: map[string]string{}}
 	section := ""
+	statusSeen := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' || line[0] == ';' {
@@ -165,6 +168,16 @@ func readManifest(dir string) (*manifest, error) {
 			if !strings.Contains(k, ".") {
 				m.tools = append(m.tools, k)
 			}
+		case "command-options":
+			if m.cmdOptions == nil {
+				m.cmdOptions = map[string]string{}
+			}
+			m.cmdOptions[k] = v
+		case "status":
+			if item, _, _ := strings.Cut(k, "."); !statusSeen[item] {
+				statusSeen[item] = true
+				m.statusItems++
+			}
 		}
 	}
 	return m, nil
@@ -234,12 +247,15 @@ type host struct {
 	selectionsSet map[int64][]string // select-many's selections per document
 
 	// protocol 1.1 language features (query.go)
-	asked     map[string]bool   // the features hello named
-	scope     map[string]string // [provides] values set by provides, "-" for withdrawn
-	scoped    bool              // a provides was served (said once)
-	queries   map[int64]*query  // rhun's requests: parts, progress, the hard limit
-	withdrawn map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
-	lastAsk   int64             // the last request asked
+	asked       map[string]bool   // the features hello named
+	scope       map[string]string // [provides] values set by provides, "-" for withdrawn
+	scoped      bool              // a provides was served (said once)
+	queries     map[int64]*query  // rhun's requests: parts, progress, the hard limit
+	withdrawn   map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
+	lastAsk     int64             // the last request asked
+	scm         scmState          // version control panels: scmpanel.go
+	contextKeys map[string]bool   // context-keys: set-context keys (true: set, false: removed)
+	statusItems map[string]bool   // status-items: runtime items
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -433,12 +449,14 @@ type message struct {
 // bodyVerbs are the requests whose last field is a body length.
 var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, "status": true, "diagnostics": true, "hover": true, "choose": true, "ask": true, "term": true, "draw": true, "apply": true, "save-apply": true, "snippet": true,
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
+	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
 	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, // retained views, notifications, progress: views.go, notify.go
 	"secret-set":     true,                                                        // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
 	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go
-	"query-part": true, "query-progress": true} // language features: query.go
+	"query-part": true, "query-progress": true, // language features: query.go
+	"run-command": true, "status-item": true} // commands.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1187,6 +1205,10 @@ func (h *host) handle(msg message) {
 		}
 	case "provides":
 		h.providesRequest(line, reply, rerr, id)
+	case "scm-register", "scm-update", "scm-input", "scm-input-set":
+		h.scmRequest(id, verb, args, msg, reply, rerr)
+	case "run-command", "set-context", "status-item", "status-remove":
+		h.commandRequest(id, verb, args, msg, reply, rerr)
 	default:
 		h.fail("verbs", fmt.Sprintf("unknown request %q", verb))
 		rerr("unknown", "no such request")
@@ -1362,6 +1384,7 @@ func (h *host) expectHello() bool {
 	h.ok("hello 1 as the first line")
 	h.views, h.hostReqs, h.hostAnswers = map[int64]bool{}, map[int64]string{}, map[int64]message{}
 	h.scope, h.scoped, h.queries, h.withdrawn = map[string]string{}, false, map[int64]*query{}, map[int64]bool{}
+	h.contextKeys, h.statusItems = map[string]bool{}, map[string]bool{}
 	h.agree(line)
 	return true
 }
@@ -1615,7 +1638,7 @@ func main() {
 			}
 			before := len(h.requests)
 			h.activate(d)
-			h.write(fmt.Sprintf("0 run %s.%s %d\n", m.name, c, d))
+			h.write(h.runLine(m.name+"."+c, d))
 			h.serve(700 * time.Millisecond)
 			did := h.requests[before:]
 			h.note("command %s on %s: %v", c, filepath.Base(h.docs[d].path), did)
@@ -1628,7 +1651,7 @@ func main() {
 	h.ok("every command handled on four documents without the program exiting")
 	for _, c := range h.rtcmds {
 		before := len(h.requests)
-		h.write(fmt.Sprintf("0 run %s 1\n", c))
+		h.write(h.runLine(c, 1))
 		h.serve(700 * time.Millisecond)
 		h.note("runtime command %s: %v", c, h.requests[before:])
 		if h.cmdExited() {
@@ -1697,7 +1720,7 @@ func main() {
 	if len(m.commands) > 0 {
 		first = m.commands[0]
 	}
-	h.write(fmt.Sprintf("0 run %s.%s 1\n", m.name, first))
+	h.write(h.runLine(m.name+"."+first, 1))
 	h.serve(700 * time.Millisecond)
 	if h.cmdExited() {
 		h.fail("resilience", "the program exited after an unknown event or an error reply")
@@ -1707,7 +1730,7 @@ func main() {
 
 	// 4. and 5. the same events, one byte at a time and then in one write, after a run that is not
 	// counted (a command may do something only the first time, such as registering another)
-	seq := fmt.Sprintf("0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n0 run %s.%s 1\n", m.name, first)
+	seq := "0 cursor 1 1 2\n0 cursor 1 1 3\n0 active 1\n" + h.runLine(m.name+"."+first, 1)
 	h.write(seq)
 	h.serve(700 * time.Millisecond)
 	before := len(h.requests)

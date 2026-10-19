@@ -22,13 +22,14 @@ import (
 )
 
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
-	"git-data", "commit-message", "quickdiff", // source control: scm.go
+	"git-data", "commit-message", "quickdiff", "scm", // source control: scm.go, scmpanel.go
 	"view-tree", "view-log", "notify", "progress", // retained views, notifications, progress: views.go, notify.go
 	"idle", "secrets", "uris", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
 	"notebooks",                                                                                                                            // notebooks: notebook.go
-	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions"} // language features: query.go, actions.go
+	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions", // language features: query.go, actions.go
+	"command-args", "context-keys", "status-items"} // commands.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -407,6 +408,7 @@ func (h *host) checkFeatures() {
 	h.checkLangFeatures()
 	h.checkResources()
 	h.checkScm()
+	h.checkCommands()
 	if h.cmdExited() {
 		return
 	}
