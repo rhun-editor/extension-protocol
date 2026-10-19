@@ -23,7 +23,18 @@ import (
 )
 
 // providerFeatures are the features that name files in [provides] (all but views)
-var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions"}
+var providerFeatures = []string{"complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "save-actions", "linked-editing"}
+
+// provideKey is a provider feature's key in [provides]
+func provideKey(f string) string {
+	switch f {
+	case "save-actions":
+		return "save_actions"
+	case "linked-editing":
+		return "linked"
+	}
+	return f
+}
 
 // symbolKinds are the kinds 12e lists; another is shown as given
 var symbolKinds = func() map[string]bool {
@@ -38,10 +49,7 @@ var symbolKinds = func() map[string]bool {
 
 // patterns are the file patterns [provides] gives a feature, "" for none ("no" is none)
 func (h *host) patterns(f string) string {
-	if f == "save-actions" {
-		f = "save_actions"
-	}
-	p := strings.TrimSpace(h.m.provides[f])
+	p := strings.TrimSpace(h.m.provides[provideKey(f)])
 	if p == "no" {
 		return ""
 	}
@@ -477,7 +485,7 @@ func (h *host) checkActions(m message) ([]codeAction, []string, string) {
 			c.warn("action %d: %s", i, why)
 		}
 		if len(edit) > 0 {
-			if _, code, why := editGrammar(edit); why != "" {
+			if code, why := h.editGrammarFor(edit); why != "" {
 				return nil, nil, fmt.Sprintf("action %d (%q): its edit cannot be made whatever the documents say (rhun would answer an apply %s): %s",
 					i, title, code, why)
 			}
@@ -720,11 +728,9 @@ func (h *host) apply(groups []wsGroup) {
 // refuses changes nothing and sends nothing: why is its code and reason.
 func (h *host) chooseAction(a codeAction) string {
 	if len(a.edit) > 0 {
-		gs, code, why := h.checkWorkspaceEdit(a.edit, nil)
-		if why != "" {
+		if _, code, _, why := h.takeEdit(a.edit, nil); why != "" {
 			return code + ": " + why
 		}
-		h.apply(gs)
 	}
 	if len(a.data) > 0 {
 		h.write(fmt.Sprintf("0 action %d\n%s", len(a.data), a.data))
@@ -915,20 +921,19 @@ func (h *host) checkLangFeatures() {
 			continue
 		}
 		b, why := answer(m)
-		var gs []wsGroup
+		n := 0
 		if why == "" {
-			gs, _, why = h.checkWorkspaceEdit(b, only)
+			n, _, _, why = h.takeEdit(b, only)
 		}
 		if why != "" {
 			h.fail(f, why)
 			continue
 		}
 		files := "1 file"
-		if len(gs) != 1 {
-			files = fmt.Sprintf("%d files", len(gs))
+		if n != 1 {
+			files = fmt.Sprintf("%d files", n)
 		}
 		h.ok(fmt.Sprintf("answers %s requests with a workspace edit rhun can make (%s)", f, files))
-		h.apply(gs)
 		if gone(f, "the edits of its "+f) {
 			return
 		}
@@ -937,6 +942,21 @@ func (h *host) checkLangFeatures() {
 
 // applyRequest serves the apply request (section 8): a workspace edit checked whole, then made
 func (h *host) applyRequest(b []byte, reply func(string), rerr func(string, string), id int64) {
+	if h.features["workspace-edits"] {
+		// a transaction: error ID CODE ENTRY TEXT, then made (documents first, then the reply)
+		t, code, entry, why := h.checkTx(b)
+		if why != "" {
+			h.fail("apply", why)
+			rerr(code, fmt.Sprintf("%d %s", entry, strings.TrimPrefix(why, fmt.Sprintf("entry %d: ", entry))))
+			return
+		}
+		reply(fmt.Sprintf("ok %d", id))
+		for _, w := range t.warns {
+			h.warn("workspace-edits", w)
+		}
+		h.makeTx(t)
+		return
+	}
 	gs, code, why := h.checkWorkspaceEdit(b, nil)
 	if why != "" {
 		h.fail("apply", why)

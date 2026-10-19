@@ -20,7 +20,8 @@ import (
 	"github.com/rhun-editor/extension-protocol/go/rhunext"
 )
 
-var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms"}
+var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
+	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing"}
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -31,7 +32,8 @@ func (h *host) agree(hello string) {
 	}
 	var said []string
 	for _, f := range knownFeatures {
-		if asked[f] {
+		// file-operations is agreed only together with workspace-edits
+		if asked[f] && (f != "file-operations" || asked["workspace-edits"]) {
 			h.features[f] = true
 			said = append(said, f)
 		}
@@ -294,10 +296,10 @@ func (h *host) askWithin(line string, wait time.Duration) (message, bool) {
 func (h *host) checkFeatures() {
 	for _, f := range providerFeatures {
 		if h.features[f] && h.patterns(f) == "" {
-			h.fail("provides", f+" agreed after hello but [provides] has no "+f+" patterns: rhun never asks")
+			h.fail("provides", f+" agreed after hello but [provides] has no "+provideKey(f)+" patterns: rhun never asks")
 		}
 		if !h.features[f] && h.patterns(f) != "" {
-			h.fail("provides", "[provides] "+f+" without saying it after hello 1: rhun never asks")
+			h.fail("provides", "[provides] "+provideKey(f)+" without saying "+f+" after hello 1: rhun never asks")
 		}
 	}
 	if h.features["complete"] && h.patterns("complete") != "" {
@@ -339,6 +341,11 @@ func (h *host) checkFeatures() {
 	}
 	h.checkLangFeatures()
 	if h.cmdExited() {
+		return
+	}
+	h.checkLinked()
+	if h.cmdExited() {
+		h.fail("linked-editing", "the program exited on a linked request")
 		return
 	}
 	if !h.features["complete"] || h.patterns("complete") == "" {
