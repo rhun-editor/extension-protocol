@@ -39,6 +39,7 @@ pub mod picture;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
+pub mod views;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -145,6 +146,9 @@ pub enum Feature {
     SnippetTransforms,
     /// Coalesced workspace filesystem invalidations.
     WorkspaceWatch,
+    /// Retained views: manifest `[views]`, [`Ext::patch`], [`Ext::vshow`],
+    /// [`Handler::view_open`] and [`Handler::view_event`] (protocol 1.1, [`views`]).
+    ViewTree,
 }
 
 impl Feature {
@@ -165,6 +169,7 @@ impl Feature {
             Feature::SnippetVariants => "snippet-variants",
             Feature::SnippetTransforms => "snippet-transforms",
             Feature::WorkspaceWatch => "workspace_watch",
+            Feature::ViewTree => "view-tree",
         }
     }
 }
@@ -497,6 +502,10 @@ pub trait Handler: Send {
     fn setting(&mut self, _ext: &Ext, _key: &str, _value: &str) {}
     /// Something happened in one of its views.
     fn view(&mut self, _ext: &Ext, _view: View, _ev: ViewEvent) {}
+    /// A declared view's instance exists (feature `view-tree`): fill it with [`Ext::patch`].
+    fn view_open(&mut self, _ext: &Ext, _open: &views::ViewOpen) {}
+    /// The user did something in a retained view (feature `view-tree`).
+    fn view_event(&mut self, _ext: &Ext, _view: View, _ev: &views::RetainedEvent) {}
     /// rhun asks for a completion list (feature `complete`).
     fn complete(&mut self, _ext: &Ext, _req: &CompleteRequest) -> CompletionList {
         CompletionList::default()
@@ -1022,6 +1031,31 @@ impl Ext {
         self.request(&format!("unview {view}"), None).map(|_| ())
     }
 
+    // ---- retained views (feature `view-tree`) ----
+
+    /// Applies a patch to a retained view, whole or not at all; the view's new revision.
+    pub fn patch(&self, view: View, patch: &views::Patch) -> Result<u64, Error> {
+        if !self.has(Feature::ViewTree) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "view-tree feature was not agreed".into(),
+            });
+        }
+        let body = patch.encode().map_err(|text| Error {
+            code: "toobig".into(),
+            text,
+        })?;
+        let rep = self.request(&format!("vpatch {view}"), Some(&body))?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Opens a declared view's place on it (its manifest key); `focus` also gives it the
+    /// keyboard. Its view number.
+    pub fn vshow(&self, name: &str, focus: bool) -> Result<View, Error> {
+        let rep = self.request(&format!("vshow {name} {}", if focus { "focus" } else { "-" }), None)?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
     // ---- reading ----
 
     fn reader<R: BufRead>(&self, mut input: R, tx: Sender<Msg>) {
@@ -1090,7 +1124,9 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" {
+                    let view_body = ev.name == "view"
+                        && ev.fields.get(1).map_or(false, |w| views::has_body(w));
+                    if ev.name == "edits" || ev.name == "action" || view_body {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1172,7 +1208,14 @@ impl Ext {
                             h.setting(self, &key, &value);
                         }
                         "view" => {
-                            if let Some((view, vev)) = parse_view_event(&ev) {
+                            if let Some(open) = views::parse_open(&ev) {
+                                h.view_open(self, &open);
+                            } else if let Some((view, rev)) = views::parse_retained(&ev) {
+                                h.view_event(self, view, &rev);
+                                if rev == views::RetainedEvent::Closed {
+                                    h.view(self, view, ViewEvent::Closed);
+                                }
+                            } else if let Some((view, vev)) = parse_view_event(&ev) {
                                 h.view(self, view, vev);
                             }
                         }

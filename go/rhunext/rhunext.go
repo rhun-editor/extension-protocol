@@ -277,6 +277,18 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 		case hostRequest:
 			ext.answer(h, ev.Args)
 		case "view":
+			if rv, ok := h.(RetainedViewer); ok {
+				if open, ok := parseViewOpen(ev); ok {
+					rv.ViewOpen(ext, open)
+					continue
+				}
+				if view, rev, ok := parseRetainedEvent(ev); ok {
+					rv.ViewEvent(ext, view, rev)
+					if rev.Kind != "closed" {
+						continue
+					}
+				}
+			}
 			if v, ok := h.(Viewer); ok {
 				if view, vev, ok := parseViewEvent(ev); ok {
 					v.View(ext, view, vev)
@@ -396,6 +408,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "view" && len(ev.Args) >= 3 && viewEventHasBody(ev.Args[1]) {
+			lenAt = len(ev.Args) - 1 // retained views: the last field is the body's length
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
