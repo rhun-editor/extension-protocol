@@ -216,10 +216,12 @@
           "$ref": "#/$defs/patterns"
         },
         "actions": {
-          "$ref": "#/$defs/patterns"
+          "$ref": "#/$defs/patterns",
+          "description": "Code actions; requires negotiated actions, or code-actions (protocol 1.1: code-actions and code-action-resolve in place of actions)"
         },
         "rename": {
-          "$ref": "#/$defs/patterns"
+          "$ref": "#/$defs/patterns",
+          "description": "Rename Symbol; requires negotiated rename. With prepare-rename also agreed (protocol 1.1), F2 asks prepare-rename first"
         },
         "format": {
           "$ref": "#/$defs/patterns"

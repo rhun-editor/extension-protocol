@@ -79,8 +79,8 @@ C can include the checkout's header. Release the SDK before extensions depending
 
 ## Language features (1.1)
 
-The [language features](v1.1/v1.1.md#language-features) of protocol 1.1 add four negotiated
-features to completion, signature help, definition and references:
+The [language features](v1.1/v1.1.md#language-features) of protocol 1.1 add negotiated
+features to completion, signature help, navigation, rename, formatting and code actions:
 
 - `query-stream`: parts of a long answer and progress on one of rhun's pending requests. Go's
   `StreamingCompleter` and `StreamingLocator` get a `Stream` (`Part`, `PartLocations`, `PartItems`,
@@ -100,11 +100,36 @@ features to completion, signature help, definition and references:
   `complete_resolve` handler (`rx_resolve_answer`).
 - `signature-list`: every overload in signature help: Go's `SignatureLister`, Rust's
   `Handler::signatures` (`SignatureList`) and C's `signatures` handler (`rx_signatures_answer`).
+- `navigation`: Go to Declaration, Type Definition and Implementation, answered with locations by
+  Go's `Declarer`, `TypeDefiner` and `Implementer` (or `StreamingLocator`), Rust's
+  `Handler::declaration`, `type_definition` and `implementation` (and their `*_stream` variants),
+  and C's `declaration`, `type_definition` and `implementation` handlers (with an `rx_stream`).
+- `prepare-rename`: what F2 selects and fills the prompt with, or why nothing can be renamed:
+  Go's `RenamePreparer` (`PreparedRename`, an error refuses), Rust's `Handler::prepare_rename`
+  (`Ok(Some(PreparedRename))`, `Ok(None)` for the word at the cursor, `Err` refuses) and C's
+  `prepare_rename` handler (`rx_prepare_rename_answer`, `rx_refuse_answer`).
+- `partial-format`: Format Selection and formatting as you type, with the document's
+  `trim_trailing_whitespace` and `final_newline`: Go's `RangeFormatter` and `TypeFormatter`, Rust's
+  `Handler::range_format` and `type_format` (`RangeFormatRequest`, `TypeFormatRequest`) and C's
+  `range_format` and `type_format` handlers (`rx_range_format_ask`, `rx_type_format_ask`).
+- `code-actions`: in place of v1's `actions`, hierarchical kinds (actions of a kind not asked are
+  left out before answering), preferred and disabled actions, resolve data, command references
+  (`command NAME ARGS_LEN`) and the diagnostics fixed: Go's `CodeActionProvider2` (`Action`,
+  `CommandRef`, `CodeActionsRequest.Wants`) and `CodeActionResolver` (`ResolvedAction`), Rust's
+  `Handler::code_actions` (`Action`, `CommandRef`, `CodeActionsRequest::wants`) and
+  `code_action_resolve` (`ResolvedAction`), and C's `code_actions` handler (`rx_code_action` with
+  `rx_action_extra`, `rx_kind_wanted`) and `code_action_resolve` handler (`rx_resolved`,
+  `rx_command_ref`).
 
 The SDKs read the bodies of rhun's 1.1 requests that carry data (up to 64 KiB). The checker
 validates the new completion records, sends `complete-resolve` with the data a list gave and
 checks the resolution, asks `signatures` instead of `signature` when agreed, serves `query-part`,
-`query-progress` and `provides` against the manifest, and knows the new `[provides]` keys.
+`query-progress` and `provides` against the manifest, and knows the new `[provides]` keys. It
+asks `declaration`, `type-definition` and `implementation` and reads their locations, sends
+`prepare-rename` before a rename, `range-format` and (after typing the first trigger)
+`type-format` and checks that their edits name only the document asked about, and asks
+`code-actions` for any kind and for `quickfix`, checking kinds, the extra records and command
+names against the extension's commands, then resolves an action with `code-action-resolve`.
 
 ## Prepared snippet fields
 
