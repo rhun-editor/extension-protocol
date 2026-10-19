@@ -55,7 +55,7 @@
     "runtime": {
       "type": "string",
       "minLength": 1,
-      "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)"
+      "description": "a program found on PATH that runs the script named by 'run' (python3, node, \u2026)"
     },
     "requires": {
       "type": "string",
@@ -162,6 +162,14 @@
           ],
           "default": "none",
           "description": "read the project's Git data through rhun (feature git-data); shown as 'read the project's Git history'"
+        },
+        "debug": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "start the extension's debug adapters as the user, outside any sandbox, after one approval per project ([debugger.TYPE] sections)"
         }
       },
       "additionalProperties": false
@@ -265,6 +273,73 @@
       "type": "string",
       "description": "'no', or space-separated name patterns: '*', '*.ext', an exact file name",
       "pattern": "^\\s*(no|\\*|[^\\s]+)(\\s+[^\\s]+)*\\s*$"
+    }
+  },
+  "patternProperties": {
+    "^debugger\\.[a-z0-9-]{1,32}$": {
+      "type": "object",
+      "description": "[debugger.TYPE]: a debug adapter rhun starts and speaks DAP to (feature debug); needs [needs] debug = yes",
+      "required": [
+        "program"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "languages": {
+          "type": "string",
+          "description": "grammar names, space separated"
+        },
+        "program": {
+          "type": "string",
+          "description": "names tried in order on the login PATH and in paths, or a path inside the extension's folder"
+        },
+        "paths": {
+          "type": "string"
+        },
+        "args": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "transport": {
+          "enum": [
+            "stdio",
+            "tcp"
+          ],
+          "default": "stdio"
+        },
+        "requests": {
+          "type": "string",
+          "pattern": "^\\s*(launch|attach)(\\s+(launch|attach))*\\s*$"
+        },
+        "install": {
+          "type": "string"
+        },
+        "resolve": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no"
+        },
+        "templates": {
+          "type": "string"
+        }
+      },
+      "patternProperties": {
+        "^program\\.(linux-x86_64|macos-arm64|windows-x64)$": {
+          "type": "string"
+        },
+        "^args\\.(linux-x86_64|macos-arm64|windows-x64)$": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "^attr\\.[A-Za-z0-9_.-]+$": {
+          "type": "string",
+          "pattern": "^\\s*(string|path|int|bool|list|map|choice(\\s+[^\\s]+)+)\\s*$"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
