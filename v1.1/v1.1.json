@@ -176,6 +176,11 @@
       "pattern": "^#[0-9a-fA-F]{6}$",
       "description": "the badge's background"
     },
+    "pack": {
+      "type": "string",
+      "pattern": "^\\s*[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*(\\s+[A-Za-z0-9_-][A-Za-z0-9._-]*/[A-Za-z0-9_-][A-Za-z0-9._-]*){0,15}\\s*$",
+      "description": "a pack: other extensions installed with this one (at most 16, OWNER/NAME, space separated, not the pack itself). A pack needs no program: without run entries it never starts, and its themes and grammars load"
+    },
     "settings": {
       "type": "object",
       "description": "[settings]: the extension's own settings as KEY.FIELD = VALUE; shown on its page, sent as setting events (section 6d)",
