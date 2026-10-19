@@ -77,6 +77,20 @@ repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
 
+## Commands with arguments, context keys and status items
+
+Protocol 1.1's `command-args` tells a command where it was invoked from (`palette`, `key`, `menu`,
+`ref`) and gives it a body: a key binding's ARGS, a menu's `TARGET` line and the item's args, or a
+command reference's ARGS. Go handlers implement `Invoker` (`Invocation.From`, `.Body`,
+`.Target()` for menus), build references with `CommandRef`, run built-ins and other extensions'
+callable commands with `RunCommand`, and answer calls with `Callee` (`Call.Context` ends on
+`cancel`). Rust has `Handler::invoke`, `command_ref`, `Ext::run_command` and `Handler::call`; C has
+`rx_handlers.invoke`, `rx_menu_target`, `rx_command_ref`, `rx_run_command` and `rx_handlers.call`.
+`context-keys` sets the extension's keys for when clauses (`SetContext` / `set_context` /
+`rx_set_context`), and `status-items` adds status bar items (`SetStatusItem` with `StatusItem` /
+`set_status_item` / `rx_set_status_item`). Without `command-args` the old `Run` / `command`
+handlers keep receiving every run.
+
 ## Prepared snippet fields
 
 Protocol 1.1 adds `snippets` for editable native fields. Go provides `PreparedSnippet`, `Field`,

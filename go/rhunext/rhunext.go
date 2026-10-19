@@ -262,7 +262,15 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 		case "run":
 			if len(ev.Args) >= 2 {
 				d, _ := strconv.ParseInt(ev.Args[1], 10, 64)
-				h.Run(ext, ev.Args[0], Doc(d))
+				if inv, ok := h.(Invoker); ok {
+					i := Invocation{Command: ev.Args[0], Doc: Doc(d)}
+					if len(ev.Args) == 4 {
+						i.From, i.Body = ev.Args[2], ev.Body
+					}
+					inv.Invoke(ext, i)
+				} else {
+					h.Run(ext, ev.Args[0], Doc(d))
+				}
 			}
 		case "bye":
 			ext.closeConnection(errors.New("rhun said bye"))
@@ -390,12 +398,15 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if ev.Name == "bye" {
 			e.cancelSources(false)
 		}
-		// edits (DOC VERSION LEN) and action (LEN) are followed by a body
+		// edits (DOC VERSION LEN), action (LEN) and, with command-args, run (NAME DOC FROM LEN)
+		// are followed by a body
 		lenAt := -1
 		if ev.Name == "edits" && len(ev.Args) >= 3 {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "run" && len(ev.Args) == 4 {
+			lenAt = 3
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
@@ -435,6 +446,20 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 		if len(fields) > 1 && fields[1] == "save-actions" {
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err
+			}
+		}
+		// call (EXT.NAME DOC CALLER LEN) is followed by its ARGS; "0 cancel ID" ends its context
+		if len(fields) == 6 && fields[1] == "call" {
+			n, ok := bodyLen(fields[5], MaxRunArgs)
+			if !ok {
+				return nil, fmt.Errorf("a call's length %q", fields[5])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+			if _, err := e.beginSource(id); err != nil {
+				ev.Args = append(ev.Args, "\x00busy")
 			}
 		}
 		// commit-message (LEN) is followed by a body; "0 cancel ID" ends its context

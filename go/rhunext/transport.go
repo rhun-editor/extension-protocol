@@ -191,7 +191,8 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 		return Reply{}, err
 	}
 	hasBody := verb == "text" || verb == "range" || verb == "ask" || verb == "snippet-context" || verb == "task-output" ||
-		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show"
+		verb == "git-repo" || verb == "git-status" || verb == "git-blame" || verb == "git-log" || verb == "git-show" ||
+		verb == "run-command"
 	if len(e.pend) >= maxPendingRequests || len(e.outstanding) >= maxOutstandingIDs {
 		e.pmu.Unlock()
 		return Reply{}, &Error{Code: "busy", Text: "too many pending requests"}
@@ -224,6 +225,12 @@ func (e *Ext) RequestContext(ctx context.Context, verb string, body []byte, args
 			e.replyBodyCaps = make(map[int64]int64)
 		}
 		e.replyBodyCaps[id] = MaxTaskOutput
+	}
+	if verb == "run-command" {
+		if e.replyBodyCaps == nil {
+			e.replyBodyCaps = make(map[int64]int64)
+		}
+		e.replyBodyCaps[id] = MaxCallResult
 	}
 	e.pmu.Unlock()
 	line := itoa(id) + " " + verb

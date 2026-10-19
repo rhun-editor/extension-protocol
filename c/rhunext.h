@@ -39,6 +39,8 @@ typedef struct { rx_pos start, end; } rx_range; /* half-open */
 typedef struct rx_ext rx_ext;
 struct rx_commit_message_ask_s;                  /* source control: rx_commit_message_ask */
 struct rx_quickdiff_ask_s;                       /* and rx_quickdiff_ask */
+struct rx_invocation_s;                          /* command-args: rx_invocation */
+struct rx_call_ask_s;                            /* and rx_call_ask */
 
 /* bytes that grow: pictures, answers, anything built piece by piece */
 typedef struct { char *data; size_t len, cap; } rx_buf;
@@ -152,6 +154,13 @@ typedef struct {
     /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
      * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
     int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
+    /* Protocol 1.1, feature "command-args": every invocation of one of its commands with where it
+     * came from and its body; when set it is called instead of command. */
+    void (*invoke)(rx_ext *ext, const struct rx_invocation_s *inv, void *user);
+    /* Another extension runs a command declared callable ([command-options] NAME.callable = yes):
+     * append the result (at most 1 MiB) to out and return 1; append why not and return -1, with
+     * *code the error code (default "refused"); 0 for "unknown". A cancel event names req->id. */
+    int (*call)(rx_ext *ext, const struct rx_call_ask_s *req, rx_buf *out, const char **code, void *user);
 } rx_handlers;
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
@@ -236,6 +245,60 @@ int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, r
 /* what quickdiff gets; rx_quickdiff_refresh asks rhun to ask again for a file (NULL: every file) */
 typedef struct rx_quickdiff_ask_s { int64_t id; rx_doc doc; int64_t version; } rx_quickdiff_ask;
 int rx_quickdiff_refresh(rx_ext *ext, const char *path);
+
+/* Commands (protocol 1.1, feature "command-args"). An invocation is "0 run EXT.NAME DOC FROM LEN"
+ * and its body: from is palette (no body), key (the binding's ARGS), menu (TARGET LF the item's
+ * args) or ref (a command reference's ARGS); "" and no body without the feature. */
+typedef struct rx_invocation_s {
+    const char *command;            /* EXT.NAME */
+    const char *name;               /* NAME */
+    rx_doc doc;                     /* the document it is about, or 0 */
+    const char *from;
+    const unsigned char *body;      /* body[body_len] is 0 */
+    size_t body_len;
+} rx_invocation;
+/* a menu invocation's TARGET line ("file PATH", "tab doc DOC PATH", "item VIEW ID" …) and the
+ * item's args: 0, or -1 for other invocations */
+int rx_menu_target(const rx_invocation *inv, const char **target, size_t *target_len,
+                   const unsigned char **args, size_t *args_len);
+/* what call gets: CALLER is OWNER/NAME of the extension that called; strings live until it returns */
+typedef struct rx_call_ask_s {
+    int64_t id;
+    const char *command, *name, *caller;
+    rx_doc doc;                     /* the active document, or 0 */
+    const unsigned char *args;
+    size_t args_len;
+} rx_call_ask;
+/* append the record "command NAME LEN" LF ARGS (a reference to one of its own commands, local
+ * NAME, at most 8192 bytes of ARGS) to out: 0, or -1 without changing out */
+int rx_command_ref(rx_buf *out, const char *name, const void *args, size_t len);
+/* run a rhun built-in ("goto_line", "rhun.find") or another extension's callable command
+ * ("OWNER/EXT.NAME") with ARGS (at most 65536 bytes); its result is appended to result (may be
+ * NULL; always empty for a built-in) */
+int rx_run_command(rx_ext *ext, const char *name, const void *args, size_t len, rx_buf *result);
+/* Feature "context-keys": set one of its keys for when clauses (OWNER/NAME.KEY), one line of at
+ * most 256 bytes; rx_remove_context brings back the [context] default */
+int rx_set_context(rx_ext *ext, const char *key, const char *value);
+int rx_remove_context(rx_ext *ext, const char *key);
+/* 1 when the bytes show as they are on one line: UTF-8 without control characters (C0, DEL, C1),
+ * bidirectional controls or zero-width characters */
+int rx_plain_text(const char *s, size_t n);
+/* Feature "status-items": a status bar item, at most 8 per extension (manifest items included).
+ * align "left" or "right" (NULL: right); priority -1000..1000; text one line of at most 120 bytes
+ * ("$(NAME)" an icon); tooltip at most 500 bytes; command one of its own (local name, NULL for
+ * none) with args; color fg muted accent error warning success (NULL: muted); background NULL,
+ * error or warning; when a clause or NULL. */
+typedef struct {
+    const char *name, *align;
+    int priority;
+    const char *text, *tooltip, *command;
+    const void *args;
+    size_t args_len;
+    const char *color, *background, *when;
+} rx_status_item;
+int rx_status_item_encode(const rx_status_item *item, rx_buf *out);   /* the body; -1 when invalid */
+int rx_set_status_item(rx_ext *ext, const rx_status_item *item);
+int rx_remove_status_item(rx_ext *ext, const char *name);
 
 
 int rx_cmd(rx_ext *ext, const char *name);
@@ -437,7 +500,7 @@ typedef struct rx_msg {
 struct rx_ext {
     int64_t next_id;
     rx_msg *queue, *queue_tail;     /* messages that came while a request waited */
-    char features[256];
+    char features[1024];
     char error[512];
     int gone;
 };
@@ -562,12 +625,27 @@ static void rx_gone(rx_ext *ext, const char *why) {
 
 static const char rx_bad_len[] = "a body's length that is not a decimal of at most 10 digits within its cap";
 
-/* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
+/* the number of space-separated fields of a line */
+static int rx_nfields(const char *line) {
+    int n = 0;
+    for (const char *p = line; *p;) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        n++;
+        while (*p && *p != ' ') p++;
+    }
+    return n;
+}
+
+/* the messages followed by a body, LEN their last field: edits (6a), action (12f), run with
+ * command-args (0 run EXT.NAME DOC FROM LEN), and the requests commit-message and call */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
-    /* ID commit-message LEN */
+    if (strncmp(line, "0 run ", 6) == 0) return rx_nfields(line) == 6;
+    /* ID commit-message LEN, ID call EXT.NAME DOC CALLER LEN */
     if (line[0] < '1' || line[0] > '9') return 0;
     const char *sp = strchr(line, ' ');
+    if (sp && strncmp(sp + 1, "call ", 5) == 0) return rx_nfields(line) == 6;
     return sp && strncmp(sp + 1, "commit-message ", 15) == 0;
 }
 
@@ -634,6 +712,8 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
                      strncmp(verb_args, "git-show ", 9) == 0;
+    int run_body = strncmp(verb_args, "run-command ", 12) == 0;
+    wants_body = wants_body || run_body;
     char want[64];
     snprintf(want, sizeof want, "%lld", (long long)id);
     for (;;) {
@@ -655,7 +735,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                 }
                 if (fields) rx_buf_str(fields, rest);
                 if (wants_body) {
-                    long long blen = rx_body_len(l, context_body ? (4u << 20) : RX_BODY_MAX);
+                    long long blen = rx_body_len(l, context_body ? (4u << 20) : run_body ? (1 << 20) : RX_BODY_MAX);
                     unsigned char *b = blen >= 0 ? rx_read_body((size_t)blen) : NULL;
                     if (!b) {
                         rx_gone(ext, blen < 0 ? rx_bad_len : "rhun went away");
@@ -1080,6 +1160,154 @@ int rx_quickdiff_refresh(rx_ext *ext, const char *path) {
     char line[64];
     snprintf(line, sizeof line, "quickdiff-refresh %zu", strlen(path));
     return rx_request(ext, line, path, strlen(path), NULL, NULL);
+}
+
+/* ---- commands (protocol 1.1): command-args, context-keys, status-items ---- */
+
+static int rx_fail(rx_ext *ext, const char *why) {
+    snprintf(ext->error, sizeof ext->error, "%s", why);
+    return -1;
+}
+
+static int rx_command_name_ok(const char *name) {
+    size_t n = name ? strlen(name) : 0;
+    return n && n <= 40 && strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789_") == n;
+}
+
+int rx_menu_target(const rx_invocation *inv, const char **target, size_t *target_len,
+                   const unsigned char **args, size_t *args_len) {
+    if (!inv->from || strcmp(inv->from, "menu") != 0) return -1;
+    const unsigned char *b = inv->body ? inv->body : (const unsigned char *)"";
+    const unsigned char *lf = inv->body_len ? (const unsigned char *)memchr(b, '\n', inv->body_len) : NULL;
+    size_t tl = lf ? (size_t)(lf - b) : inv->body_len;
+    if (target) *target = (const char *)b;
+    if (target_len) *target_len = tl;
+    if (args) *args = lf ? lf + 1 : b + inv->body_len;
+    if (args_len) *args_len = lf ? inv->body_len - tl - 1 : 0;
+    return 0;
+}
+
+int rx_command_ref(rx_buf *out, const char *name, const void *args, size_t len) {
+    if (!rx_command_name_ok(name) || len > 8192) return -1;
+    rx_buf_fmt(out, "command %s %zu\n", name, len);
+    rx_buf_add(out, args ? args : "", len);
+    return 0;
+}
+
+int rx_run_command(rx_ext *ext, const char *name, const void *args, size_t len, rx_buf *result) {
+    if (!rx_has(ext, "command-args")) return rx_fail(ext, "unknown command-args was not agreed");
+    size_t n = name ? strlen(name) : 0;
+    if (!n || n > 200 || strpbrk(name, " \r\n")) return rx_fail(ext, "syntax not a command name");
+    if (len > 65536) return rx_fail(ext, "toobig run-command args are at most 65536 bytes");
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "run-command %s %zu", name, len);
+    int r = rx_request(ext, line.data, args, len, NULL, result);
+    rx_buf_free(&line);
+    return r;
+}
+
+int rx_plain_text(const char *s, size_t n) {
+    const unsigned char *p = (const unsigned char *)s, *end = p + n;
+    while (p < end) {
+        uint32_t c = *p;
+        int k = c < 0x80 ? 0 : (c & 0xe0) == 0xc0 ? 1 : (c & 0xf0) == 0xe0 ? 2 : (c & 0xf8) == 0xf0 ? 3 : -1;
+        if (k < 0 || end - p <= k) return 0;
+        if (k) c &= 0x3f >> k;
+        for (int i = 1; i <= k; i++) {
+            if ((p[i] & 0xc0) != 0x80) return 0;
+            c = c << 6 | (p[i] & 0x3f);
+        }
+        static const uint32_t least[4] = {0, 0x80, 0x800, 0x10000};
+        if (c < least[k] || c > 0x10ffff || (c >= 0xd800 && c <= 0xdfff)) return 0;
+        if (c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0) || (c >= 0x202a && c <= 0x202e) ||
+            (c >= 0x2066 && c <= 0x2069) || (c >= 0x200b && c <= 0x200f) || c == 0x2060 || c == 0xfeff)
+            return 0;
+        p += k + 1;
+    }
+    return 1;
+}
+
+static int rx_context(rx_ext *ext, const char *key, const char *value) {
+    if (!rx_has(ext, "context-keys")) return rx_fail(ext, "unknown context-keys was not agreed");
+    size_t kn = key ? strlen(key) : 0;
+    if (!kn || kn > 40 || key[0] < 'a' || key[0] > 'z' ||
+        strspn(key, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") != kn)
+        return rx_fail(ext, "syntax a context key is a lowercase letter, then letters, digits and _, at most 40 bytes");
+    size_t vn = value ? strlen(value) : 0;
+    if (vn > 256) return rx_fail(ext, "toobig a context value is at most 256 bytes");
+    if (!vn || value[0] == ' ' || !rx_plain_text(value, vn)) return rx_fail(ext, "syntax a context value is one line of text");
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "set-context %s %s", key, value);
+    int r = rx_request(ext, line.data, NULL, 0, NULL, NULL);
+    rx_buf_free(&line);
+    return r;
+}
+
+int rx_set_context(rx_ext *ext, const char *key, const char *value) {
+    if (value && strcmp(value, "-") == 0) return rx_fail(ext, "syntax \"-\" removes a key: use rx_remove_context");
+    return rx_context(ext, key, value);
+}
+
+int rx_remove_context(rx_ext *ext, const char *key) { return rx_context(ext, key, "-"); }
+
+static int rx_one_of(const char *s, const char *const *words) {
+    for (; *words; words++)
+        if (strcmp(s, *words) == 0) return 1;
+    return 0;
+}
+
+int rx_status_item_encode(const rx_status_item *it, rx_buf *out) {
+    static const char *const colors[] = {"fg", "muted", "accent", "error", "warning", "success", NULL};
+    static const char *const backgrounds[] = {"error", "warning", NULL};
+    const char *align = it->align && *it->align ? it->align : "right";
+    const char *text = it->text ? it->text : "", *tip = it->tooltip ? it->tooltip : "";
+    size_t tn = strlen(text), pn = strlen(tip), wn = it->when ? strlen(it->when) : 0;
+    if (!rx_command_name_ok(it->name) || (strcmp(align, "left") != 0 && strcmp(align, "right") != 0) ||
+        it->priority < -1000 || it->priority > 1000 || tn > 120 || !rx_plain_text(text, tn) || pn > 500 ||
+        (it->color && *it->color && !rx_one_of(it->color, colors)) ||
+        (it->background && *it->background && !rx_one_of(it->background, backgrounds)) ||
+        wn > 512 || (wn && strpbrk(it->when, "\r\n")))
+        return -1;
+    rx_buf extra = {NULL, 0, 0};
+    if (it->command && *it->command && rx_command_ref(&extra, it->command, it->args, it->args_len) < 0) {
+        rx_buf_free(&extra);
+        return -1;
+    }
+    if (it->color && *it->color) rx_buf_fmt(&extra, "color %s 0\n", it->color);
+    if (it->background && *it->background) rx_buf_fmt(&extra, "background %s 0\n", it->background);
+    if (wn) {
+        rx_buf_fmt(&extra, "when %zu\n", wn);
+        rx_buf_add(&extra, it->when, wn);
+    }
+    rx_buf_fmt(out, "%s %d %zu %zu %zu\n", align, it->priority, tn, pn, extra.len);
+    rx_buf_add(out, text, tn);
+    rx_buf_add(out, tip, pn);
+    rx_buf_add(out, extra.data ? extra.data : "", extra.len);
+    rx_buf_free(&extra);
+    return 0;
+}
+
+int rx_set_status_item(rx_ext *ext, const rx_status_item *item) {
+    if (!rx_has(ext, "status-items")) return rx_fail(ext, "unknown status-items was not agreed");
+    rx_buf body = {NULL, 0, 0};
+    if (rx_status_item_encode(item, &body) < 0) {
+        rx_buf_free(&body);
+        return rx_fail(ext, "syntax not a valid status item");
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "status-item %s %zu", item->name, body.len);
+    int r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    rx_buf_free(&line);
+    rx_buf_free(&body);
+    return r;
+}
+
+int rx_remove_status_item(rx_ext *ext, const char *name) {
+    if (!rx_has(ext, "status-items")) return rx_fail(ext, "unknown status-items was not agreed");
+    if (!rx_command_name_ok(name)) return rx_fail(ext, "syntax a status item's name is 1 to 40 of a-z 0-9 _");
+    char line[64];
+    snprintf(line, sizeof line, "status-remove %s", name);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
 }
 
 int rx_cmd(rx_ext *ext, const char *name) {
@@ -2377,6 +2605,36 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
             rx_positive_num(f[3], INT64_MAX, &req.version))
             ok = h->quickdiff(ext, &req, &body, user);
+    } else if (strcmp(verb, "call") == 0 && n == 6 && h->call && rx_has(ext, "command-args") &&
+               strchr(f[2], '.') && f[4][0]) {
+        rx_call_ask req;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 && rx_positive_num(f[3], INT64_MAX, &req.doc)) {
+            req.command = f[2];
+            req.name = strchr(f[2], '.') + 1;
+            req.caller = f[4];
+            req.args = rbody ? rbody : (const unsigned char *)"";
+            req.args_len = rbody_len;
+            rx_buf out = {NULL, 0, 0};
+            const char *code = "refused";
+            int r = h->call(ext, &req, &out, &code, user);
+            if (r > 0 && out.len > (1u << 20)) {
+                e.fail = "toobig";
+                snprintf(e.why, sizeof e.why, "a call's result is at most 1048576 bytes");
+                ok = 1;
+            } else if (r > 0) {
+                rx_buf_add(&body, out.data ? out.data : "", out.len);
+                ok = 1;
+            } else if (r < 0) {
+                size_t cl = code ? strlen(code) : 0;
+                e.fail = cl && cl <= 40 && strspn(code, "abcdefghijklmnopqrstuvwxyz") == cl ? code : "refused";
+                size_t w = 0;
+                for (size_t i = 0; i < out.len && w + 1 < sizeof e.why; i++)
+                    e.why[w++] = out.data[i] == '\n' || out.data[i] == '\r' ? ' ' : out.data[i];
+                e.why[w] = 0;
+                ok = 1;
+            }
+            rx_buf_free(&out);
+        }
     } else if (strcmp(verb, "commit-message") == 0 && n == 3 && h->commit_message && rx_has(ext, "commit-message")) {
         rx_commit_message_ask req;
         if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
@@ -2401,7 +2659,8 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         }
     }
     if (ok && e.fail) {
-        rx_buf_fmt(&line, "error %s %s %s", f[0], e.fail, e.why);     /* why is one line */
+        if (e.why[0]) rx_buf_fmt(&line, "error %s %s %s", f[0], e.fail, e.why);     /* why is one line */
+        else rx_buf_fmt(&line, "error %s %s", f[0], e.fail);
         rx_write(line.data, NULL, 0);
     } else if (ok) {
         rx_buf_fmt(&line, "ok %s %zu", f[0], body.len);
@@ -2443,7 +2702,7 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
     static rx_ext ext_s;
     rx_ext *ext = &ext_s;
     memset(ext, 0, sizeof *ext);
-    char hello[300];
+    char hello[1024];
     snprintf(hello, sizeof hello, "hello 1%s%s", features && *features ? " " : "", features ? features : "");
     rx_write(hello, NULL, 0);
     for (;;) {
@@ -2473,9 +2732,20 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
             if (h->event) h->event(ext, &ev, user);
             if (strcmp(f[1], "ready") == 0 && h->ready) {
                 h->ready(ext, strcmp(ev.rest, "-") == 0 ? "" : ev.rest, user);
-            } else if (strcmp(f[1], "run") == 0 && n >= 4 && h->command) {
+            } else if (strcmp(f[1], "run") == 0 && n >= 4 && (h->invoke || h->command)) {
                 const char *dot = strchr(f[2], '.');
-                h->command(ext, dot ? dot + 1 : f[2], atoll(f[3]), user);
+                if (h->invoke) {
+                    rx_invocation inv;
+                    inv.command = f[2];
+                    inv.name = dot ? dot + 1 : f[2];
+                    inv.doc = atoll(f[3]);
+                    inv.from = n == 6 ? f[4] : "";
+                    inv.body = m->body ? m->body : (const unsigned char *)"";
+                    inv.body_len = m->body_len;
+                    h->invoke(ext, &inv, user);
+                } else {
+                    h->command(ext, dot ? dot + 1 : f[2], atoll(f[3]), user);
+                }
             } else if (strcmp(f[1], "view") == 0 && h->view) {
                 rx_view_dispatch(ext, h, user, f, n);
             } else if (strcmp(f[1], "action") == 0 && h->action) {

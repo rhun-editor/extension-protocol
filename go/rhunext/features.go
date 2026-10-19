@@ -508,6 +508,18 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 				}
 			}
 		}
+	case "call":
+		id, _ := strconv.ParseInt(f[0], 10, 64)
+		if len(f) == 7 && f[6] == "\x00busy" {
+			// more calls waiting than an extension keeps: answered at once
+			known, rerr = true, &Error{Code: "busy", Text: "too many calls"}
+			break
+		}
+		source := e.sourceFor(id)
+		if source != nil {
+			defer e.finishSource(source)
+			body, rerr, known = e.answerCall(h, id, f[2:], reqBody, source.ctx)
+		}
 	case FeatureQuickDiff:
 		q, is := h.(QuickDiffProvider)
 		if is && e.Has(FeatureQuickDiff) && len(f) == 4 {

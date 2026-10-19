@@ -258,6 +258,57 @@
         }
       },
       "additionalProperties": false
+    },
+    "command-options": {
+      "type": "object",
+      "description": "[command-options] (protocol 1.1): per manifest command, NAME.icon (a built-in icon or ext:NAME from [icons]), NAME.when (enablement: a when clause), NAME.palette (no: not listed in the palette), NAME.callable (yes: other extensions may run-command it; needs command-args). A bad entry is dropped and listed on the extension's page.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(icon|when|palette|callable)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "keys": {
+      "type": "object",
+      "description": "[keys] (protocol 1.1): KEYS = COMMAND [ARGS] [when CLAUSE]; KEYS one stroke or two separated by a space (ctrl+k ctrl+c), optionally prefixed linux:, mac: or windows:; COMMAND NAME (own), rhun.NAME or EXT.NAME / OWNER/EXT.NAME; ARGS (at most 4096 bytes) are the body of 0 run ... key LEN.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "context": {
+      "type": "object",
+      "description": "[context] (feature context-keys): defaults of the extension's keys for when clauses (OWNER/NAME.KEY), valid before the program starts and after it stops; at most 64 keys.",
+      "propertyNames": {
+        "pattern": "^[a-z][A-Za-z0-9_]{0,39}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "status": {
+      "type": "object",
+      "description": "[status] (protocol 1.1): status bar items, ITEM.FIELD with FIELD text, tooltip, command (own command, run with FROM ref), args, align (left|right), priority (-1000..1000), color (fg muted accent error warning success), background (error|warning), when; at most 8 items with the runtime ones.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_]{1,40}\\.(text|tooltip|command|args|align|priority|color|background|when)$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "icons": {
+      "type": "object",
+      "description": "[icons] (protocol 1.1): NAME = a PNG in the extension's folder (at most 65536 bytes, 256 pixels a side), used as ext:NAME in status items, menus and buttons; at most 32.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9_-]{1,40}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "\\.png$"
+      }
     }
   },
   "$defs": {
@@ -265,6 +316,18 @@
       "type": "string",
       "description": "'no', or space-separated name patterns: '*', '*.ext', an exact file name",
       "pattern": "^\\s*(no|\\*|[^\\s]+)(\\s+[^\\s]+)*\\s*$"
+    }
+  },
+  "patternProperties": {
+    "^(menu\\.(editor|explorer|tab|terminal|extension|editor_title|view_title|view_item|view_item_inline|history_commit|history_file|scm_resource|scm_group)|submenu\\.[a-z0-9_]{1,40})$": {
+      "type": "object",
+      "description": "[menu.LOCATION] and [submenu.NAME] (protocol 1.1): ITEM.command (a command as [keys] names it), ITEM.submenu (a [submenu.NAME]), ITEM.group, ITEM.order, ITEM.when, ITEM.args; [submenu.NAME] also has title. At most 16 items per extension per location.",
+      "propertyNames": {
+        "pattern": "^(title|[a-z0-9_]{1,40}\\.(command|submenu|group|order|when|args))$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
     }
   }
 }

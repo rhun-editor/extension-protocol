@@ -33,6 +33,7 @@
 #![allow(clippy::needless_doctest_main)]
 
 pub mod chart;
+pub mod commands;
 pub mod complete;
 pub mod lang;
 pub mod picture;
@@ -49,6 +50,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+pub use commands::{command_ref, CallRequest, Invocation, MenuTarget, StatusItem};
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, SignatureHelp, SignatureRequest,
 };
@@ -158,6 +160,13 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Where commands are invoked from and their bodies ([`Handler::invoke`]), command
+    /// references ([`command_ref`]), [`Ext::run_command`] and [`Handler::call`] (protocol 1.1).
+    CommandArgs,
+    /// The extension's own keys for when clauses: [`Ext::set_context`].
+    ContextKeys,
+    /// Status bar items: [`Ext::set_status_item`], [`Ext::remove_status_item`].
+    StatusItems,
 }
 
 impl Feature {
@@ -181,6 +190,9 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::CommandArgs => "command-args",
+            Feature::ContextKeys => "context-keys",
+            Feature::StatusItems => "status-items",
         }
     }
 }
@@ -509,6 +521,22 @@ pub trait Handler: Send {
     /// One of the extension's commands: `name` without the `NAME.` prefix; `doc` the active
     /// document or 0.
     fn command(&mut self, _ext: &Ext, _name: &str, _doc: Doc) {}
+    /// Every invocation of one of the extension's commands, with where it came from and its body
+    /// (feature `command-args`; without it `from` and `body` are empty). The default calls
+    /// [`Handler::command`].
+    fn invoke(&mut self, ext: &Ext, inv: &Invocation) {
+        self.command(ext, &inv.name, inv.doc);
+    }
+    /// Another extension runs one of this extension's commands declared callable
+    /// (`[command-options] NAME.callable = yes`, feature `command-args`): the result (at most
+    /// 1 MiB) or an error with its code and text, which go back to the caller. A `cancel` event
+    /// names `req.id`.
+    fn call(&mut self, _ext: &Ext, _req: &CallRequest) -> Result<Vec<u8>, Error> {
+        Err(Error {
+            code: "refused".into(),
+            text: "not callable".into(),
+        })
+    }
     /// One of its own settings (section 6d): at start and on every change.
     fn setting(&mut self, _ext: &Ext, _key: &str, _value: &str) {}
     /// Something happened in one of its views.
@@ -1091,6 +1119,7 @@ impl Ext {
                                 | "git-blame"
                                 | "git-log"
                                 | "git-show"
+                                | "run-command"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -1100,6 +1129,11 @@ impl Ext {
                                 .and_then(|v| usize::try_from(v).ok())
                             {
                                 Some(n) if n <= snippet::MAX_BODY => n,
+                                _ => break,
+                            }
+                        } else if verb == "run-command" {
+                            match fields.last().and_then(|v| v.parse::<usize>().ok()) {
+                                Some(n) if n <= commands::MAX_CALL_RESULT => n,
                                 _ => break,
                             }
                         } else {
@@ -1134,7 +1168,11 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" {
+                    // with command-args, run is NAME DOC FROM LEN and a body
+                    if ev.name == "edits"
+                        || ev.name == "action"
+                        || (ev.name == "run" && ev.fields.len() == 4)
+                    {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1159,7 +1197,7 @@ impl Ext {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
                         let mut body = Vec::new();
-                        if verb == "commit-message" {
+                        if verb == "commit-message" || (verb == "call" && rest.len() == 4) {
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
                             let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
                                 Some(n) if n <= 4 << 20 => n,
@@ -1215,12 +1253,12 @@ impl Ext {
                         }
                         "run" => {
                             let full = ev.fields.first().cloned().unwrap_or_default();
-                            let short = full
-                                .split_once('.')
-                                .map(|(_, c)| c)
-                                .unwrap_or(&full)
-                                .to_string();
-                            h.command(self, &short, ev.num(1));
+                            let (from, body) = if ev.fields.len() == 4 {
+                                (ev.fields[2].as_str(), ev.body.clone())
+                            } else {
+                                ("", Vec::new())
+                            };
+                            h.invoke(self, &Invocation::new(&full, ev.num(1), from, body));
                         }
                         "setting" => {
                             let mut it = ev.rest.splitn(2, ' ');
@@ -1247,6 +1285,8 @@ impl Ext {
                     fields,
                     body: req_body,
                 } => {
+                    // a call's error code is the callee's own
+                    let mut call_code = String::new();
                     let body: Option<Result<Vec<u8>, (&str, String)>> = match verb.as_str() {
                         "complete" => CompleteRequest::parse(&fields)
                             .map(|r| Ok(h.complete(self, &r).encode().into_bytes())),
@@ -1280,6 +1320,30 @@ impl Ext {
                                 }
                             })
                         }
+                        "call" if self.has(Feature::CommandArgs) => {
+                            match CallRequest::parse(id, &fields, req_body) {
+                                Some(r) => match h.call(self, &r) {
+                                    Ok(b) if b.len() > commands::MAX_CALL_RESULT => Some(Err((
+                                        "toobig",
+                                        "a call's result is at most 1048576 bytes".to_string(),
+                                    ))),
+                                    Ok(b) => Some(Ok(b)),
+                                    Err(e) => {
+                                        let code = if !e.code.is_empty()
+                                            && e.code.len() <= 40
+                                            && e.code.bytes().all(|b| b.is_ascii_lowercase())
+                                        {
+                                            e.code
+                                        } else {
+                                            "refused".to_string()
+                                        };
+                                        call_code = code;
+                                        Some(Err(("", e.text)))
+                                    }
+                                },
+                                None => None,
+                            }
+                        }
                         "quickdiff" if self.has(Feature::QuickDiff) => {
                             QuickDiffRequest::parse(id, &fields)
                                 .map(|r| Ok(h.quickdiff(self, &r).unwrap_or_default()))
@@ -1300,6 +1364,11 @@ impl Ext {
                     let _ = match body {
                         Some(Ok(b)) => self.write(&format!("ok {id} {}", b.len()), &b),
                         Some(Err((code, why))) => {
+                            let code = if code.is_empty() {
+                                call_code.as_str()
+                            } else {
+                                code
+                            };
                             // one line, at most 1000 bytes: rhun shows a sentence
                             let mut why: String = why
                                 .trim()
