@@ -120,6 +120,10 @@ typedef struct {
     char why[256];                  /* syntax) and why, one line */
 } rx_wedit;
 
+struct rx_view_open;            /* retained views, below */
+struct rx_retained_event;
+struct rx_children_ask;
+struct rx_patch_s;
 typedef struct {
     void (*ready)(rx_ext *ext, const char *project, void *user);    /* project "" without one */
     void (*command)(rx_ext *ext, const char *name, rx_doc doc, void *user);   /* name without "NAME." */
@@ -152,7 +156,92 @@ typedef struct {
     /* Quick-diff bases (feature "quickdiff", [provides] quickdiff = PATTERNS): append the file's
      * base text to out (nothing: leave the gutter marks to git) and return 1; 0 for "unknown". */
     int (*quickdiff)(rx_ext *ext, const struct rx_quickdiff_ask_s *req, rx_buf *out, void *user);
+    /* Retained views (1.1, feature "view-tree"): a declared view's instance exists (fill it with
+     * rx_view_patch), and what the user did in one. */
+    void (*view_open)(rx_ext *ext, const struct rx_view_open *open, void *user);
+    void (*view_event)(rx_ext *ext, int64_t view, const struct rx_retained_event *ev, void *user);
+    /* rhun asks for a node's children (vkids, have -1) or more of them (vmore, have: how many it
+     * has): build the patch in out (a kids or add op for the node) and return 1; 0 for "unknown";
+     * set out->fail to a reason to refuse */
+    int (*view_children)(rx_ext *ext, const struct rx_children_ask *req, struct rx_patch_s *out, void *user);
 } rx_handlers;
+
+/* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
+ * (KEY.title, KEY.place = sidebar|panel|side, KEY.kind = tree, KEY.open = yes) whose content rhun
+ * keeps. A declared view's instance: "0 view VIEW open KIND PLACE NAME". */
+typedef struct rx_view_open {
+    int64_t view;
+    const char *kind;           /* tree */
+    const char *place;          /* sidebar, panel, side or tab */
+    const char *name;           /* the manifest key, or "-" */
+} rx_view_open;
+/* what the user did: kind visible, focus, select, activate, expand, collapse, check, action,
+ * discarded, closed (or another word, with its fields in argv); on for visible, focus and check;
+ * rev the content the user acted on; id the node (select: the first one; body holds them all,
+ * each ending in LF); key an action's key or what was discarded */
+typedef struct rx_retained_event {
+    const char *kind;
+    int on;
+    int64_t rev;
+    const unsigned char *id;
+    size_t id_len;
+    const char *key;
+    int argc;
+    char **argv;
+    const unsigned char *body;
+    size_t body_len;
+} rx_retained_event;
+/* A patch: ops applied in order, whole or not at all. Build node records into an rx_buf with
+ * rx_node_rec (their extra records with the rx_x_* builders first), then rx_patch_kids. */
+typedef struct rx_patch_s { rx_buf body; int n; long nodes; const char *fail; } rx_patch;
+typedef struct rx_children_ask {
+    int64_t id, view, rev, have;    /* have: -1 for vkids */
+    const unsigned char *node;      /* the node's id (empty: the root) */
+    size_t node_len;
+} rx_children_ask;
+/* an action: key [a-z0-9_]{1,40}, icon a built-in name or NULL, where "title", "node" or "none" */
+void rx_patch_action(rx_patch *p, const char *key, const char *icon, const char *where, const char *title);
+void rx_patch_select_mode(rx_patch *p, int multi);
+void rx_x_inline(rx_buf *x, const char *keys);     /* space separated, 4 at most */
+void rx_x_menu(rx_buf *x, const char *keys);       /* 16 at most */
+/* expands a node's ancestors and scrolls it into view; how "-" or a comma list of select, focus, expand */
+int rx_vreveal(rx_ext *ext, int64_t view, const char *id, size_t len, const char *how);
+void rx_patch_title(rx_patch *p, const char *title);         /* at most 80 bytes; "" the manifest's */
+void rx_patch_badge(rx_patch *p, int n);
+void rx_patch_message(rx_patch *p, const char *text);        /* "" clears it */
+/* state: "ready", "loading", "empty", "error"; text and keys (space separated, up to 3) for the last two */
+void rx_patch_state(rx_patch *p, const char *state, const char *text, const char *keys);
+void rx_patch_busy(rx_patch *p, int on);
+/* records: n node records (rx_node_rec); parent "" with plen 0 is the root; more 1: "Load more" */
+void rx_patch_kids(rx_patch *p, const char *parent, size_t plen, const rx_buf *records, int n, int more);
+void rx_patch_add(rx_patch *p, const char *parent, size_t plen, const rx_buf *records, int n, int more);
+void rx_patch_set(rx_patch *p, const rx_buf *record);
+void rx_patch_del(rx_patch *p, const char *id, size_t len);
+void rx_patch_expand(rx_patch *p, const char *id, size_t len);
+void rx_patch_collapse(rx_patch *p, const char *id, size_t len);
+void rx_patch_raw(rx_patch *p, const char *head, const void *data, size_t len);
+void rx_patch_free(rx_patch *p);
+/* one node record: id (1 to 1000 bytes, no LF or NUL), a one-line label, kids "leaf", "closed" or
+ * "open", its extra records (or NULL); 0, or -1 for a bad id */
+int rx_node_rec(rx_buf *out, const char *id, size_t idlen, const char *label, const char *kids, const rx_buf *extra);
+void rx_x_desc(rx_buf *x, const char *text);
+void rx_x_tip(rx_buf *x, const char *text);
+/* spec: a built-in icon name, "file:NAME" or "ext:KEY"; color a color name or "-" */
+void rx_x_icon(rx_buf *x, const char *spec, const char *color);
+void rx_x_color(rx_buf *x, const char *color);
+void rx_x_hl(rx_buf *x, int from, int to);
+void rx_x_badge(rx_buf *x, int n);
+void rx_x_check(rx_buf *x, int on);
+void rx_x_ctx(rx_buf *x, const char *value);
+void rx_x_data(rx_buf *x, const void *data, size_t len);
+void rx_x_open(rx_buf *x, const char *path, int line, int col);
+void rx_x_command(rx_buf *x, const char *name, const void *args, size_t len);
+/* any record: "HEAD LEN" LF and the data */
+void rx_rec(rx_buf *b, const char *head, const void *data, size_t len);
+/* the view's new revision, or -1 (rx_error says why: noview, syntax op N, badpos OP ID, toobig) */
+int64_t rx_view_patch(rx_ext *ext, int64_t view, const rx_patch *p);
+/* opens a declared view's place on it; focus 1 also gives it the keyboard; its view number */
+int64_t rx_vshow(rx_ext *ext, const char *name, int focus);
 
 /* Speaks the protocol on standard input and output until rhun says bye (0) or goes away (1). */
 int rx_run(const char *features, const rx_handlers *h, void *user);
@@ -562,13 +651,29 @@ static void rx_gone(rx_ext *ext, const char *why) {
 
 static const char rx_bad_len[] = "a body's length that is not a decimal of at most 10 digits within its cap";
 
-/* the events followed by a body, LEN their last field: edits (6a) and action (12f) */
+/* the messages followed by a body, LEN their last field: the events edits (6a), action (12f) and
+ * retained views' (1.1), and the requests below */
 static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0) return 1;
-    /* ID commit-message LEN */
-    if (line[0] < '1' || line[0] > '9') return 0;
-    const char *sp = strchr(line, ' ');
-    return sp && strncmp(sp + 1, "commit-message ", 15) == 0;
+    if (line[0] >= '1' && line[0] <= '9') {
+        /* requests: ID commit-message ... LEN; vkids, vmore (the node id follows) */
+        static const char *const req[] = {"commit-message ", "vkids ", "vmore ", NULL};
+        const char *v = strchr(line, ' ');
+        if (!v) return 0;
+        for (int i = 0; req[i]; i++)
+            if (strncmp(v + 1, req[i], strlen(req[i])) == 0) return 1;
+        return 0;
+    }
+    if (strncmp(line, "0 view ", 7) != 0) return 0;
+    /* retained views: "0 view VIEW WHAT ... LEN" for these WHATs */
+    const char *w = strchr(line + 7, ' ');
+    if (!w) return 0;
+    w++;
+    static const char *with[] = {"select ", "activate ", "expand ", "collapse ", "check ", "action ",
+                                 "discarded ", "change ", "link ", NULL};
+    for (int i = 0; with[i]; i++)
+        if (strncmp(w, with[i], strlen(with[i])) == 0) return 1;
+    return 0;
 }
 
 /* reads the next message: a line, and a body when it is an edits or action event; NULL when the
@@ -2415,6 +2520,204 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
     rx_buf_free(&body);
 }
 
+/* ---- retained views ---- */
+
+void rx_rec(rx_buf *b, const char *head, const void *data, size_t len) {
+    rx_buf_fmt(b, "%s %zu\n", head, len);
+    if (len) rx_buf_add(b, data, len);
+}
+
+static size_t rx_line_len(const char *s, size_t max) {
+    size_t n = 0;
+    while (s[n] && s[n] != '\n' && s[n] != '\r' && n < max) n++;
+    while (n < strlen(s) && n > 0 && n == max && ((unsigned char)s[n] & 0xc0) == 0x80) n--;
+    return n;
+}
+
+void rx_x_desc(rx_buf *x, const char *text) { rx_rec(x, "desc", text, rx_line_len(text, 1000)); }
+void rx_x_tip(rx_buf *x, const char *text) { size_t n = strlen(text); rx_rec(x, "tip", text, n > 4000 ? 4000 : n); }
+void rx_x_icon(rx_buf *x, const char *spec, const char *color) {
+    rx_buf h = {NULL, 0, 0};
+    rx_buf_fmt(&h, "icon %s %s", spec, color && *color ? color : "-");
+    rx_rec(x, h.data, NULL, 0);
+    rx_buf_free(&h);
+}
+void rx_x_color(rx_buf *x, const char *color) { rx_buf_fmt(x, "color %s 0\n", color); }
+void rx_x_hl(rx_buf *x, int from, int to) { rx_buf_fmt(x, "hl %d %d 0\n", from, to); }
+void rx_x_badge(rx_buf *x, int n) { rx_buf_fmt(x, "badge %d 0\n", n); }
+void rx_x_check(rx_buf *x, int on) { rx_buf_fmt(x, "check %d 0\n", on ? 1 : 0); }
+void rx_x_ctx(rx_buf *x, const char *value) { size_t n = strlen(value); rx_rec(x, "ctx", value, n > 100 ? 100 : n); }
+void rx_x_data(rx_buf *x, const void *data, size_t len) { rx_rec(x, "data", data, len > 4096 ? 4096 : len); }
+void rx_x_open(rx_buf *x, const char *path, int line, int col) {
+    rx_buf h = {NULL, 0, 0};
+    rx_buf_fmt(&h, "open %d %d", line, col);
+    rx_rec(x, h.data, path, strlen(path));
+    rx_buf_free(&h);
+}
+void rx_x_command(rx_buf *x, const char *name, const void *args, size_t len) {
+    rx_buf h = {NULL, 0, 0};
+    rx_buf_fmt(&h, "command %s", name);
+    rx_rec(x, h.data, args, len);
+    rx_buf_free(&h);
+}
+
+int rx_node_rec(rx_buf *out, const char *id, size_t idlen, const char *label, const char *kids, const rx_buf *extra) {
+    if (idlen == 0 || idlen > 1000 || memchr(id, '\n', idlen) || memchr(id, 0, idlen)) return -1;
+    size_t ln = rx_line_len(label, 1000);
+    size_t xn = extra ? extra->len : 0;
+    rx_buf_fmt(out, "%zu %zu %zu %s\n", idlen, ln, xn, kids);
+    rx_buf_add(out, id, idlen);
+    rx_buf_add(out, label, ln);
+    if (xn) rx_buf_add(out, extra->data, xn);
+    return 0;
+}
+
+static void rx_patch_op(rx_patch *p, const char *head, const void *data, size_t len) {
+    rx_rec(&p->body, head, data, len);
+    p->n++;
+}
+void rx_patch_title(rx_patch *p, const char *title) { rx_patch_op(p, "title", title, rx_line_len(title, 80)); }
+void rx_patch_badge(rx_patch *p, int n) { rx_buf_fmt(&p->body, "badge %d 0\n", n); p->n++; }
+void rx_patch_message(rx_patch *p, const char *text) { rx_patch_op(p, "message", text, rx_line_len(text, 1000)); }
+void rx_patch_state(rx_patch *p, const char *state, const char *text, const char *keys) {
+    size_t tn = text ? rx_line_len(text, 1000) : 0, kn = keys ? strlen(keys) : 0;
+    rx_buf_fmt(&p->body, "state %s %zu %zu\n", state, tn, tn + kn);
+    if (tn) rx_buf_add(&p->body, text, tn);
+    if (kn) rx_buf_add(&p->body, keys, kn);
+    p->n++;
+}
+void rx_patch_busy(rx_patch *p, int on) { rx_buf_fmt(&p->body, "busy %d 0\n", on ? 1 : 0); p->n++; }
+static void rx_patch_children(rx_patch *p, const char *op, const char *parent, size_t plen, const rx_buf *records, int n, int more) {
+    size_t rn = records ? records->len : 0;
+    rx_buf_fmt(&p->body, "%s %zu %d %d %zu\n", op, plen, n, more ? 1 : 0, plen + rn);
+    if (plen) rx_buf_add(&p->body, parent, plen);
+    if (rn) rx_buf_add(&p->body, records->data, rn);
+    p->nodes += n;
+    p->n++;
+}
+void rx_patch_kids(rx_patch *p, const char *parent, size_t plen, const rx_buf *records, int n, int more) {
+    rx_patch_children(p, "kids", parent, plen, records, n, more);
+}
+void rx_patch_add(rx_patch *p, const char *parent, size_t plen, const rx_buf *records, int n, int more) {
+    rx_patch_children(p, "add", parent, plen, records, n, more);
+}
+void rx_patch_set(rx_patch *p, const rx_buf *record) { rx_patch_op(p, "set", record->data, record->len); }
+void rx_patch_del(rx_patch *p, const char *id, size_t len) { rx_patch_op(p, "del", id, len); }
+void rx_patch_expand(rx_patch *p, const char *id, size_t len) { rx_patch_op(p, "expand", id, len); }
+void rx_patch_collapse(rx_patch *p, const char *id, size_t len) { rx_patch_op(p, "collapse", id, len); }
+void rx_patch_raw(rx_patch *p, const char *head, const void *data, size_t len) { rx_patch_op(p, head, data, len); }
+void rx_patch_free(rx_patch *p) { rx_buf_free(&p->body); p->n = 0; p->nodes = 0; }
+void rx_patch_action(rx_patch *p, const char *key, const char *icon, const char *where, const char *title) {
+    rx_buf h = {NULL, 0, 0};
+    rx_buf_fmt(&h, "action %s %s %s", key, icon && *icon ? icon : "-", where);
+    rx_patch_op(p, h.data, title, rx_line_len(title, 200));
+    rx_buf_free(&h);
+}
+void rx_patch_select_mode(rx_patch *p, int multi) { rx_buf_fmt(&p->body, "select-mode %s 0\n", multi ? "multi" : "single"); p->n++; }
+void rx_x_inline(rx_buf *x, const char *keys) { rx_rec(x, "inline", keys, strlen(keys)); }
+void rx_x_menu(rx_buf *x, const char *keys) { rx_rec(x, "menu", keys, strlen(keys)); }
+int rx_vreveal(rx_ext *ext, int64_t view, const char *id, size_t len, const char *how) {
+    char line[160];
+    snprintf(line, sizeof line, "vreveal %lld %s %zu", (long long)view, how && *how ? how : "-", len);
+    return rx_request(ext, line, id, len, NULL, NULL);
+}
+
+/* vkids VIEW REV LEN, vmore VIEW REV HAVE LEN (f[0] the id) with the node id as body */
+static void rx_children_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                               const unsigned char *body, size_t body_len) {
+    rx_buf line = {NULL, 0, 0};
+    int more = strcmp(f[1], "vmore") == 0;
+    if (!h->view_children || n < (more ? 6 : 5)) {
+        rx_buf_fmt(&line, "error %s unknown no such request", f[0]);
+        rx_write(line.data, NULL, 0);
+        rx_buf_free(&line);
+        return;
+    }
+    rx_children_ask req;
+    req.id = atoll(f[0]), req.view = atoll(f[2]), req.rev = atoll(f[3]), req.have = more ? atoll(f[4]) : -1;
+    req.node = body ? body : (const unsigned char *)"", req.node_len = body_len;
+    rx_patch p;
+    memset(&p, 0, sizeof p);
+    int ok = h->view_children(ext, &req, &p, user);
+    if (ok && !p.fail) {
+        rx_buf b = {NULL, 0, 0};
+        rx_buf_fmt(&b, "%d\n", p.n);
+        if (p.body.len) rx_buf_add(&b, p.body.data, p.body.len);
+        rx_buf_fmt(&line, "ok %s %zu", f[0], b.len);
+        rx_write(line.data, b.data, b.len);
+        rx_buf_free(&b);
+    } else {
+        rx_buf_fmt(&line, "error %s %s %s", f[0], ok ? "refused" : "unknown", ok ? p.fail : "no such request");
+        rx_write(line.data, NULL, 0);
+    }
+    rx_patch_free(&p);
+    rx_buf_free(&line);
+}
+
+int64_t rx_view_patch(rx_ext *ext, int64_t view, const rx_patch *p) {
+    if (!rx_has(ext, "view-tree")) {
+        snprintf(ext->error, sizeof ext->error, "unknown view-tree feature was not agreed");
+        return -1;
+    }
+    if (p->nodes > 100000) {
+        snprintf(ext->error, sizeof ext->error, "toobig more than 100000 nodes in one patch");
+        return -1;
+    }
+    rx_buf body = {NULL, 0, 0}, f = {NULL, 0, 0};
+    rx_buf_fmt(&body, "%d\n", p->n);
+    if (p->body.len) rx_buf_add(&body, p->body.data, p->body.len);
+    char line[96];
+    snprintf(line, sizeof line, "vpatch %lld %zu", (long long)view, body.len);
+    int r = rx_request(ext, line, body.data, body.len, &f, NULL);
+    int64_t rev = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&body);
+    rx_buf_free(&f);
+    return rev;
+}
+
+int64_t rx_vshow(rx_ext *ext, const char *name, int focus) {
+    rx_buf line = {NULL, 0, 0}, f = {NULL, 0, 0};
+    rx_buf_fmt(&line, "vshow %s %s", name, focus ? "focus" : "-");
+    int r = rx_request(ext, line.data, NULL, 0, &f, NULL);
+    int64_t view = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&line);
+    rx_buf_free(&f);
+    return view;
+}
+
+/* a retained view's event (or open) to its handler; 0 when it is a 12a picture event */
+static int rx_retained_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n,
+                                const unsigned char *body, size_t body_len) {
+    if (n < 4) return 0;
+    const char *k = f[3];
+    if (strcmp(k, "open") == 0) {
+        if (n < 7 || !h->view_open) return n >= 7;
+        rx_view_open o;
+        o.view = atoll(f[2]), o.kind = f[4], o.place = f[5], o.name = f[6];
+        h->view_open(ext, &o, user);
+        return 1;
+    }
+    static const char *picture[] = {"size", "metrics", "hover", "down", "drag", "up", "click", "leave", "wheel", NULL};
+    for (int i = 0; picture[i]; i++)
+        if (strcmp(k, picture[i]) == 0) return 0;
+    if (!h->view_event) return strcmp(k, "closed") != 0;
+    rx_retained_event e;
+    memset(&e, 0, sizeof e);
+    e.kind = k, e.argc = n - 4, e.argv = f + 4, e.body = body, e.body_len = body_len, e.key = "";
+    if (n > 4) e.on = strcmp(f[4], "1") == 0, e.rev = atoll(f[4]);
+    if (strcmp(k, "check") == 0 && n > 5) e.on = strcmp(f[5], "1") == 0;
+    if ((strcmp(k, "action") == 0 || strcmp(k, "discarded") == 0) && n > 5) e.key = f[5];
+    if (body && body_len) {
+        e.id = body, e.id_len = body_len;
+        if (strcmp(k, "select") == 0) {
+            const unsigned char *nl = (const unsigned char *)memchr(body, '\n', body_len);
+            if (nl) e.id_len = (size_t)(nl - body);
+        }
+    }
+    h->view_event(ext, atoll(f[2]), &e, user);
+    return strcmp(k, "closed") != 0;    /* a closed tab is also a picture's event */
+}
+
 static void rx_view_dispatch(rx_ext *ext, const rx_handlers *h, void *user, char **f, int n) {
     if (n < 4) return;
     rx_view_event ev;
@@ -2476,14 +2779,18 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
             } else if (strcmp(f[1], "run") == 0 && n >= 4 && h->command) {
                 const char *dot = strchr(f[2], '.');
                 h->command(ext, dot ? dot + 1 : f[2], atoll(f[3]), user);
-            } else if (strcmp(f[1], "view") == 0 && h->view) {
-                rx_view_dispatch(ext, h, user, f, n);
+            } else if (strcmp(f[1], "view") == 0) {
+                if (!rx_retained_dispatch(ext, h, user, f, n, m->body, m->body_len) && h->view)
+                    rx_view_dispatch(ext, h, user, f, n);
             } else if (strcmp(f[1], "action") == 0 && h->action) {
                 h->action(ext, m->body ? m->body : (const unsigned char *)"", m->body_len, user);
             } else if (strcmp(f[1], "bye") == 0) {
                 if (h->bye) h->bye(ext, user);
                 done = 1;
             }
+        } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9' &&
+                   (strcmp(f[1], "vkids") == 0 || strcmp(f[1], "vmore") == 0)) {
+            rx_children_answer(ext, h, user, f, n, m->body, m->body_len);
         } else if (n >= 2 && f[0][0] >= '1' && f[0][0] <= '9') {
             rx_answer(ext, h, user, f, n, m->body, m->body_len);
         }

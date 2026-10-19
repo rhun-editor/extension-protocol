@@ -40,6 +40,7 @@ pub mod scm;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
+pub mod views;
 pub mod watch;
 
 use std::collections::HashMap;
@@ -158,6 +159,9 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Retained views: manifest `[views]`, [`Ext::patch`], [`Ext::vshow`],
+    /// [`Handler::view_open`] and [`Handler::view_event`] (protocol 1.1, [`views`]).
+    ViewTree,
 }
 
 impl Feature {
@@ -181,6 +185,7 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::ViewTree => "view-tree",
         }
     }
 }
@@ -513,6 +518,18 @@ pub trait Handler: Send {
     fn setting(&mut self, _ext: &Ext, _key: &str, _value: &str) {}
     /// Something happened in one of its views.
     fn view(&mut self, _ext: &Ext, _view: View, _ev: ViewEvent) {}
+    /// A declared view's instance exists (feature `view-tree`): fill it with [`Ext::patch`].
+    fn view_open(&mut self, _ext: &Ext, _open: &views::ViewOpen) {}
+    /// The user did something in a retained view (feature `view-tree`).
+    fn view_event(&mut self, _ext: &Ext, _view: View, _ev: &views::RetainedEvent) {}
+    /// rhun asks for a node's children (feature `view-tree`): a patch with a `kids` op for it.
+    fn view_children(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
+        Err("no children".into())
+    }
+    /// rhun asks for more children of a node whose last `kids`/`add` had `more`: an `add` op.
+    fn view_more(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
+        Err("no more".into())
+    }
     /// rhun asks for a completion list (feature `complete`).
     fn complete(&mut self, _ext: &Ext, _req: &CompleteRequest) -> CompletionList {
         CompletionList::default()
@@ -586,7 +603,7 @@ enum Msg {
         id: u64,
         verb: String,
         fields: Vec<String>,
-        /// The body of a request that has one (`commit-message`).
+        /// The body of a request that has one (`commit-message`, `vkids`, `vmore`).
         body: Vec<u8>,
     },
     End,
@@ -1055,6 +1072,38 @@ impl Ext {
         self.request(&format!("unview {view}"), None).map(|_| ())
     }
 
+    // ---- retained views (feature `view-tree`) ----
+
+    /// Applies a patch to a retained view, whole or not at all; the view's new revision.
+    pub fn patch(&self, view: View, patch: &views::Patch) -> Result<u64, Error> {
+        if !self.has(Feature::ViewTree) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "view-tree feature was not agreed".into(),
+            });
+        }
+        let body = patch.encode().map_err(|text| Error {
+            code: "toobig".into(),
+            text,
+        })?;
+        let rep = self.request(&format!("vpatch {view}"), Some(&body))?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Expands a node's ancestors and scrolls it into view; `how` among `select`, `focus`,
+    /// `expand`.
+    pub fn vreveal(&self, view: View, id: &[u8], how: &[&str]) -> Result<(), Error> {
+        let how = if how.is_empty() { "-".to_string() } else { how.join(",") };
+        self.request(&format!("vreveal {view} {how}"), Some(id)).map(|_| ())
+    }
+
+    /// Opens a declared view's place on it (its manifest key); `focus` also gives it the
+    /// keyboard. Its view number.
+    pub fn vshow(&self, name: &str, focus: bool) -> Result<View, Error> {
+        let rep = self.request(&format!("vshow {name} {}", if focus { "focus" } else { "-" }), None)?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
     // ---- reading ----
 
     fn reader<R: BufRead>(&self, mut input: R, tx: Sender<Msg>) {
@@ -1134,7 +1183,9 @@ impl Ext {
                         rest,
                         body: Vec::new(),
                     };
-                    if ev.name == "edits" || ev.name == "action" {
+                    let view_body = ev.name == "view"
+                        && ev.fields.get(1).is_some_and(|w| views::has_body(w));
+                    if ev.name == "edits" || ev.name == "action" || view_body {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
@@ -1158,11 +1209,18 @@ impl Ext {
                     if let Ok(id) = id.parse::<u64>() {
                         let verb = fields.get(1).cloned().unwrap_or_default();
                         let rest = fields[2.min(fields.len())..].to_vec();
-                        let mut body = Vec::new();
-                        if verb == "commit-message" {
+                        // a request followed by a body: its length is the last field
+                        let body_max: Option<usize> = match verb.as_str() {
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
+                            "commit-message" => Some(4 << 20),
+                            // vkids, vmore: the node id follows (at most 1000 bytes)
+                            v if views::request_has_body(v) => Some(4096),
+                            _ => None,
+                        };
+                        let mut body = Vec::new();
+                        if let Some(max) = body_max {
                             let len: usize = match rest.last().and_then(|v| v.parse().ok()) {
-                                Some(n) if n <= 4 << 20 => n,
+                                Some(n) if n <= max => n,
                                 _ => break,
                             };
                             body = vec![0; len];
@@ -1229,7 +1287,14 @@ impl Ext {
                             h.setting(self, &key, &value);
                         }
                         "view" => {
-                            if let Some((view, vev)) = parse_view_event(&ev) {
+                            if let Some(open) = views::parse_open(&ev) {
+                                h.view_open(self, &open);
+                            } else if let Some((view, rev)) = views::parse_retained(&ev) {
+                                h.view_event(self, view, &rev);
+                                if rev == views::RetainedEvent::Closed {
+                                    h.view(self, view, ViewEvent::Closed);
+                                }
+                            } else if let Some((view, vev)) = parse_view_event(&ev) {
                                 h.view(self, view, vev);
                             }
                         }
@@ -1272,6 +1337,19 @@ impl Ext {
                         }
                         "format" => FormatRequest::parse(&fields)
                             .map(|r| h.format(self, &r).encode().map_err(|why| ("toobig", why))),
+                        "vkids" | "vmore" if self.has(Feature::ViewTree) => {
+                            views::ChildrenRequest::parse(id, &verb, &fields, &req_body).map(|r| {
+                                let res = if r.have.is_some() {
+                                    h.view_more(self, &r)
+                                } else {
+                                    h.view_children(self, &r)
+                                };
+                                match res {
+                                    Ok(p) => p.encode().map_err(|why| ("toobig", why)),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
                         "save-actions" if self.has(Feature::SaveActions) => {
                             SaveActionsRequest::parse(id, &fields).map(|r| {
                                 match h.save_actions(self, &r) {

@@ -275,8 +275,24 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 			ext.fmu.Unlock()
 			h.Event(ext, ev)
 		case hostRequest:
+			if len(ev.Args) > 1 && (ev.Args[1] == "vkids" || ev.Args[1] == "vmore") {
+				ext.answerChildren(h, ev)
+				continue
+			}
 			ext.answer(h, ev.Args, ev.Body)
 		case "view":
+			if rv, ok := h.(RetainedViewer); ok {
+				if open, ok := parseViewOpen(ev); ok {
+					rv.ViewOpen(ext, open)
+					continue
+				}
+				if view, rev, ok := parseRetainedEvent(ev); ok {
+					rv.ViewEvent(ext, view, rev)
+					if rev.Kind != "closed" {
+						continue
+					}
+				}
+			}
 			if v, ok := h.(Viewer); ok {
 				if view, vev, ok := parseViewEvent(ev); ok {
 					v.View(ext, view, vev)
@@ -396,6 +412,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 2
 		} else if ev.Name == "action" && len(ev.Args) >= 1 {
 			lenAt = 0
+		} else if ev.Name == "view" && len(ev.Args) >= 3 && viewEventHasBody(ev.Args[1]) {
+			lenAt = len(ev.Args) - 1 // retained views: the last field is the body's length
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
@@ -432,6 +450,17 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 	// a request from rhun (section 12): answered on the handler's goroutine, in order with events
 	if id, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil && id > 0 {
 		ev := &Event{Name: hostRequest, Args: fields}
+		if len(fields) > 2 && (fields[1] == "vkids" || fields[1] == "vmore") {
+			// retained views: the node id follows (its length is the last field)
+			n, ok := bodyLen(fields[len(fields)-1], 4096)
+			if !ok {
+				return nil, fmt.Errorf("a %s length %q", fields[1], fields[len(fields)-1])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+		}
 		if len(fields) > 1 && fields[1] == "save-actions" {
 			if _, err := e.beginSource(id); err != nil {
 				return nil, err

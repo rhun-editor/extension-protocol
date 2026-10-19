@@ -947,7 +947,49 @@ static void transform_requests(void) {
         rx_buf_free(&out);rx_buf_free(&input);
     }
 }
+/* retained views: a patch's bytes, as v1.1.md's view-tree section writes them */
+static void retained_patches(void) {
+    rx_patch p;
+    memset(&p, 0, sizeof p);
+    rx_patch_title(&p, "TODO");
+    rx_patch_badge(&p, 3);
+    rx_buf x = {NULL, 0, 0}, recs = {NULL, 0, 0};
+    rx_x_badge(&x, 1);
+    assert(rx_node_rec(&recs, "a", 1, "Alpha", "open", &x) == 0);
+    assert(rx_node_rec(&recs, "a\nb", 3, "bad", "leaf", NULL) == -1);
+    rx_patch_kids(&p, "", 0, &recs, 1, 0);
+    same(&p.body, "title 4\nTODObadge 3 0\nkids 0 1 0 28\n1 5 10 open\naAlphabadge 1 0\n");
+    assert(p.n == 3 && p.nodes == 1);
+    rx_buf_free(&x);
+    rx_buf_free(&recs);
+    rx_patch_free(&p);
+    rx_buf o = {NULL, 0, 0};
+    rx_x_open(&o, "/p/a.rs", 2, 8);
+    rx_x_icon(&o, "file:a.rs", NULL);
+    same(&o, "open 2 8 7\n/p/a.rsicon file:a.rs - 0\n");
+    rx_buf_free(&o);
+    assert(rx_has_body("0 view 3 select 2 1 4"));
+    assert(rx_has_body("0 view 3 activate 2 2"));
+    assert(!rx_has_body("0 view 3 visible 1"));
+    assert(!rx_has_body("0 view 3 open tree sidebar todo"));
+    assert(rx_has_body("5 vkids 3 2 1"));
+    assert(rx_has_body("6 vmore 3 2 4 1"));
+    assert(!rx_has_body("7 complete 1 2 3 4 typed x"));
+    rx_patch q;
+    memset(&q, 0, sizeof q);
+    rx_patch_action(&q, "pin", "pin", "node", "Pin");
+    rx_patch_select_mode(&q, 1);
+    rx_buf y = {NULL, 0, 0};
+    rx_x_inline(&y, "pin");
+    rx_x_menu(&y, "pin hide");
+    same(&q.body, "action pin pin node 3\nPinselect-mode multi 0\n");
+    same(&y, "inline 3\npinmenu 8\npin hide");
+    rx_buf_free(&y);
+    rx_patch_free(&q);
+}
+
 int main(void) {
+    retained_patches();
     snippet_transform_wire();
     snippet_transform_programs();
     snippet_snapshot_decoder();
