@@ -2160,11 +2160,11 @@ impl Ext {
                     if ev.name == "editor-path" {
                         let len: usize = match ev.fields.last().and_then(|v| v.parse().ok()) {
                             Some(n) if n <= 65536 => n,
-                            _ => break,
+                            _ => return Msg::End,
                         };
                         ev.body = vec![0; len];
                         if input.read_exact(&mut ev.body).is_err() {
-                            break;
+                            return Msg::End;
                         }
                     }
                     if ev.name == "nb-run" {
