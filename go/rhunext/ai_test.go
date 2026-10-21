@@ -128,3 +128,19 @@ func TestToolsAndTranscriptsOverTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestProposalsAre12gWhateverWasAgreed(t *testing.T) {
+	var w WorkspaceEdit
+	at := Pos{Line: 1, Col: 1}
+	w.AddFileHashed("/p/a.txt", []byte("x\r\n"), TextEdit{Range: Range{Start: at, End: at}, Text: "y"})
+	w.Label, w.Confirm = "Fix", true
+	b, bad := proposalBody("L", "s1", w)
+	if bad != nil || string(b) != "1 2\nLs1"+"1\n8 - 1\n/p/a.txt1 1 1 1 1\ny" {
+		t.Fatalf("%q %v", b, bad)
+	}
+	var ops WorkspaceEdit
+	ops.Create("/p/b.txt", CreateOptions{})
+	if _, bad := proposalBody("L", "", ops); bad == nil || bad.Code != "unknown" {
+		t.Fatalf("file operations: %v", bad)
+	}
+}

@@ -163,6 +163,16 @@ files-status = "complete" / "limit" / "partial"
 event        =/ "0" SP "found" SP id SP len        ; body: N LF and N records (find: FOLDER SP PATH_LEN LF PATH;
               ; search: FOLDER SP DOC SP VERSION SP PATH_LEN SP M LF PATH, M x LINE SP COL SP END SP PRE SP TEXT_LEN LF TEXT)
 
+; scoped-settings: [settings] KEY.scope = user / workspace / folder, KEY.languages = yes
+feature      =/ "scoped-settings"
+request      =/ id SP "setting-get" SP field SP num SP lang   ; ok ID LEN + the value
+event        =/ "0" SP "setting-changed" SP field
+
+; workspace-folders: the folders event before ready and on every change; folder-of
+feature      =/ "workspace-folders"
+event        =/ "0" SP "folders" SP len   ; body: N LF, N x FOLDER SP LOCATION SP FLAGS SP NAME_LEN SP PATH_LEN LF NAME PATH
+request      =/ id SP "folder-of" SP rest   ; ok ID FOLDER (0: none)
+
 ; Agents, proposals and tools (v1.1.md). Strings are length-framed and follow without separators.
 ; agents: [provides] agents = yes; agent-sessions replaces the extension's rows.
 feature      =/ "agents"
@@ -479,3 +489,31 @@ request      =/ id SP "editor-read" SP doc SP num SP num   ; CDOC OFFSET MAX
 request      =/ id SP "editor-dirty" SP doc SP ( "0" / "1" )
 event        =/ "0" SP ( "editor-changed" / "editor-closed" ) SP doc
 event        =/ "0" SP "editor-path" SP doc SP len            ; then the new path
+
+; Terminals and tasks: [needs] terminal = run (input, output); tasks is agreed only with terminals.
+feature      =/ "terminals" / "tasks"
+request      =/ id SP r-term
+r-term       = "terminal-open" SP len                          ; one definition, TASK_ID "-"
+             / ( "terminal-stop" / "terminal-restart" / "terminal-close" ) SP term
+             / "terminal-show" SP term SP ( "show" / "focus" )
+             / "terminal-input" SP term SP len                 ; at most 65536 bytes
+             / "terminal-screen" SP term                       ; ok ID LEN + ROWS COLS CUR_ROW CUR_COL LF rows
+             / "tasks-set" SP len                              ; COUNT LF then COUNT definitions
+             / "task-start" SP task-id
+             / "task-run" SP len                               ; one definition
+term         = %x31-39 *DIGIT
+task-id      = ( %x61-7A / DIGIT ) *63( %x61-7A / DIGIT / "_" / "." / "-" )
+definition   = ( task-id / "-" ) SP ( "shell" / "argv" ) SP len SP len SP len SP len LF
+               ; then LABEL CMD CWD EXTRA bytes; EXTRA: records NAME *( SP 1*%x21-7E ) SP len LF + bytes
+event        =/ "0" SP "terminal-started" SP term SP num SP ( task-id / "-" )
+             / "0" SP "terminal-ended" SP term SP ( "exit" / "stopped" / "failed" ) SP ( num / "-" ) SP num SP num
+             / "0" SP "terminal-output" SP term SP num SP len  ; finished lines, each ending in LF
+             / "0" SP "terminal-closed" SP term
+             / "0" SP "task-ready" SP term SP num SP num
+             / "0" SP "task-busy" SP term
+; debug: debuggers ([debugger.TYPE], [needs] debug = yes); a configuration body is
+; N LF, then N leaves KIND SP PATH_LEN SP VALUE_LEN LF PATH VALUE, then extra records
+feature      =/ "debug"
+request      =/ id SP "debug-start" SP len SP len           ; NAME_LEN LEN: NAME + a configuration body
+host-request =/ id SP "debug-resolve" SP 1*32( %x61-7A / DIGIT / "-" ) SP ( "launch" / "attach" ) SP ( "0" / "1" ) SP len
+event        =/ "0" SP "debug-ended" SP 1*DIGIT SP ( 1*DIGIT / "-" )

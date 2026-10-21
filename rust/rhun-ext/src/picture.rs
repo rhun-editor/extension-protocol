@@ -146,7 +146,13 @@ impl Picture {
     /// One of the extension's decoded images ([`crate::Ext::image`], feature `view-images`)
     /// scaled into the box.
     pub fn image(&mut self, x: f32, y: f32, w: f32, h: f32, image: u64) -> &mut Picture {
-        self.shape(format!("image {} {} {} {} {image}", num(x), num(y), num(w.max(0.0)), num(h.max(0.0))))
+        self.shape(format!(
+            "image {} {} {} {} {image}",
+            num(x),
+            num(y),
+            num(w.max(0.0)),
+            num(h.max(0.0))
+        ))
     }
 
     /// A filled rectangle.

@@ -626,6 +626,26 @@ static int found_files_cb(const rx_found_file *f, int n, void *user) {
                  f[i].matches[0].end, f[i].matches[0].pre, (int)f[i].matches[0].text_len, f[i].matches[0].text);
     return 0;   /* stop: the run is cancelled */
 }
+static int setting_ok;
+static void on_ready_setting(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    char *v = rx_setting_get(ext, "style", 1, "Visual Basic");
+    assert(v && strcmp(v, "goimports") == 0);
+    free(v);
+    v = rx_setting_get(ext, "none", 0, NULL);
+    assert(!v && strncmp(rx_error(ext), "refused", 7) == 0);
+    setting_ok = 1;
+}
+static int folders_seen;
+static void on_folders_event(rx_ext *ext, const rx_event *ev, void *user) {
+    (void)user;
+    rx_folder f[4];
+    if (rx_parse_folders(ev, f, 4) == 2) {
+        assert(f[0].flags == 3 && f[1].id == 4 && f[1].path_len == 6 && memcmp(f[1].path, "/w/lib", 6) == 0);
+        assert(rx_folder_of(ext, "/w/lib/x.go") == 4);
+        folders_seen = 1;
+    }
+}
 static int files_ok;
 static void on_ready_files(rx_ext *ext, const char *project, void *user) {
     (void)project, (void)user;
@@ -689,6 +709,22 @@ static void resources_requests(void) {
     run_bytes("files", &h, input, strlen(input), &got);
     same(&got, "hello 1 files\n1 find-files 0 10 0 13\n+*.c\n-vendor\n2 search-text 0 5 16 8\n4 0\nTODO3 cancel 2\n");
     assert(files_ok);
+    /* scoped-settings: setting-get */
+    rx_buf_clear(&got);
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_setting;
+    input = "0 features scoped-settings\n0 ready -\nok 1 9\ngoimportserror 2 refused not a setting of this extension\n0 bye\n";
+    run_bytes("scoped-settings", &h, input, strlen(input), &got);
+    same(&got, "hello 1 scoped-settings\n1 setting-get style 1 Visual_Basic\n2 setting-get none 0 -\n");
+    assert(setting_ok);
+    /* workspace-folders: the folders event and folder-of */
+    rx_buf_clear(&got);
+    memset(&h, 0, sizeof h);
+    h.event = on_folders_event;
+    input = "0 features workspace-folders\n0 folders 48\n2\n1 local 3 3 6\napp/w/app4 local 2 3 6\nlib/w/libok 1 4\n0 bye\n";
+    run_bytes("workspace-folders", &h, input, strlen(input), &got);
+    same(&got, "hello 1 workspace-folders\n1 folder-of /w/lib/x.go\n");
+    assert(folders_seen);
     rx_buf_free(&got);
 }
 
@@ -1201,7 +1237,24 @@ static void retained_patches(void) {
 }
 
 /* protocol 1.1's agents, proposals and tools: the bodies */
+static void proposals_are_12g(void) {
+    rx_wedit e = {0};
+    rx_buf b = {NULL, 0, 0};
+    rx_wedit_file_hashed(&e, "/p/a.txt", "x\r\n", 3);
+    rx_wedit_edit(&e, R(1, 1, 1, 1), "y", 1);
+    rx_wedit_label(&e, "Fix");
+    rx_wedit_confirm(&e);
+    assert(rx_proposal_body("L", "s1", &e, &b) == 0);
+    same(&b, "1 2\nLs1" "1\n8 - 1\n/p/a.txt1 1 1 1 1\ny");
+    rx_buf_free(&b), rx_wedit_free(&e);
+    rx_wedit o = {0};
+    rx_wedit_create(&o, "/p/b.txt", 0);
+    assert(rx_proposal_body("L", NULL, &o, &b) < 0 && strcmp(o.fail, "unknown") == 0);
+    rx_buf_free(&b), rx_wedit_free(&o);
+}
+
 static void ai_bodies(void) {
+    proposals_are_12g();
     rx_transcript t;
     memset(&t, 0, sizeof t);
     t.total = 2;

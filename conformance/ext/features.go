@@ -24,14 +24,16 @@ import (
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
 	"git-data", "commit-message", "quickdiff", "scm", // source control: scm.go, scmpanel.go
 	"view-tree", "view-log", "notify", "progress", "view-keys", "view-images", // retained views, notifications, progress: views.go, notify.go
-	"idle", "secrets", "uris", "urls", "files", // resources: resources.go
+	"idle", "secrets", "uris", "urls", "files", "scoped-settings", "workspace-folders", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
 	"notebooks", "custom-editors", // notebooks: notebook.go
 	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions", // language features: query.go, actions.go
 	"hover-query", "selection-ranges", "hierarchy", "workspace-symbols", "document-links", "file-diagnostics", // langfeat.go
 	"command-args", "context-keys", "status-items", // commands.go
-	"tests"} // test controllers: tests.go
+	"tests",              // test controllers: tests.go
+	"terminals", "tasks", // terminals and tasks: terminals.go (tasks only with terminals)
+	"debug"} // debuggers: debug.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -43,6 +45,9 @@ func (h *host) agree(hello string) {
 	h.asked = asked
 	var said []string
 	for _, f := range knownFeatures {
+		if f == "tasks" && !asked["terminals"] {
+			continue
+		}
 		// file-operations is agreed only together with workspace-edits
 		if asked[f] && (f != "file-operations" || asked["workspace-edits"]) {
 			h.features[f] = true
@@ -425,6 +430,7 @@ func (h *host) checkFeatures() {
 		return
 	}
 	h.checkTests()
+	h.checkDebug()
 	if h.cmdExited() {
 		return
 	}

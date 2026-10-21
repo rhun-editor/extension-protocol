@@ -51,33 +51,35 @@
 
 #![allow(clippy::needless_doctest_main)]
 
-pub mod ai;
 pub mod actions;
+pub mod ai;
 pub mod auth;
 pub mod chart;
 pub mod commands;
 pub mod complete;
 pub mod custom_editor;
+pub mod debug;
 pub mod editor;
 pub mod edits;
 pub mod files;
 pub mod lang;
+pub mod langfeat;
 pub mod notebook;
 pub mod notify;
-pub mod langfeat;
 pub mod picture;
+pub mod query;
 pub mod resources;
 pub mod scm;
-pub mod query;
 pub mod quick;
 pub mod scmpanel;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
-pub mod views;
+pub mod tasks;
 pub mod testing;
+pub mod views;
 pub mod watch;
-pub use resources::{parse_link, Content, UrlOpened};
+pub use resources::{parse_folders, parse_link, Content, Folder, UrlOpened};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -97,6 +99,7 @@ pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, Resolution, ResolveRequest,
     SignatureHelp, SignatureInfo, SignatureList, SignatureRequest,
 };
+pub use debug::{DebugConfig, DebugEnded, DebugResolve, DebugValue, Resolved};
 pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show};
 pub use edits::{Change, Located, OrderError};
 pub use lang::{
@@ -112,22 +115,22 @@ pub use langfeat::{
     WorkspaceSymbolsRequest,
 };
 pub use picture::{Color, Picture};
+pub use query::Stream;
 pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
     LogEntry, LogOf, QuickDiffRequest,
 };
-pub use query::Stream;
 pub use scmpanel::{ScmAction, ScmGroup, ScmPanel, ScmResource};
 pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
 };
-pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 pub use testing::{
     expected_actual, unquote, CoverageRange, FileCoverage, TestCommand, TestItem, TestKind,
     TestMessage, TestProcess, TestReporter, TestResult, TestRun, TestState, TestStream,
 };
+pub use watch::{parse_workspace_watch, WorkspaceWatch, WorkspaceWatchEvent};
 
 /// A URI where rhun takes a document (feature `uris`): one field, without spaces or line breaks
 /// (write a space as `%20`).
@@ -173,13 +176,28 @@ mod tests {
     #[test]
     fn picture_keyboard_events() {
         let k = parse_view_event(&view_event(&["4", "key", "ctrl+shift", "a"], b""));
-        assert_eq!(k, Some((4, ViewEvent::Key { mods: "ctrl+shift".into(), name: "a".into() })));
+        assert_eq!(
+            k,
+            Some((
+                4,
+                ViewEvent::Key {
+                    mods: "ctrl+shift".into(),
+                    name: "a".into()
+                }
+            ))
+        );
         let t = parse_view_event(&view_event(&["4", "text", "2"], "é".as_bytes()));
         assert_eq!(t, Some((4, ViewEvent::Text("é".into()))));
-        assert_eq!(parse_view_event(&view_event(&["4", "selectall"], b"")), Some((4, ViewEvent::SelectAll)));
+        assert_eq!(
+            parse_view_event(&view_event(&["4", "selectall"], b"")),
+            Some((4, ViewEvent::SelectAll))
+        );
         let c = view_event(&["4", "click", "5", "6", "shift"], b"");
         assert_eq!(view_event_mods(&c), Some("shift"));
-        assert_eq!(parse_view_event(&c), Some((4, ViewEvent::Click { x: 5.0, y: 6.0 })));
+        assert_eq!(
+            parse_view_event(&c),
+            Some((4, ViewEvent::Click { x: 5.0, y: 6.0 }))
+        );
         assert!(views::parse_retained(&view_event(&["4", "key", "-", "a"], b"")).is_none());
     }
 }
@@ -262,6 +280,9 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Debuggers: [`Ext::debug_start`], [`Handler::resolve_debug`] and the [`DebugEnded`] event;
+    /// `[needs] debug = yes`.
+    Debug,
     /// Retained views: manifest `[views]`, [`Ext::patch`], [`Ext::vshow`],
     /// [`Handler::view_open`] and [`Handler::view_event`] (protocol 1.1, [`views`]).
     ViewTree,
@@ -367,6 +388,17 @@ pub enum Feature {
     Urls,
     /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
     Files,
+    /// Settings per workspace, folder and language: [`Ext::setting_get`], the event
+    /// `setting-changed`.
+    ScopedSettings,
+    /// Workspace folders: the event `folders` ([`resources::parse_folders`]), [`Ext::folder_of`].
+    WorkspaceFolders,
+    /// Programs in terminal tabs: [`Ext::open_terminal`] and the other terminal verbs, the
+    /// events [`tasks::parse_terminal_event`] decodes; needs `[needs] terminal = run`.
+    Terminals,
+    /// Published tasks: [`Ext::set_tasks`], [`Ext::start_task`], [`Ext::run_task`] (agreed only with
+    /// [`Feature::Terminals`]).
+    Tasks,
     /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
     /// its requests go through [`Ext::request`].
     Named(&'static str),
@@ -395,6 +427,7 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::Debug => "debug",
             Feature::ViewTree => "view-tree",
             Feature::Idle => "idle",
             Feature::Secrets => "secrets",
@@ -440,6 +473,10 @@ impl Feature {
             Feature::StatusItems => "status-items",
             Feature::Urls => "urls",
             Feature::Files => "files",
+            Feature::ScopedSettings => "scoped-settings",
+            Feature::WorkspaceFolders => "workspace-folders",
+            Feature::Terminals => "terminals",
+            Feature::Tasks => "tasks",
             Feature::Named(n) => n,
         }
     }
@@ -462,7 +499,7 @@ pub struct Event {
     pub fields: Vec<String>,
     /// The rest of the line after the name, for events whose last field may hold spaces (paths).
     pub rest: String,
-    /// The body, for `edits` and `action`.
+    /// The body, for `edits`, `action` and `terminal-output`.
     pub body: Vec<u8>,
 }
 
@@ -651,7 +688,10 @@ pub enum ViewEvent {
     Focus(bool),
     /// A key no binding takes: modifiers (`-` or `ctrl+shift+alt+super`) and its name (`Return`,
     /// `Left`, `F5`, `a`).
-    Key { mods: String, name: String },
+    Key {
+        mods: String,
+        name: String,
+    },
     /// A typed character, after its [`ViewEvent::Key`].
     Text(String),
     /// The paste command's text.
@@ -659,7 +699,10 @@ pub enum ViewEvent {
     /// The select-all command.
     SelectAll,
     /// The second press of a double click.
-    DoubleClick { x: f32, y: f32 },
+    DoubleClick {
+        x: f32,
+        y: f32,
+    },
 }
 
 /// The modifiers (`-` or `ctrl+shift+alt+super`) a pointer event carries with
@@ -916,11 +959,19 @@ pub trait Handler: Send {
     /// What the user did in a quick input (feature `quick-input`): Q and the event.
     fn quick_event(&mut self, _ext: &Ext, _q: u64, _ev: quick::QuickEvent) {}
     /// rhun asks for a node's children (feature `view-tree`): a patch with a `kids` op for it.
-    fn view_children(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
+    fn view_children(
+        &mut self,
+        _ext: &Ext,
+        _req: &views::ChildrenRequest,
+    ) -> Result<views::Patch, String> {
         Err("no children".into())
     }
     /// rhun asks for more children of a node whose last `kids`/`add` had `more`: an `add` op.
-    fn view_more(&mut self, _ext: &Ext, _req: &views::ChildrenRequest) -> Result<views::Patch, String> {
+    fn view_more(
+        &mut self,
+        _ext: &Ext,
+        _req: &views::ChildrenRequest,
+    ) -> Result<views::Patch, String> {
         Err("no more".into())
     }
     /// rhun asks for a completion list (feature `complete`).
@@ -981,7 +1032,11 @@ pub trait Handler: Send {
     }
     /// rhun asks for a notebook's cells (feature `notebooks`): the file's bytes are in `req.data`.
     /// An error's text is shown in the notebook's tab, with a way to open the file as text.
-    fn nb_open(&mut self, _ext: &Ext, _req: &notebook::NbOpen) -> Result<notebook::Notebook, String> {
+    fn nb_open(
+        &mut self,
+        _ext: &Ext,
+        _req: &notebook::NbOpen,
+    ) -> Result<notebook::Notebook, String> {
         Err("this extension does not read notebooks".to_string())
     }
     /// rhun asks for the file's bytes for a notebook (feature `notebooks`); rhun writes them.
@@ -1004,7 +1059,15 @@ pub trait Handler: Send {
     fn nb_exec_exit(&mut self, _ext: &Ext, _exec: notebook::ExecId, _code: Option<i32>) {}
     /// A cell document it was told about (`opened` with no path) belongs to notebook `nb` as cell
     /// `cell`, at `index` among all its cells (feature `notebooks`).
-    fn nb_cell(&mut self, _ext: &Ext, _doc: Doc, _nb: notebook::NbId, _cell: notebook::CellId, _index: usize) {}
+    fn nb_cell(
+        &mut self,
+        _ext: &Ext,
+        _doc: Doc,
+        _nb: notebook::NbId,
+        _cell: notebook::CellId,
+        _index: usize,
+    ) {
+    }
     /// The cell documents it knows of notebook `nb`, in their order (after any insert, delete or
     /// move).
     fn nb_cells(&mut self, _ext: &Ext, _nb: notebook::NbId, _docs: &[Doc]) {}
@@ -1016,7 +1079,11 @@ pub trait Handler: Send {
     }
     /// An owned model's bytes for a save, part by part (from 0; take a snapshot at part 0): whether
     /// another part follows, and this one (at most 4 MB; [`custom_editor::part_of`] cuts them).
-    fn editor_save(&mut self, _ext: &Ext, _req: &custom_editor::EditorSave) -> Result<(bool, Vec<u8>), String> {
+    fn editor_save(
+        &mut self,
+        _ext: &Ext,
+        _req: &custom_editor::EditorSave,
+    ) -> Result<(bool, Vec<u8>), String> {
         Err("this extension does not save".to_string())
     }
     /// rhun's Undo, Redo and Revert File in an owned model's tab.
@@ -1095,10 +1162,19 @@ pub trait Handler: Send {
         _sid: Option<&str>,
         _text: &str,
     ) -> Result<String, ai::Refusal> {
-        Err(ai::Refusal::new("refused", "this extension takes no prompts"))
+        Err(ai::Refusal::new(
+            "refused",
+            "this extension takes no prompts",
+        ))
     }
     /// The user pressed Stop in one of its sessions (feature agent-prompts).
     fn agent_stop(&mut self, _ext: &Ext, _sid: &str) {}
+    /// rhun shows a debugger's configuration before launching it (feature `debug`, a debugger
+    /// with `resolve = yes`): the complete resolved configuration, or launch it unchanged, or
+    /// abandon the launch quietly or with a sentence. It may ask the user (choose, ask).
+    fn resolve_debug(&mut self, _ext: &Ext, _req: &DebugResolve) -> Resolved {
+        Resolved::Unchanged
+    }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
     /// rhun asks for a virtual document's text (feature `uris`): a URI of one of the schemes in
@@ -1372,6 +1448,43 @@ where
     Ok(())
 }
 
+/// [`run_on`] without threads, as on `wasm32-wasip1`, on any target (tests of that path).
+#[doc(hidden)]
+pub fn run_on_threadless<R, W, H>(
+    input: R,
+    output: W,
+    features: &[Feature],
+    mut handler: H,
+) -> io::Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    H: Handler + 'static,
+{
+    let ext = Ext {
+        shared: Arc::new(Mutex::new(Shared {
+            out: Box::new(output),
+            next_id: 1,
+        })),
+        pending: Arc::new(Mutex::new(Pending::default())),
+        features: Arc::new(Mutex::new(Vec::new())),
+        inline: Some(Arc::new(Inline {
+            input: Mutex::new(Box::new(BufReader::new(input))),
+            queue: Mutex::new(VecDeque::new()),
+        })),
+        procs: Arc::default(),
+        queries: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let mut hello = String::from("hello 1");
+    for f in features {
+        hello.push(' ');
+        hello.push_str(f.name());
+    }
+    ext.write(&hello, &[])?;
+    ext.dispatch_inline(&mut handler);
+    Ok(())
+}
+
 impl Ext {
     /// Whether rhun agreed to a feature.
     pub fn has(&self, f: Feature) -> bool {
@@ -1451,6 +1564,36 @@ impl Ext {
             }
         }
         rx.recv().ok()
+    }
+
+    /// Without threads: reads one message from rhun as a waiting request does (test-out and
+    /// test-exit go to their streams, the rest waits for the handler); false once rhun is gone,
+    /// and always false with threads (the reader thread reads).
+    pub(crate) fn pump(&self) -> bool {
+        let Some(inline) = &self.inline else {
+            return false;
+        };
+        let msg = {
+            let mut input = inline.input.lock().unwrap();
+            self.read_msg(&mut **input)
+        };
+        match msg {
+            Msg::Delivered => true,
+            Msg::End => {
+                self.close();
+                inline.queue.lock().unwrap().push_back(Msg::End);
+                false
+            }
+            other => {
+                inline.queue.lock().unwrap().push_back(other);
+                true
+            }
+        }
+    }
+
+    /// Whether the connection reads rhun's input without a thread (`wasm32-wasip1`).
+    pub(crate) fn threadless(&self) -> bool {
+        self.inline.is_some()
     }
 
     /// [`Ext::request`] whose `0 found ID` batches and reply come through the receiver
@@ -1978,14 +2121,22 @@ impl Ext {
     /// Expands a node's ancestors and scrolls it into view; `how` among `select`, `focus`,
     /// `expand`.
     pub fn vreveal(&self, view: View, id: &[u8], how: &[&str]) -> Result<(), Error> {
-        let how = if how.is_empty() { "-".to_string() } else { how.join(",") };
-        self.request(&format!("vreveal {view} {how}"), Some(id)).map(|_| ())
+        let how = if how.is_empty() {
+            "-".to_string()
+        } else {
+            how.join(",")
+        };
+        self.request(&format!("vreveal {view} {how}"), Some(id))
+            .map(|_| ())
     }
 
     /// Opens a declared view's place on it (its manifest key); `focus` also gives it the
     /// keyboard. Its view number.
     pub fn vshow(&self, name: &str, focus: bool) -> Result<View, Error> {
-        let rep = self.request(&format!("vshow {name} {}", if focus { "focus" } else { "-" }), None)?;
+        let rep = self.request(
+            &format!("vshow {name} {}", if focus { "focus" } else { "-" }),
+            None,
+        )?;
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
@@ -2020,7 +2171,8 @@ impl Ext {
 
     /// Replaces a card's content (`noview` when it is gone: closed by the user, timed out).
     pub fn notify_set(&self, note: u64, content: &notify::Note) -> Result<(), Error> {
-        self.request(&format!("notify-set {note}"), Some(&content.encode())).map(|_| ())
+        self.request(&format!("notify-set {note}"), Some(&content.encode()))
+            .map(|_| ())
     }
 
     /// Opens a quick input (feature `quick-input`; `busy` while one, the palette or a prompt
@@ -2047,26 +2199,47 @@ impl Ext {
     }
 
     /// Progress (nothing shows if it ends within 500 ms); `cancel` offers a Cancel button. Its P.
-    pub fn progress(&self, place: notify::ProgressWhere, cancel: bool, title: &str) -> Result<u64, Error> {
+    pub fn progress(
+        &self,
+        place: notify::ProgressWhere,
+        cancel: bool,
+        title: &str,
+    ) -> Result<u64, Error> {
         let t = views_title(title);
         let t = if t.is_empty() { "…".to_string() } else { t };
         let rep = self.request(
-            &format!("progress {} {}", place.word(), if cancel { "cancel" } else { "-" }),
+            &format!(
+                "progress {} {}",
+                place.word(),
+                if cancel { "cancel" } else { "-" }
+            ),
             Some(t.as_bytes()),
         )?;
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
     /// Its share done (`None`: indeterminate) and a message.
-    pub fn progress_set(&self, progress: u64, percent: Option<u8>, message: &str) -> Result<(), Error> {
-        let pct = percent.map(|p| p.min(100).to_string()).unwrap_or_else(|| "-".into());
+    pub fn progress_set(
+        &self,
+        progress: u64,
+        percent: Option<u8>,
+        message: &str,
+    ) -> Result<(), Error> {
+        let pct = percent
+            .map(|p| p.min(100).to_string())
+            .unwrap_or_else(|| "-".into());
         let m: String = message.replace('\n', " ").chars().take(200).collect();
-        self.request(&format!("progress-set {progress} {pct}"), Some(m.as_bytes())).map(|_| ())
+        self.request(
+            &format!("progress-set {progress} {pct}"),
+            Some(m.as_bytes()),
+        )
+        .map(|_| ())
     }
 
     /// Removes it.
     pub fn progress_end(&self, progress: u64) -> Result<(), Error> {
-        self.request(&format!("progress-end {progress}"), None).map(|_| ())
+        self.request(&format!("progress-end {progress}"), None)
+            .map(|_| ())
     }
 
     // ---- reading ----
@@ -2140,6 +2313,7 @@ impl Ext {
                                 | "git-log"
                                 | "git-show"
                                 | "secret-get"
+                                | "setting-get"
                                 | "secret-keys"
                                 | "tools"
                                 | "tool-call"
@@ -2148,6 +2322,7 @@ impl Ext {
                                 | "external-uri"
                                 | "link"
                                 | "editor-read"
+                                | "terminal-screen"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -2233,15 +2408,21 @@ impl Ext {
                             return Msg::End;
                         }
                         if let Ok(ex) = ev.fields[0].parse() {
-                            testing::test_out(&self.procs, ex, &ev.fields[1], &body);
+                            testing::test_out(
+                                &self.procs,
+                                ex,
+                                &ev.fields[1],
+                                &body,
+                                self.inline.is_none(),
+                            );
                         }
-                        continue;
+                        return Msg::Delivered;
                     }
                     if ev.name == "test-exit" && ev.fields.len() >= 2 {
                         if let Ok(ex) = ev.fields[0].parse() {
                             testing::test_exit(&self.procs, ex, &ev.fields[1..].join(" "));
                         }
-                        continue;
+                        return Msg::Delivered;
                     }
                     let view_body = (ev.name == "view"
                         && ev.fields.get(1).is_some_and(|w| views::has_body(w)))
@@ -2256,6 +2437,8 @@ impl Ext {
                         || run_body
                         || ev.name == "link"
                         || ev.name == "found"
+                        || ev.name == "folders" && ev.fields.len() == 1
+                        || ev.name == "terminal-output" && ev.fields.len() == 3
                     {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it
@@ -2300,6 +2483,8 @@ impl Ext {
                         let body_max: Option<usize> = match verb.as_str() {
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
                             "commit-message" => Some(4 << 20),
+                            // TYPE REQUEST NODEBUG LEN + a configuration body (debug)
+                            "debug-resolve" => Some(debug::MAX_DEBUG_BODY),
                             // vkids, vmore: the node id follows (at most 1000 bytes)
                             v if views::request_has_body(v) => Some(4096),
                             // tests: the parent item's id, the run's items
@@ -2343,7 +2528,6 @@ impl Ext {
     }
 
     /// The handler loop without threads: queued messages first, then rhun's input.
-    #[cfg(target_os = "wasi")]
     fn dispatch_inline<H: Handler>(&self, h: &mut H) {
         let inline = self.inline.clone().expect("inline input");
         loop {
@@ -2457,10 +2641,19 @@ impl Ext {
                             }
                         }
                         "cell" if self.has(Feature::Notebooks) && ev.fields.len() == 4 => {
-                            h.nb_cell(self, ev.num(0), ev.num(1) as u64, ev.num(2) as u64, ev.num(3) as usize);
+                            h.nb_cell(
+                                self,
+                                ev.num(0),
+                                ev.num(1) as u64,
+                                ev.num(2) as u64,
+                                ev.num(3) as usize,
+                            );
                         }
                         "cells" if self.has(Feature::Notebooks) && !ev.fields.is_empty() => {
-                            let docs: Vec<Doc> = ev.fields[1..].iter().filter_map(|f| f.parse().ok()).collect();
+                            let docs: Vec<Doc> = ev.fields[1..]
+                                .iter()
+                                .filter_map(|f| f.parse().ok())
+                                .collect();
                             h.nb_cells(self, ev.num(0) as u64, &docs);
                         }
                         "editor-changed" | "editor-closed" if self.has(Feature::CustomEditors) => {
@@ -2517,6 +2710,18 @@ impl Ext {
                     fields,
                     body: req_body,
                 } => {
+                    if verb == "test-run" && self.inline.is_some() && self.has(Feature::Tests) {
+                        if let Some(run) = testing::parse_test_run(&fields, &req_body) {
+                            // without threads the run happens inside run_tests: rhun hears ok
+                            // first (it waits 10 s for it); a refusal ends the run errored
+                            let _ = self.write(&format!("ok {id} 0"), &[]);
+                            self.finish_query(id);
+                            if let Err(e) = h.run_tests(self, &run) {
+                                testing::end_refused(self, run.run, &e);
+                            }
+                            return true;
+                        }
+                    }
                     let out = self.stream(id);
                     // a call's error code is the callee's own
                     let mut call_code = String::new();
@@ -2681,9 +2886,13 @@ impl Ext {
                         "format" => FormatRequest::parse(&fields)
                             .map(|r| h.format(self, &r).encode_with(lang::EditCaps::V1)),
                         "vcopy" if self.has(Feature::ViewKeys) => {
-                            let view: View = fields.first().and_then(|v| v.parse().ok()).unwrap_or(0);
+                            let view: View =
+                                fields.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                             let cut = fields.get(1).map(String::as_str) == Some("cut");
-                            Some(Ok(h.view_copy(self, view, cut).unwrap_or_default().into_bytes()))
+                            Some(Ok(h
+                                .view_copy(self, view, cut)
+                                .unwrap_or_default()
+                                .into_bytes()))
                         }
                         "vkids" | "vmore" if self.has(Feature::ViewTree) => {
                             views::ChildrenRequest::parse(id, &verb, &fields, &req_body).map(|r| {
@@ -2711,11 +2920,14 @@ impl Ext {
                                 }
                             })
                         }
-                        "nb-open" if self.has(Feature::Notebooks) => notebook::NbOpen::parse(id, &fields, &req_body)
-                            .map(|r| match h.nb_open(self, &r) {
-                                Ok(n) => Ok(n.encode()),
-                                Err(why) => Err(("refused", why)),
-                            }),
+                        "nb-open" if self.has(Feature::Notebooks) => {
+                            notebook::NbOpen::parse(id, &fields, &req_body).map(|r| {
+                                match h.nb_open(self, &r) {
+                                    Ok(n) => Ok(n.encode()),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
                         "nb-save" if self.has(Feature::Notebooks) => {
                             notebook::NbSave::parse(id, &fields, &req_body).map(|r| match r {
                                 Ok(r) => h.nb_save(self, &r).map_err(|why| ("refused", why)),
@@ -2747,34 +2959,54 @@ impl Ext {
                             }
                         }
                         "editor-open" if self.has(Feature::CustomEditors) => {
-                            custom_editor::EditorOpen::parse(id, &fields, &req_body)
-                                .map(|r| h.editor_open(self, &r).map(|_| Vec::new()).map_err(|why| ("refused", why)))
+                            custom_editor::EditorOpen::parse(id, &fields, &req_body).map(|r| {
+                                h.editor_open(self, &r)
+                                    .map(|_| Vec::new())
+                                    .map_err(|why| ("refused", why))
+                            })
                         }
                         "editor-save" if self.has(Feature::CustomEditors) => {
-                            custom_editor::EditorSave::parse(id, &fields).map(|r| match h.editor_save(self, &r) {
-                                Ok((more, bytes)) if bytes.len() <= custom_editor::PART_MAX => {
-                                    Ok(custom_editor::save_part(more, &bytes))
+                            custom_editor::EditorSave::parse(id, &fields).map(|r| {
+                                match h.editor_save(self, &r) {
+                                    Ok((more, bytes)) if bytes.len() <= custom_editor::PART_MAX => {
+                                        Ok(custom_editor::save_part(more, &bytes))
+                                    }
+                                    Ok(_) => Err(("toobig", "a part over 4 MB".to_string())),
+                                    Err(why) => Err(("refused", why)),
                                 }
-                                Ok(_) => Err(("toobig", "a part over 4 MB".to_string())),
-                                Err(why) => Err(("refused", why)),
                             })
                         }
                         "editor-undo" | "editor-redo" | "editor-revert"
                             if self.has(Feature::CustomEditors) =>
                         {
-                            fields.first().and_then(|f| f.parse::<custom_editor::CDoc>().ok()).map(|cdoc| {
-                                match verb.as_str() {
-                                    "editor-undo" => h.editor_undo(self, cdoc),
-                                    "editor-redo" => h.editor_redo(self, cdoc),
-                                    _ => h.editor_revert(self, cdoc),
-                                }
-                                .map(|_| Vec::new())
-                                .map_err(|why| ("refused", why))
-                            })
+                            fields
+                                .first()
+                                .and_then(|f| f.parse::<custom_editor::CDoc>().ok())
+                                .map(|cdoc| {
+                                    match verb.as_str() {
+                                        "editor-undo" => h.editor_undo(self, cdoc),
+                                        "editor-redo" => h.editor_redo(self, cdoc),
+                                        _ => h.editor_revert(self, cdoc),
+                                    }
+                                    .map(|_| Vec::new())
+                                    .map_err(|why| ("refused", why))
+                                })
                         }
                         "quickdiff" if self.has(Feature::QuickDiff) => {
                             QuickDiffRequest::parse(id, &fields)
                                 .map(|r| Ok(h.quickdiff(self, &r).unwrap_or_default()))
+                        }
+                        "debug-resolve" if self.has(Feature::Debug) => {
+                            DebugResolve::parse(id, &fields, &req_body).map(|r| {
+                                match h.resolve_debug(self, &r) {
+                                    Resolved::Unchanged => Ok(Vec::new()),
+                                    Resolved::Config(c) => c.encode().map_err(|e| ("toobig", e)),
+                                    Resolved::Cancel => {
+                                        Err(("cancelled", "the launch was cancelled".to_string()))
+                                    }
+                                    Resolved::Refuse(why) => Err(("refused", why)),
+                                }
+                            })
                         }
                         "commit-message" if self.has(Feature::CommitMessage) => {
                             CommitMessageRequest::parse(id, &req_body).map(|r| {
@@ -2830,9 +3062,13 @@ impl Ext {
                             let sid = fields[0].as_str();
                             let text = String::from_utf8_lossy(&req_body).into_owned();
                             Some(
-                                h.agent_prompt(self, if sid == "-" { None } else { Some(sid) }, &text)
-                                    .map(|s| s.into_bytes())
-                                    .map_err(|r| (refusal_code(&r.code), r.text)),
+                                h.agent_prompt(
+                                    self,
+                                    if sid == "-" { None } else { Some(sid) },
+                                    &text,
+                                )
+                                .map(|s| s.into_bytes())
+                                .map_err(|r| (refusal_code(&r.code), r.text)),
                             )
                         }
                         "linked" if self.has(Feature::LinkedEditing) => {

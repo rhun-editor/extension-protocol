@@ -41,7 +41,7 @@ type Range struct{ Start, End Pos }
 type Event struct {
 	Name string   // ready, setting, opened, active, saved, changed, cursor, selection, closed, project, run, bye, edits, resync, hover, action
 	Args []string // the fields after the name; the last may contain spaces
-	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f); the selections event's lines (1.1)
+	Body []byte   // the edits event's records (section 6a); the action event's data (section 12f); the selections event's lines (1.1); terminal-output's lines
 }
 
 // Edit is one record of an edits event: at byte offset Start, Del bytes were deleted and Ins
@@ -507,8 +507,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 				return nil, nil
 			}
 		}
-		// edits (DOC VERSION LEN), selections (DOC N LEN), action (LEN), link (ID LEN) and, with
-		// command-args, run (NAME DOC FROM LEN) are followed by a body
+		// edits (DOC VERSION LEN), selections (DOC N LEN), action (LEN), link (ID LEN), terminal-output (TERM
+		// DROPPED LEN) and, with command-args, run (NAME DOC FROM LEN) are followed by a body
 		lenAt := -1
 		if (ev.Name == "edits" || ev.Name == "selections") && len(ev.Args) >= 3 {
 			lenAt = 2
@@ -524,8 +524,12 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 3
 		} else if (ev.Name == "link" || ev.Name == "found") && len(ev.Args) == 2 {
 			lenAt = 1
+		} else if ev.Name == "folders" && len(ev.Args) == 1 {
+			lenAt = 0 // workspace-folders: the folders
 		} else if ev.Name == "editor-path" && len(ev.Args) == 2 {
 			lenAt = 1 // a custom editor's new path
+		} else if ev.Name == "terminal-output" && len(ev.Args) == 3 {
+			lenAt = 2
 		}
 		if lenAt >= 0 {
 			// checked before anything is allocated: a length rhun cannot have sent ends the
@@ -644,6 +648,21 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			}
 			if _, err := e.beginSource(id); err != nil {
 				ev.Args = append(ev.Args, "\x00busy")
+			}
+		}
+		// debug-resolve TYPE REQUEST NODEBUG LEN is followed by a configuration body; "0 cancel ID"
+		// ends its context
+		if len(fields) == 6 && fields[1] == "debug-resolve" {
+			n, ok := bodyLen(fields[5], MaxDebugBody)
+			if !ok {
+				return nil, fmt.Errorf("a debug-resolve length %q", fields[5])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+			if _, err := e.beginSource(id); err != nil {
+				return nil, err
 			}
 		}
 		// commit-message (LEN) is followed by a body; "0 cancel ID" ends its context
