@@ -741,7 +741,8 @@ impl Ext {
             ExecSignal::Terminate => "terminate",
             ExecSignal::Kill => "kill",
         };
-        self.request(&format!("nb-exec-signal {exec} {word}"), None).map(|_| ())
+        self.request(&format!("nb-exec-signal {exec} {word}"), None)
+            .map(|_| ())
     }
 }
 

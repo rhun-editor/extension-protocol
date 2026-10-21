@@ -138,7 +138,9 @@ fn record(out: &mut Vec<u8>, head: &str, data: &[u8]) {
 }
 
 fn one_line(s: &str) -> String {
-    s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
+    s.chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
 }
 
 fn cut(s: &str, max: usize) -> &str {
@@ -180,7 +182,11 @@ impl Node {
     }
     /// Muted text after the label.
     pub fn desc(mut self, text: &str) -> Node {
-        record(&mut self.extra, "desc", cut(&one_line(text), 1000).as_bytes());
+        record(
+            &mut self.extra,
+            "desc",
+            cut(&one_line(text), 1000).as_bytes(),
+        );
         self
     }
     /// The tooltip, plain text (at most 4000 bytes).
@@ -200,7 +206,11 @@ impl Node {
     }
     /// Label bytes in the accent color (at most 16 ranges).
     pub fn highlight(mut self, bytes: Range<usize>) -> Node {
-        record(&mut self.extra, &format!("hl {} {}", bytes.start, bytes.end), b"");
+        record(
+            &mut self.extra,
+            &format!("hl {} {}", bytes.start, bytes.end),
+            b"",
+        );
         self
     }
     /// A count at the row's right (0: none).
@@ -225,7 +235,11 @@ impl Node {
     }
     /// A click (on a leaf) or Enter opens the file at LINE COL (1-based), as `open` does.
     pub fn open(mut self, path: &str, line: u32, col: u32) -> Node {
-        record(&mut self.extra, &format!("open {line} {col}"), path.as_bytes());
+        record(
+            &mut self.extra,
+            &format!("open {line} {col}"),
+            path.as_bytes(),
+        );
         self
     }
     /// A click (on a leaf) or Enter runs one of the extension's commands with ARGS.
@@ -253,8 +267,14 @@ impl Node {
     }
 
     fn check_id(&self) -> Result<(), String> {
-        if self.id.is_empty() || self.id.len() > 1000 || self.id.iter().any(|&b| b == b'\n' || b == 0) {
-            return Err(format!("bad node id {:?}", String::from_utf8_lossy(&self.id)));
+        if self.id.is_empty()
+            || self.id.len() > 1000
+            || self.id.iter().any(|&b| b == b'\n' || b == 0)
+        {
+            return Err(format!(
+                "bad node id {:?}",
+                String::from_utf8_lossy(&self.id)
+            ));
         }
         Ok(())
     }
@@ -262,7 +282,14 @@ impl Node {
     fn encode(&self, out: &mut Vec<u8>) -> Result<(), String> {
         self.check_id()?;
         out.extend_from_slice(
-            format!("{} {} {} {}\n", self.id.len(), self.label.len(), self.extra.len(), self.kids.word()).as_bytes(),
+            format!(
+                "{} {} {} {}\n",
+                self.id.len(),
+                self.label.len(),
+                self.extra.len(),
+                self.kids.word()
+            )
+            .as_bytes(),
         );
         out.extend_from_slice(&self.id);
         out.extend_from_slice(self.label.as_bytes());
@@ -339,7 +366,14 @@ impl Patch {
             State::Error(t, k) => ("error", cut(&one_line(t), 1000).to_string(), k.clone()),
         };
         let mut data = text.clone().into_bytes();
-        data.extend_from_slice(keys.iter().take(3).cloned().collect::<Vec<_>>().join(" ").as_bytes());
+        data.extend_from_slice(
+            keys.iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .as_bytes(),
+        );
         self.op(&format!("state {word} {}", text.len()), &data)
     }
     /// The indeterminate bar at the top of the view.
@@ -354,7 +388,10 @@ impl Patch {
             }
         }
         self.nodes += nodes.len();
-        self.op(&format!("{name} {} {} {}", parent.len(), nodes.len(), more as u8), &data)
+        self.op(
+            &format!("{name} {} {} {}", parent.len(), nodes.len(), more as u8),
+            &data,
+        )
     }
     /// PARENT's children (an empty parent: the root), replacing the ones it had; a child whose
     /// id it already had keeps its expansion and its own children. `more`: a "Load more" row.
@@ -384,14 +421,23 @@ impl Patch {
     }
     /// Defines or replaces an action: KEY (`[a-z0-9_]{1,40}`), a built-in icon name (or none:
     /// its title as text), where it shows, its tooltip or menu label.
-    pub fn action(&mut self, key: &str, icon: Option<&str>, place: Where, title: &str) -> &mut Patch {
+    pub fn action(
+        &mut self,
+        key: &str,
+        icon: Option<&str>,
+        place: Where,
+        title: &str,
+    ) -> &mut Patch {
         let w = match place {
             Where::Title => "title",
             Where::Node => "node",
             Where::None => "none",
         };
         let t = cut(&one_line(title), 200).to_string();
-        self.op(&format!("action {key} {} {w}", icon.unwrap_or("-")), t.as_bytes())
+        self.op(
+            &format!("action {key} {} {w}", icon.unwrap_or("-")),
+            t.as_bytes(),
+        )
     }
     /// Lines appended to a log view (feature `view-log`): a severity and a text each (one line;
     /// SGR color sequences color it, other control characters are dropped by rhun).
@@ -411,7 +457,14 @@ impl Patch {
     }
     /// Several nodes may be selected (Ctrl and Shift).
     pub fn select_mode(&mut self, multi: bool) -> &mut Patch {
-        self.op(if multi { "select-mode multi" } else { "select-mode single" }, b"")
+        self.op(
+            if multi {
+                "select-mode multi"
+            } else {
+                "select-mode single"
+            },
+            b"",
+        )
     }
     /// An op this crate has no method for, as the wire writes it.
     pub fn raw(&mut self, head: &str, data: &[u8]) -> &mut Patch {
@@ -423,7 +476,10 @@ impl Patch {
             return Err(e.clone());
         }
         if self.nodes > MAX_NODES {
-            return Err(format!("{} nodes in one patch (at most {MAX_NODES})", self.nodes));
+            return Err(format!(
+                "{} nodes in one patch (at most {MAX_NODES})",
+                self.nodes
+            ));
         }
         let mut out = format!("{}\n", self.ops.len()).into_bytes();
         for op in &self.ops {
@@ -456,23 +512,51 @@ pub enum RetainedEvent {
     /// The keyboard came (true) or went.
     Focus(bool),
     /// The selection changed: the node ids.
-    Select { rev: u64, ids: Vec<Vec<u8>> },
+    Select {
+        rev: u64,
+        ids: Vec<Vec<u8>>,
+    },
     /// Enter, a double click, or a click on a leaf without an `open` or `command` record.
-    Activate { rev: u64, id: Vec<u8> },
-    Expand { rev: u64, id: Vec<u8> },
-    Collapse { rev: u64, id: Vec<u8> },
+    Activate {
+        rev: u64,
+        id: Vec<u8>,
+    },
+    Expand {
+        rev: u64,
+        id: Vec<u8>,
+    },
+    Collapse {
+        rev: u64,
+        id: Vec<u8>,
+    },
     /// A checkbox toggled.
-    Check { rev: u64, on: bool, id: Vec<u8> },
+    Check {
+        rev: u64,
+        on: bool,
+        id: Vec<u8>,
+    },
     /// An action invoked on a node (empty id: the header or a state button).
-    Action { rev: u64, key: String, id: Vec<u8> },
+    Action {
+        rev: u64,
+        key: String,
+        id: Vec<u8>,
+    },
     /// A user action on a node that no longer exists was dropped.
-    Discarded { rev: u64, what: String, id: Vec<u8> },
+    Discarded {
+        rev: u64,
+        what: String,
+        id: Vec<u8>,
+    },
     /// The user closed a tab instance.
     Closed,
     /// The user cleared a log view (its Clear button).
     Clear,
     /// Any other `0 view VIEW WHAT ...` event: WHAT, the fields after it, the body.
-    Other { what: String, fields: Vec<String>, body: Vec<u8> },
+    Other {
+        what: String,
+        fields: Vec<String>,
+        body: Vec<u8>,
+    },
 }
 
 /// rhun asks for a node's children (`vkids`) or for more of them (`vmore`).
@@ -490,7 +574,12 @@ pub struct ChildrenRequest {
 }
 
 impl ChildrenRequest {
-    pub(crate) fn parse(id: u64, verb: &str, fields: &[String], body: &[u8]) -> Option<ChildrenRequest> {
+    pub(crate) fn parse(
+        id: u64,
+        verb: &str,
+        fields: &[String],
+        body: &[u8],
+    ) -> Option<ChildrenRequest> {
         let num = |i: usize| fields.get(i).and_then(|v| v.parse::<u64>().ok());
         Some(ChildrenRequest {
             id,
@@ -511,14 +600,26 @@ pub(crate) fn request_has_body(verb: &str) -> bool {
 pub(crate) fn has_body(what: &str) -> bool {
     matches!(
         what,
-        "select" | "activate" | "expand" | "collapse" | "check" | "action" | "discarded" | "change" | "link"
-            | "text" | "paste"
+        "select"
+            | "activate"
+            | "expand"
+            | "collapse"
+            | "check"
+            | "action"
+            | "discarded"
+            | "change"
+            | "link"
+            | "text"
+            | "paste"
     )
 }
 
 /// `0 view VIEW open ...` as a [`ViewOpen`].
 pub fn parse_open(ev: &Event) -> Option<ViewOpen> {
-    if ev.name != "view" || ev.fields.get(1).map(String::as_str) != Some("open") || ev.fields.len() < 5 {
+    if ev.name != "view"
+        || ev.fields.get(1).map(String::as_str) != Some("open")
+        || ev.fields.len() < 5
+    {
         return None;
     }
     Some(ViewOpen {
@@ -536,7 +637,12 @@ pub fn parse_retained(ev: &Event) -> Option<(View, RetainedEvent)> {
     }
     let view: View = ev.fields.first()?.parse().ok()?;
     let what = ev.fields.get(1)?.as_str();
-    let num = |i: usize| ev.fields.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let num = |i: usize| {
+        ev.fields
+            .get(i)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
     let id = || ev.body.clone();
     let e = match what {
         "visible" => RetainedEvent::Visible(num(2) == 1),
@@ -550,10 +656,23 @@ pub fn parse_retained(ev: &Event) -> Option<(View, RetainedEvent)> {
                 .map(<[u8]>::to_vec)
                 .collect(),
         },
-        "activate" => RetainedEvent::Activate { rev: num(2), id: id() },
-        "expand" => RetainedEvent::Expand { rev: num(2), id: id() },
-        "collapse" => RetainedEvent::Collapse { rev: num(2), id: id() },
-        "check" => RetainedEvent::Check { rev: num(2), on: num(3) == 1, id: id() },
+        "activate" => RetainedEvent::Activate {
+            rev: num(2),
+            id: id(),
+        },
+        "expand" => RetainedEvent::Expand {
+            rev: num(2),
+            id: id(),
+        },
+        "collapse" => RetainedEvent::Collapse {
+            rev: num(2),
+            id: id(),
+        },
+        "check" => RetainedEvent::Check {
+            rev: num(2),
+            on: num(3) == 1,
+            id: id(),
+        },
         "action" => RetainedEvent::Action {
             rev: num(2),
             key: ev.fields.get(3).cloned().unwrap_or_default(),
@@ -564,8 +683,8 @@ pub fn parse_retained(ev: &Event) -> Option<(View, RetainedEvent)> {
             what: ev.fields.get(3).cloned().unwrap_or_default(),
             id: id(),
         },
-        "size" | "metrics" | "hover" | "down" | "drag" | "up" | "click" | "leave" | "wheel" | "open" | "key"
-        | "text" | "paste" | "selectall" | "dblclick" => return None,
+        "size" | "metrics" | "hover" | "down" | "drag" | "up" | "click" | "leave" | "wheel"
+        | "open" | "key" | "text" | "paste" | "selectall" | "dblclick" => return None,
         "closed" => RetainedEvent::Closed,
         "clear" => RetainedEvent::Clear,
         _ => RetainedEvent::Other {
@@ -585,7 +704,11 @@ mod tests {
     fn a_patch_encodes_as_the_spec_example() {
         let mut p = Patch::new();
         p.title("TODO").badge(3);
-        p.kids(b"", &[Node::new("a", "Alpha").kids(Kids::Open).badge(1)], false);
+        p.kids(
+            b"",
+            &[Node::new("a", "Alpha").kids(Kids::Open).badge(1)],
+            false,
+        );
         let body = p.encode().unwrap();
         assert_eq!(
             body,
@@ -596,8 +719,12 @@ mod tests {
     #[test]
     fn log_lines_keep_one_line_each() {
         let mut p = Patch::new();
-        p.log(&[(LogLevel::Info, "start"), (LogLevel::Error, "two\nlines")]).clear();
-        assert_eq!(p.encode().unwrap(), b"2\nlog 2 27\ninfo start\nerror two lines\nclear 0\n".to_vec());
+        p.log(&[(LogLevel::Info, "start"), (LogLevel::Error, "two\nlines")])
+            .clear();
+        assert_eq!(
+            p.encode().unwrap(),
+            b"2\nlog 2 27\ninfo start\nerror two lines\nclear 0\n".to_vec()
+        );
     }
 
     #[test]
@@ -614,17 +741,35 @@ mod tests {
     fn events_parse() {
         let ev = Event {
             name: "view".into(),
-            fields: vec!["3".into(), "select".into(), "2".into(), "1".into(), "4".into()],
+            fields: vec![
+                "3".into(),
+                "select".into(),
+                "2".into(),
+                "1".into(),
+                "4".into(),
+            ],
             rest: String::new(),
             body: b"abc\n".to_vec(),
         };
         assert_eq!(
             parse_retained(&ev),
-            Some((3, RetainedEvent::Select { rev: 2, ids: vec![b"abc".to_vec()] }))
+            Some((
+                3,
+                RetainedEvent::Select {
+                    rev: 2,
+                    ids: vec![b"abc".to_vec()]
+                }
+            ))
         );
         let open = Event {
             name: "view".into(),
-            fields: vec!["3".into(), "open".into(), "tree".into(), "sidebar".into(), "todo".into()],
+            fields: vec![
+                "3".into(),
+                "open".into(),
+                "tree".into(),
+                "sidebar".into(),
+                "todo".into(),
+            ],
             rest: String::new(),
             body: Vec::new(),
         };
