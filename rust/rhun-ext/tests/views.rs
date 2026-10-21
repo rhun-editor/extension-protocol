@@ -15,7 +15,11 @@ struct Probe(Arc<Mutex<Seen>>);
 
 impl Handler for Probe {
     fn view_open(&mut self, _ext: &Ext, open: &ViewOpen) {
-        self.0.lock().unwrap().log.push(format!("open {} {} {}", open.view, open.place, open.name));
+        self.0
+            .lock()
+            .unwrap()
+            .log
+            .push(format!("open {} {} {}", open.view, open.place, open.name));
     }
     fn view_event(&mut self, _ext: &Ext, view: View, ev: &RetainedEvent) {
         self.0.lock().unwrap().log.push(format!("{view} {ev:?}"));
@@ -44,23 +48,52 @@ fn instances_events_and_children_requests() {
             Ok(())
         }
     }
-    run_on(Cursor::new(input.to_vec()), W(shared.clone()), &[Feature::ViewTree], Probe(seen.clone())).unwrap();
+    run_on(
+        Cursor::new(input.to_vec()),
+        W(shared.clone()),
+        &[Feature::ViewTree],
+        Probe(seen.clone()),
+    )
+    .unwrap();
     let log = seen.lock().unwrap().log.clone();
     assert_eq!(log[0], "open 3 sidebar todo");
-    assert!(log[1].contains("Select { rev: 2, ids: [[97, 98, 99]] }"), "{log:?}");
-    assert!(log[2].contains("Check { rev: 2, on: true, id: [99] }"), "{log:?}");
-    assert!(log[3].contains("Action { rev: 2, key: \"pin\", id: [98] }"), "{log:?}");
+    assert!(
+        log[1].contains("Select { rev: 2, ids: [[97, 98, 99]] }"),
+        "{log:?}"
+    );
+    assert!(
+        log[2].contains("Check { rev: 2, on: true, id: [99] }"),
+        "{log:?}"
+    );
+    assert!(
+        log[3].contains("Action { rev: 2, key: \"pin\", id: [98] }"),
+        "{log:?}"
+    );
     let written = String::from_utf8(shared.lock().unwrap().clone()).unwrap();
     assert!(written.starts_with("hello 1 view-tree\n"), "{written}");
-    assert!(written.contains("ok 5 35\n1\nkids 1 1 0 19\nx2 5 0 leaf\nx1X one"), "{written}");
+    assert!(
+        written.contains("ok 5 35\n1\nkids 1 1 0 19\nx2 5 0 leaf\nx1X one"),
+        "{written}"
+    );
 }
 
 #[test]
 fn actions_and_inline_records_encode() {
     let mut p = Patch::new();
-    p.action("pin", Some("pin"), rhun_ext::views::Where::Node, "Pin").select_mode(true);
-    p.kids(b"", &[Node::new("a", "A").kids(Kids::Leaf).inline(&["pin"]).menu(&["pin", "hide"])], false);
+    p.action("pin", Some("pin"), rhun_ext::views::Where::Node, "Pin")
+        .select_mode(true);
+    p.kids(
+        b"",
+        &[Node::new("a", "A")
+            .kids(Kids::Leaf)
+            .inline(&["pin"])
+            .menu(&["pin", "hide"])],
+        false,
+    );
     let body = String::from_utf8(p.encode().unwrap()).unwrap();
-    assert!(body.starts_with("3\naction pin pin node 3\nPinselect-mode multi 0\n"), "{body}");
+    assert!(
+        body.starts_with("3\naction pin pin node 3\nPinselect-mode multi 0\n"),
+        "{body}"
+    );
     assert!(body.contains("inline 3\npinmenu 8\npin hide"), "{body}");
 }
