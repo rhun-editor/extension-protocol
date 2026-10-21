@@ -115,12 +115,18 @@ pub fn sid_ok(sid: &str) -> bool {
 /// The body of `agent-sessions`: N, then a row per session.
 pub fn encode_sessions(sessions: &[Session]) -> Result<Vec<u8>, String> {
     if sessions.len() > MAX_SESSIONS {
-        return Err(format!("{} sessions: at most {MAX_SESSIONS}", sessions.len()));
+        return Err(format!(
+            "{} sessions: at most {MAX_SESSIONS}",
+            sessions.len()
+        ));
     }
     let mut b = format!("{}\n", sessions.len()).into_bytes();
     for (i, s) in sessions.iter().enumerate() {
         if !sid_ok(&s.id) {
-            return Err(format!("session {}: the id must be 1 to 128 visible ASCII bytes", i + 1));
+            return Err(format!(
+                "session {}: the id must be 1 to 128 visible ASCII bytes",
+                i + 1
+            ));
         }
         if sessions[..i].iter().any(|o| o.id == s.id) {
             return Err(format!("session id {} appears twice", s.id));
@@ -223,7 +229,12 @@ pub struct Message {
 
 impl Message {
     pub fn new(role: Role, text: &str) -> Message {
-        Message { role, name: String::new(), text: text.to_string(), model: String::new() }
+        Message {
+            role,
+            name: String::new(),
+            text: text.to_string(),
+            model: String::new(),
+        }
     }
     pub fn name(mut self, name: &str) -> Message {
         self.name = name.to_string();
@@ -249,7 +260,10 @@ pub struct Transcript {
 impl Transcript {
     /// The messages of `all` from `from` on, as many as fit one answer (rhun asks for the rest).
     pub fn page(all: &[Message], from: u64) -> Transcript {
-        let mut t = Transcript { total: all.len() as u64, messages: Vec::new() };
+        let mut t = Transcript {
+            total: all.len() as u64,
+            messages: Vec::new(),
+        };
         let mut size = 32;
         for m in all.iter().skip(from as usize) {
             if t.messages.len() >= MAX_MESSAGES || size + m.encoded_len() > MAX_BODY {
@@ -268,7 +282,14 @@ impl Transcript {
             let text = cut(&m.text, MAX_TEXT);
             let model = cut(&m.model, 4096);
             b.extend_from_slice(
-                format!("{} {} {} {}\n", m.role.word(), name.len(), text.len(), model.len()).as_bytes(),
+                format!(
+                    "{} {} {} {}\n",
+                    m.role.word(),
+                    name.len(),
+                    text.len(),
+                    model.len()
+                )
+                .as_bytes(),
             );
             b.extend_from_slice(name.as_bytes());
             b.extend_from_slice(text.as_bytes());
@@ -283,7 +304,10 @@ impl Transcript {
         let total = r.num()?;
         let n = r.num()?;
         r.eol()?;
-        let mut t = Transcript { total, messages: Vec::new() };
+        let mut t = Transcript {
+            total,
+            messages: Vec::new(),
+        };
         for _ in 0..n {
             let role = Role::parse(&r.word()?).ok_or("unknown role")?;
             let nl = r.num()? as usize;
@@ -293,7 +317,12 @@ impl Transcript {
             let name = r.text(nl)?;
             let text = r.text(tl)?;
             let model = r.text(ml)?;
-            t.messages.push(Message { role, name, text, model });
+            t.messages.push(Message {
+                role,
+                name,
+                text,
+                model,
+            });
         }
         if r.p != body.len() {
             return Err("bytes after the messages".into());
@@ -359,7 +388,10 @@ pub struct Refusal {
 
 impl Refusal {
     pub fn new(code: &str, text: &str) -> Refusal {
-        Refusal { code: code.to_string(), text: text.to_string() }
+        Refusal {
+            code: code.to_string(),
+            text: text.to_string(),
+        }
     }
 }
 
@@ -367,14 +399,32 @@ impl Refusal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposalEvent {
     /// The file at `index` (from 1, in the edit's order) was accepted whole.
-    Accepted { proposal: u64, index: u64 },
-    Rejected { proposal: u64, index: u64 },
+    Accepted {
+        proposal: u64,
+        index: u64,
+    },
+    Rejected {
+        proposal: u64,
+        index: u64,
+    },
     /// It changed since it was proposed: not applied.
-    Stale { proposal: u64, index: u64 },
+    Stale {
+        proposal: u64,
+        index: u64,
+    },
     /// Some of its hunks were accepted.
-    Partial { proposal: u64, index: u64, accepted: u64, hunks: u64 },
+    Partial {
+        proposal: u64,
+        index: u64,
+        accepted: u64,
+        hunks: u64,
+    },
     /// Every file is decided: how many were accepted (whole or partly) and rejected (or stale).
-    Done { proposal: u64, accepted: u64, rejected: u64 },
+    Done {
+        proposal: u64,
+        accepted: u64,
+        rejected: u64,
+    },
 }
 
 impl ProposalEvent {
@@ -383,14 +433,23 @@ impl ProposalEvent {
         let n = |i: usize| fields.get(i).and_then(|f| f.parse::<u64>().ok());
         let proposal = n(0)?;
         if fields.get(1).map(String::as_str) == Some("done") {
-            return Some(ProposalEvent::Done { proposal, accepted: n(2)?, rejected: n(3)? });
+            return Some(ProposalEvent::Done {
+                proposal,
+                accepted: n(2)?,
+                rejected: n(3)?,
+            });
         }
         let index = n(1)?;
         Some(match fields.get(2)?.as_str() {
             "accepted" => ProposalEvent::Accepted { proposal, index },
             "rejected" => ProposalEvent::Rejected { proposal, index },
             "stale" => ProposalEvent::Stale { proposal, index },
-            "partial" => ProposalEvent::Partial { proposal, index, accepted: n(3)?, hunks: n(4)? },
+            "partial" => ProposalEvent::Partial {
+                proposal,
+                index,
+                accepted: n(3)?,
+                hunks: n(4)?,
+            },
             _ => return None,
         })
     }
@@ -425,7 +484,13 @@ pub fn parse_tools(body: &[u8]) -> Result<Vec<ToolInfo>, String> {
         let title = r.text(tl)?;
         let description = r.text(dl)?;
         let input = r.text(il)?;
-        v.push(ToolInfo { name, readonly: flags == "ro", title, description, input });
+        v.push(ToolInfo {
+            name,
+            readonly: flags == "ro",
+            title,
+            description,
+            input,
+        });
     }
     Ok(v)
 }
@@ -465,13 +530,17 @@ impl ToolInput {
     }
     /// `key value`: the value is one line.
     pub fn set(mut self, key: &str, value: &str) -> ToolInput {
-        let v: String = value.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+        let v: String = value
+            .chars()
+            .map(|c| if c == '\n' { ' ' } else { c })
+            .collect();
         self.b.extend_from_slice(format!("{key} {v}\n").as_bytes());
         self
     }
     /// `text LEN` or `edit LEN` and the bytes.
     pub fn bytes(mut self, key: &str, value: &[u8]) -> ToolInput {
-        self.b.extend_from_slice(format!("{key} {}\n", value.len()).as_bytes());
+        self.b
+            .extend_from_slice(format!("{key} {}\n", value.len()).as_bytes());
         self.b.extend_from_slice(value);
         self
     }
@@ -495,14 +564,18 @@ pub struct ToolCall {
 impl Ext {
     /// Replaces this extension's rows in the agents panel (feature agents).
     pub fn agent_sessions(&self, sessions: &[Session]) -> Result<(), Error> {
-        let body = encode_sessions(sessions).map_err(|e| Error { code: "toobig".into(), text: e })?;
+        let body = encode_sessions(sessions).map_err(|e| Error {
+            code: "toobig".into(),
+            text: e,
+        })?;
         self.request("agent-sessions", Some(&body)).map(|_| ())
     }
 
     /// Says the session now has `total` messages, the first changed one at `first`; rhun asks
     /// for them when the session is open.
     pub fn agent_changed(&self, sid: &str, total: u64, first: u64) -> Result<(), Error> {
-        self.request(&format!("agent-changed {sid} {total} {first}"), None).map(|_| ())
+        self.request(&format!("agent-changed {sid} {total} {first}"), None)
+            .map(|_| ())
     }
 
     /// Proposes an edit for the user to review (feature edit-review): the proposal's id, at once.
@@ -517,20 +590,25 @@ impl Ext {
 
     /// Withdraws a proposal: its Review tab closes, nothing more is said about it.
     pub fn unpropose(&self, proposal: u64) -> Result<(), Error> {
-        self.request(&format!("unpropose {proposal}"), None).map(|_| ())
+        self.request(&format!("unpropose {proposal}"), None)
+            .map(|_| ())
     }
 
     /// The tools rhun offers: its own and those of installed extensions (feature tools).
     pub fn tools(&self) -> Result<Vec<ToolInfo>, Error> {
         let r: Reply = self.request("tools", None)?;
-        parse_tools(&r.body).map_err(|e| Error { code: "syntax".into(), text: e })
+        parse_tools(&r.body).map_err(|e| Error {
+            code: "syntax".into(),
+            text: e,
+        })
     }
 
     /// Calls a tool and waits for its output. A tool that changes anything asks the user first:
     /// `refused denied by the user` when they say no. Call it from a thread of your own when your
     /// handler must go on meanwhile.
     pub fn tool_call(&self, tool: &str, input: &[u8]) -> Result<Vec<u8>, Error> {
-        self.request(&format!("tool-call {tool}"), Some(input)).map(|r| r.body)
+        self.request(&format!("tool-call {tool}"), Some(input))
+            .map(|r| r.body)
     }
 
     /// Shows a card in the session's conversation (feature agent-prompts): a prompt line and the
@@ -550,10 +628,17 @@ impl Ext {
 /// A proposal's body: the head and the edit in 12g's grammar whatever was agreed (the Review tab
 /// reads 12g: a hash goes as `-`, the edit's label and `confirm` are left out, and file operations
 /// are refused `unknown`).
-pub(crate) fn proposal_body(label: &str, sid: &str, edit: &WorkspaceEdit) -> Result<Vec<u8>, Error> {
+pub(crate) fn proposal_body(
+    label: &str,
+    sid: &str,
+    edit: &WorkspaceEdit,
+) -> Result<Vec<u8>, Error> {
     let e = edit
         .encode_with(crate::lang::EditCaps::V1)
-        .map_err(|(code, text)| Error { code: code.into(), text })?;
+        .map_err(|(code, text)| Error {
+            code: code.into(),
+            text,
+        })?;
     let mut body = format!("{} {}\n{label}{sid}", label.len(), sid.len()).into_bytes();
     body.extend_from_slice(&e);
     Ok(body)
@@ -573,14 +658,25 @@ mod tests {
             .label("Fix")
             .confirm();
         let b = proposal_body("L", "s1", &edit).unwrap();
-        assert_eq!(b, b"1 2\nLs1".iter().chain(b"1\n8 - 1\n/p/a.txt1 1 1 1 1\ny").copied().collect::<Vec<u8>>());
+        assert_eq!(
+            b,
+            b"1 2\nLs1"
+                .iter()
+                .chain(b"1\n8 - 1\n/p/a.txt1 1 1 1 1\ny")
+                .copied()
+                .collect::<Vec<u8>>()
+        );
         let ops = WorkspaceEdit::new().create("/p/b.txt", Create::default());
         assert_eq!(proposal_body("L", "", &ops).unwrap_err().code, "unknown");
     }
 
     #[test]
     fn sessions_encode() {
-        let s = Session::new("s1", "Fix it").updated(12).state(SessionState::Working).model("m").cwd("/p");
+        let s = Session::new("s1", "Fix it")
+            .updated(12)
+            .state(SessionState::Working)
+            .model("m")
+            .cwd("/p");
         let b = encode_sessions(&[s]).unwrap();
         assert_eq!(b, b"1\n12 working 2 6 1 2\ns1Fix itm/p");
         assert!(encode_sessions(&[Session::new("a b", "")]).is_err());
@@ -600,7 +696,11 @@ mod tests {
         assert_eq!(back, t);
         let tool = Message::new(Role::Tool, "src/main.rs").name("read_file");
         assert_eq!(
-            Transcript { total: 1, messages: vec![tool] }.encode(),
+            Transcript {
+                total: 1,
+                messages: vec![tool]
+            }
+            .encode(),
             b"1 1\ntool 9 11 0\nread_filesrc/main.rs"
         );
     }
@@ -608,12 +708,30 @@ mod tests {
     #[test]
     fn proposal_events() {
         let f = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
-        assert_eq!(ProposalEvent::parse(&f("3 2 accepted")), Some(ProposalEvent::Accepted { proposal: 3, index: 2 }));
+        assert_eq!(
+            ProposalEvent::parse(&f("3 2 accepted")),
+            Some(ProposalEvent::Accepted {
+                proposal: 3,
+                index: 2
+            })
+        );
         assert_eq!(
             ProposalEvent::parse(&f("3 1 partial 1 2")),
-            Some(ProposalEvent::Partial { proposal: 3, index: 1, accepted: 1, hunks: 2 })
+            Some(ProposalEvent::Partial {
+                proposal: 3,
+                index: 1,
+                accepted: 1,
+                hunks: 2
+            })
         );
-        assert_eq!(ProposalEvent::parse(&f("3 done 1 1")), Some(ProposalEvent::Done { proposal: 3, accepted: 1, rejected: 1 }));
+        assert_eq!(
+            ProposalEvent::parse(&f("3 done 1 1")),
+            Some(ProposalEvent::Done {
+                proposal: 3,
+                accepted: 1,
+                rejected: 1
+            })
+        );
         assert_eq!(ProposalEvent::parse(&f("3 1 maybe")), None);
     }
 
@@ -628,7 +746,10 @@ mod tests {
         }];
         assert_eq!(parse_tools(&encode_tools(&t)).unwrap(), t);
         assert_eq!(
-            ToolInput::new().set("path", "a b").bytes("text", b"x\ny").into_bytes(),
+            ToolInput::new()
+                .set("path", "a b")
+                .bytes("text", b"x\ny")
+                .into_bytes(),
             b"path a b\ntext 3\nx\ny"
         );
     }
