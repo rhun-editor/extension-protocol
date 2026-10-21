@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,6 +164,37 @@ func TestActionResolveAnswers(t *testing.T) {
 		_, why := h.checkActionResolve(okMsg(c.body))
 		want(t, c.name, why, c.part)
 	}
+}
+
+// A code action's edit, and a resolved one, is a transaction with workspace-edits agreed (as rhun
+// reads it), 12g's without: then a hash, a file operation, a label or confirm is refused, and named.
+func TestCodeActionEditsFollowTheAgreedGrammar(t *testing.T) {
+	h := actionsHost(t)
+	disk := filepath.Join(h.project, "disk.go")
+	plain := wsBody(grp("#1", "0", ed(1, 1, 1, 1, "x")))
+	cases := []struct{ name, edit, part string }{
+		{"a hash", wsBody(grp(disk, fnv(t, disk), ed(1, 1, 1, 1, "x"))), "is a hash precondition of protocol 1.1 (feature workspace-edits)"},
+		{"a file operation", wsBody(op("rename", "-", disk, filepath.Join(h.project, "moved.go"))), "file 1 is a rename entry, a file operation of protocol 1.1"},
+		{"a label", plain + "label 3\nFix", "a label record of protocol 1.1 (feature workspace-edits)"},
+		{"confirm", plain + "confirm 0\n", "a confirm record of protocol 1.1 (feature workspace-edits)"},
+	}
+	check := func(agreed bool) {
+		for _, c := range cases {
+			parts := []string{c.part, "this edit is read with 12g's grammar"}
+			if agreed {
+				parts = []string{""}
+			}
+			_, _, why := h.checkCodeActions(okMsg("1\n"+act2("quickfix", "Fix", c.edit, "")), nil)
+			_, rwhy := h.checkActionResolve(okMsg(fmt.Sprintf("%d 0\n%s", len(c.edit), c.edit)))
+			for _, part := range parts {
+				want(t, fmt.Sprintf("%s, agreed %v", c.name, agreed), why, part)
+				want(t, fmt.Sprintf("%s resolved, agreed %v", c.name, agreed), rwhy, part)
+			}
+		}
+	}
+	check(false)
+	h.features = map[string]bool{"workspace-edits": true, "file-operations": true}
+	check(true)
 }
 
 func TestKeyFeatures(t *testing.T) {
