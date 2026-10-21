@@ -1430,7 +1430,12 @@ where
 
 /// [`run_on`] without threads, as on `wasm32-wasip1`, on any target (tests of that path).
 #[doc(hidden)]
-pub fn run_on_threadless<R, W, H>(input: R, output: W, features: &[Feature], mut handler: H) -> io::Result<()>
+pub fn run_on_threadless<R, W, H>(
+    input: R,
+    output: W,
+    features: &[Feature],
+    mut handler: H,
+) -> io::Result<()>
 where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
