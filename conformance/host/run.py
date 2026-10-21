@@ -1514,6 +1514,254 @@ plain('pres.without-the-features-unknown', ['conf/full'],
       ops=[["req", "decoration-type", "t {LEN}", "faded\n"], ["req", "semantic-legend", "ra {LEN}", "function\n"], DONE],
       script=std(pre=[OPEN_A], wait=900), check=chk_presentation_unagreed)
 
+
+# ================================================================ protocol 1.1: terminals and tasks
+
+def tdef(task_id, form, label, cmd, extra=''):
+    """A definition: TASK_ID FORM LABEL_LEN CMD_LEN CWD_LEN EXTRA_LEN LF + the fields."""
+    return '%s %s %d %d 0 %d\n%s%s%s' % (task_id, form, len(label.encode()), len(cmd.encode()),
+                                          len(extra.encode()), label, cmd, extra)
+
+
+def trec(name, args='', data=''):
+    """An EXTRA record: NAME ARGS LEN LF + its bytes."""
+    return '%s%s %d\n%s' % (name, (' ' + args) if args else '', len(data.encode()), data)
+
+
+def tlist(*defs):
+    return '%d\n%s' % (len(defs), ''.join(defs))
+
+
+TERM_ENV = {'CONF_HELLO': 'hello 1 terminals tasks\\n', 'TERM': 'xterm-256color'}
+ECHO_DEF = tdef('-', 'shell', 'Hi', 'echo conf-term-ran; exit 3')
+TERM_IDS = 'error %(id)d needs terminal='
+
+LADDER_STEPS = [
+    ('open-needs-run', ["req", "terminal-open", "{LEN}", ECHO_DEF], ('errx', TERM_IDS + 'run')),
+    ('stop-needs-run', ["req", "terminal-stop", "1"], ('errx', TERM_IDS + 'run')),
+    ('tasks-set-needs-run', ["req", "tasks-set", "{LEN}", "0\n"], ('errx', TERM_IDS + 'run')),
+    ('task-start-needs-run', ["req", "task-start", "build"], ('errx', TERM_IDS + 'run')),
+    DONE,
+]
+LADDER_OPS, _ = split_steps(LADDER_STEPS)
+
+
+def chk_terminals_ladder(r):
+    r.finished()
+    check_steps(r, LADDER_STEPS)
+    r.ok('features-agreed', '0 features terminals tasks' in r.lines(), 'got %r' % [l for l in r.lines() if 'features' in l])
+    r.ok('no-dialog', 'dialog=none' in r.seg('d'), 'got %r' % r.seg('d'))
+
+
+plain('terminals.ladder-suggest', ['conf/tsug'], ops=LADDER_OPS, env=TERM_ENV,
+      script=['wait-ext tsug running', 'wait 1500', 'echo @d', 'print-dialog', 'quit'], check=chk_terminals_ladder)
+
+UNAGREED_STEPS = [
+    ('tasks-set-unagreed', ["req", "tasks-set", "{LEN}", "0\n"], ('err', 'unknown')),
+    DONE,
+]
+UNAGREED_OPS, _ = split_steps(UNAGREED_STEPS)
+
+
+def chk_tasks_unagreed(r):
+    r.finished()
+    check_steps(r, UNAGREED_STEPS)
+    feats = [l for l in r.lines() if l.startswith('0 features')]
+    r.ok('tasks-only-with-terminals', all('tasks' not in l.split()[2:] for l in feats), 'got %r' % feats)
+
+
+plain('tasks.only-with-terminals', ['conf/trun'], ops=UNAGREED_OPS,
+      env={'CONF_HELLO': 'hello 1 tasks\\n', 'TERM': 'xterm-256color'},
+      script=['wait-ext trun running', 'wait 1000', 'quit'], check=chk_tasks_unagreed)
+
+TOPEN_STEPS = [
+    ('open', ["req", "terminal-open", "{LEN}", ECHO_DEF], ('errx', 'ok %(id)d 1')),
+    ["waitfor", "0 terminal-ended 1 ", 10],
+    ('open-argv', ["req", "terminal-open", "{LEN}", tdef('-', 'argv', 'Args', 'sh\x00-c\x00echo "[$0] [$1]"\x00zero\x00one two\x00')],
+     ('errx', 'ok %(id)d 2')),
+    ["waitfor", "0 terminal-ended 2 ", 10],
+    ('input-needs-input', ["req", "terminal-input", "1 {LEN}", "x\n"], ('errx', TERM_IDS + 'input')),
+    ('screen-needs-output', ["req", "terminal-screen", "1"], ('errx', TERM_IDS + 'output')),
+    ('output-record-needs-output', ["req", "terminal-open", "{LEN}", tdef('-', 'shell', 'O', 'true', trec('output'))],
+     ('errx', TERM_IDS + 'output')),
+    ('noterm', ["req", "terminal-stop", "999"], ('errx', 'error %(id)d noterm no such terminal')),
+    ('task-record-in-terminal', ["req", "terminal-open", "{LEN}", tdef('-', 'shell', 'G', 'true', trec('group', 'build'))],
+     ('errx', 'error %(id)d syntax definition: not in a terminal: group, default, depends, matcher, ready, busy')),
+    ('terminal-id-is-dash', ["req", "terminal-open", "{LEN}", tdef('x', 'shell', 'X', 'true')],
+     ('errx', "error %(id)d syntax definition: id: a terminal's is -")),
+    ('unsupported-location', ["req", "terminal-open", "{LEN}", tdef('-', 'shell', 'L', 'true', trec('location', 'remote'))],
+     ('errx', 'error %(id)d syntax definition: unsupported location')),
+    ('unknown-record-skipped', ["req", "terminal-open", "{LEN}", tdef('-', 'shell', 'U', 'true', trec('future', 'a b'))],
+     ('errx', 'ok %(id)d 3')),
+    ('show', ["req", "terminal-show", "1 focus"], ('ok',)),
+    ('restart', ["req", "terminal-restart", "1"], ('ok',)),
+    ["waitfor", "0 terminal-ended 1 ", 10],
+    ('close', ["req", "terminal-close", "1"], ('ok',)),    # terminal-closed may come before the reply
+    ["drain", 0.3],
+    ('closed-is-noterm', ["req", "terminal-stop", "1"], ('errx', 'error %(id)d noterm no such terminal')),
+    DONE,
+]
+TOPEN_OPS, _ = split_steps(TOPEN_STEPS)
+
+
+def chk_terminals_open(r):
+    r.finished()
+    check_steps(r, TOPEN_STEPS)
+    lines = r.lines()
+    r.ok('started-event', any(re.match(r'^0 terminal-started 1 [1-9]\d* -$', l) for l in lines), 'no terminal-started 1 PID -')
+    r.eq('ended-twice-with-the-code', [l for l in lines if l.startswith('0 terminal-ended 1 ')],
+         ['0 terminal-ended 1 exit 3 0 0'] * 2)
+    r.ok('restarted', len([l for l in lines if l.startswith('0 terminal-started 1 ')]) == 2, 'one start of TERM 1')
+    r.ok('closed-event', '0 terminal-closed 1' in lines, 'no terminal-closed 1')
+    r.ok('asked', any(l.startswith('dialog=Let ') for l in r.seg('d1')), 'got %r' % r.seg('d1'))
+    r.ok('argv-as-given', any('[zero] [one two]' in l for l in r.seg('t2')), 'got %r' % r.seg('t2'))
+
+
+plain('terminals.open', ['conf/trun'], ops=TOPEN_OPS, env=TERM_ENV,
+      script=['wait-ext trun running', 'wait 1200', 'echo @d1', 'print-dialog', 'dialog yes', 'wait 6000',
+              'echo @t2', 'term-select 2', 'print-term', 'quit'], check=chk_terminals_open)
+
+TIO_STEPS = [
+    ('open-cat', ["req", "terminal-open", "{LEN}", tdef('-', 'argv', 'Cat', 'cat\x00', trec('output'))], ('errx', 'ok %(id)d 1')),
+    ["waitfor", "0 terminal-started 1 ", 10],
+    ('input', ["req", "terminal-input", "1 {LEN}", "conf-typed\n"], ('ok',)),
+    ["waitfor", "0 terminal-output 1 ", 10],
+    ["sleep", 0.3],
+    ('screen', ["req", "terminal-screen", "1"], ('okv',)),
+    ('close', ["req", "terminal-close", "1"], ('ok',)),    # terminal-closed may come before the reply
+    ["drain", 0.3],
+    DONE,
+]
+TIO_OPS, _ = split_steps(TIO_STEPS)
+
+
+def chk_terminals_io(r):
+    r.finished()
+    check_steps(r, TIO_STEPS)
+    outs = [m for m in r.events('terminal-output') if m.f[2] == '1']
+    r.ok('output-lines', any(m.body is not None and b'conf-typed\n' in m.body for m in outs),
+         'got %r' % [(m.line, m.body) for m in outs])
+    r.ok('output-dropped-field', all(re.match(r'^0 terminal-output 1 \d+ \d+$', m.line) for m in outs), 'got %r' % [m.line for m in outs])
+    ids = case_ids(TIO_STEPS)
+    m = r.reply(ids[[lbl for lbl, _ in split_steps(TIO_STEPS)[1]].index('screen')])
+    body = (m.body or b'').decode('utf-8', 'replace') if m else ''
+    head = body.split('\n', 1)[0]
+    r.ok('screen-body', re.match(r'^\d+ \d+ \d+ \d+$', head) is not None and 'conf-typed' in body, 'got %r' % body[:200])
+
+
+plain('terminals.input-output', ['conf/tout'], ops=TIO_OPS, env=TERM_ENV,
+      script=['wait-ext tout running', 'wait 1200', 'dialog yes', 'wait 4000', 'quit'], check=chk_terminals_io)
+
+
+def chk_terminals_input_cap(r):
+    e = r.ext('e', 'conf/tout')
+    r.ok('stopped', e is not None and e['state'] == 'stopped', 'got %r' % (e and e['raw']))
+    r.ok('reason', e is not None and 'a body over its cap' in (e['reason'] or ''), 'got %r' % (e and e['raw']))
+
+
+# terminal-input's body is at most 64 KiB: one over it cannot be skipped unread, so the program ends
+plain('terminals.input-over-its-cap', ['conf/tout'], ops=[["req", "terminal-input", "1 {LEN}", {'rep': 'x', 'n': 65537}]],
+      env=TERM_ENV, script=['wait-ext tout running', 'wait 2000'] + pe('e') + ['quit'], check=chk_terminals_input_cap)
+
+GOOD_LIST = tlist(
+    tdef('lint', 'shell', 'Lint', 'echo lint-ok'),
+    tdef('build', 'shell', 'Build', 'echo building', trec('group', 'build') + trec('default') + trec('matcher', 'go')),
+    tdef('chain', 'shell', 'Chain', 'echo chain-done', trec('depends', 'sequence', 'lint build')),
+    tdef('slow', 'shell', 'Slow', 'sleep 30'),
+    tdef('serve', 'shell', 'Serve', "echo starting; sleep 0.3; echo 'Serving HTTP on 0.0.0.0'; sleep 30",
+         trec('ready', '', 'Serving HTTP on {_}')),
+    tdef('smoke', 'shell', 'Smoke', 'echo smoke-ran', trec('depends', 'sequence', 'serve')),
+)
+T1 = lambda *x: tlist(*x)
+TASKS_SET_STEPS = [
+    ('count', ["req", "tasks-set", "{LEN}", "x\n"], ('errx', 'error %(id)d syntax the count of tasks')),
+    ('twice', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true'), tdef('a', 'shell', 'A2', 'true'))],
+     ('errx', 'error %(id)d syntax task 1: id listed twice')),
+    ('depends-unknown', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true', trec('depends', 'sequence', 'nope')))],
+     ('errx', 'error %(id)d syntax task 1: depends: no task "nope"')),
+    ('cycle', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true', trec('depends', 'sequence', 'b')),
+                                                 tdef('b', 'shell', 'B', 'true', trec('depends', 'parallel', 'a')))],
+     ('err', 'syntax')),
+    ('bad-pattern', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true', trec('ready', '', '{nope}')))],
+     ('errx', 'error %(id)d syntax task 1: unknown field')),
+    ('busy-without-ready', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true', trec('busy', '', 'x')))],
+     ('errx', 'error %(id)d syntax task 1: busy needs ready')),
+    ('unknown-matcher', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true', trec('matcher', 'javac')))],
+     ('errx', 'error %(id)d syntax task 1: matcher: go, gcc, rustc, tsc or msbuild')),
+    ('bad-id', ["req", "tasks-set", "{LEN}", T1(tdef('Bad', 'shell', 'A', 'true'))],
+     ('errx', 'error %(id)d syntax task 1: id: 1 to 64 bytes of a-z 0-9 _ . -, from a letter or digit')),
+    ('output-needs-output', ["req", "tasks-set", "{LEN}", T1(tdef('a', 'shell', 'A', 'true', trec('output')))],
+     ('errx', TERM_IDS + 'output')),
+    ('trailing', ["req", "tasks-set", "{LEN}", "0\nx"], ('errx', 'error %(id)d syntax bytes after the last definition')),
+    ('set', ["req", "tasks-set", "{LEN}", GOOD_LIST], ('ok',)),
+    ('start-unknown', ["req", "task-start", "nothing-here"], ('errx', 'error %(id)d notask no such published task')),
+    ('start-chain', ["req", "task-start", "chain"], ('errx', 'ok %(id)d 3')),
+    ["waitfor", "0 terminal-ended 3 ", 10],
+    ('run-with-a-published-dependency', ["req", "task-run", "{LEN}",
+                                         tdef('adhoc', 'shell', 'Adhoc', 'echo adhoc-ran', trec('depends', 'sequence', 'lint'))],
+     ('errx', 'ok %(id)d 4')),
+    ["waitfor", "0 terminal-ended 4 ", 10],
+    ('run-unpublished-dependency', ["req", "task-run", "{LEN}", tdef('x', 'shell', 'X', 'true', trec('depends', 'sequence', 'ghost'))],
+     ('errx', 'error %(id)d syntax definition: depends: names a task that is not published')),
+    ('start-slow', ["req", "task-start", "slow"], ('errx', 'ok %(id)d 5')),
+    ["waitfor", "0 terminal-started 5 ", 10],
+    ('start-running-gives-its-term', ["req", "task-start", "slow"], ('errx', 'ok %(id)d 5')),
+    ('stop-slow', ["req", "terminal-stop", "5"], ('ok',)),
+    ["waitfor", "0 terminal-ended 5 ", 10],
+    ('start-smoke', ["req", "task-start", "smoke"], ('errx', 'ok %(id)d 7')),
+    ["waitfor", "0 terminal-ended 7 ", 10],
+    DONE,
+]
+TASKS_SET_OPS, _ = split_steps(TASKS_SET_STEPS)
+
+
+def chk_tasks_requests(r):
+    r.finished()
+    check_steps(r, TASKS_SET_STEPS)
+    lines = r.lines()
+    started = [l.split()[4] for l in lines if l.startswith('0 terminal-started ')]
+    r.eq('dependencies-first', started[:5], ['lint', 'build', 'chain', 'lint', 'adhoc'])
+    r.ok('chain-done', '0 terminal-ended 3 exit 0 0 0' in lines, 'got %r' % [l for l in lines if 'ended 3 ' in l])
+    r.ok('adhoc-done', '0 terminal-ended 4 exit 0 0 0' in lines, 'got %r' % [l for l in lines if 'ended 4 ' in l])
+    r.ok('cycle-named', any('depends: a cycle' in l for l in lines), 'no "depends: a cycle"')
+    r.ok('stopped', any(re.match(r'^0 terminal-ended 5 stopped ', l) for l in lines), 'got %r' % [l for l in lines if 'ended 5 ' in l])
+    r.ok('ready-before-dependent', '0 task-ready 6 0 0' in lines and
+         lines.index('0 task-ready 6 0 0') < next((i for i, l in enumerate(lines) if l.startswith('0 terminal-started 7 ')), -1),
+         'got %r' % [l for l in lines if ' 6 ' in l or ' 7 ' in l])
+    r.ok('smoke-done', '0 terminal-ended 7 exit 0 0 0' in lines, 'got %r' % [l for l in lines if 'ended 7 ' in l])
+
+
+plain('tasks.requests-and-runs', ['conf/trun'], ops=TASKS_SET_OPS, env=TERM_ENV,
+      script=['wait-ext trun running', 'wait 1500', 'dialog yes', 'wait 12000', 'quit'], check=chk_tasks_requests,
+      timeout=90)
+
+CANCEL_TASK_STEPS = [
+    ('set', ["req", "tasks-set", "{LEN}", T1(tdef('build', 'shell', 'Build', 'echo building'))], ('ok',)),
+    ('start-cancelled', ["req", "task-start", "build", {'nowait': True}], ('errx', 'error %(id)d cancelled')),
+    ["sleep", 1.5],
+    ('cancel-start', ["cancel", 2], ('ok',)),
+    ('open-cancelled', ["req", "terminal-open", "{LEN}", ECHO_DEF, {'nowait': True}], ('errx', 'error %(id)d cancelled')),
+    ["sleep", 1.5],
+    ('cancel-open', ["cancel", 4], ('ok',)),
+    ["sleep", 0.3],
+    DONE,
+]
+CANCEL_TASK_OPS, _ = split_steps(CANCEL_TASK_STEPS)
+
+
+def chk_tasks_cancel(r):
+    r.finished()
+    check_steps(r, CANCEL_TASK_STEPS)
+    r.ok('asked', any(l.startswith('dialog=Let ') for l in r.seg('d1')), 'got %r' % r.seg('d1'))
+    r.ok('dialog-closed', 'dialog=none' in r.seg('d2'), 'got %r' % r.seg('d2'))
+    r.ok('nothing-allowed', not any(l.startswith('conf/trun ') for l in r.seg('a')), 'got %r' % r.seg('a'))
+    r.ok('nothing-ran', not r.events('terminal-started'), 'got %r' % [m.line for m in r.events('terminal-started')])
+
+
+plain('tasks.cancel-during-the-question', ['conf/trun'], ops=CANCEL_TASK_OPS, env=TERM_ENV,
+      script=['wait-ext trun running', 'wait 1000', 'echo @d1', 'print-dialog', 'wait 4000', 'echo @d2', 'print-dialog',
+              'echo @a', 'print-allowed', 'quit'], check=chk_tasks_cancel)
+
 # ================================================================ section 7: status and toast
 
 

@@ -119,7 +119,10 @@ func NewNode(id, label string) *Node {
 	return &Node{ID: []byte(id), Label: viewLine(label, 1000)}
 }
 
-func (n *Node) rec(head string, data []byte) *Node { n.extra = viewRecord(n.extra, head, data); return n }
+func (n *Node) rec(head string, data []byte) *Node {
+	n.extra = viewRecord(n.extra, head, data)
+	return n
+}
 
 // WithKids sets whether it has children.
 func (n *Node) WithKids(k Kids) *Node { n.Kids = k; return n }

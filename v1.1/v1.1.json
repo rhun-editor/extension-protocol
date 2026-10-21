@@ -185,6 +185,14 @@
           "type": "string",
           "description": "Protocol 1.1: programs rhun may start for this extension as the user during a test run (test-exec): bare names, space separated, at most 16 of 64 bytes",
           "pattern": "^[A-Za-z0-9._+-]{1,64}( [A-Za-z0-9._+-]{1,64}){0,15}$"
+        },
+        "debug": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "start the extension's debug adapters as the user, outside any sandbox, after one approval per project ([debugger.TYPE] sections)"
         }
       },
       "additionalProperties": false
@@ -559,6 +567,71 @@
       "additionalProperties": {
         "type": "string"
       }
+    },
+    "^debugger\\.[a-z0-9-]{1,32}$": {
+      "type": "object",
+      "description": "[debugger.TYPE]: a debug adapter rhun starts and speaks DAP to (feature debug); needs [needs] debug = yes",
+      "required": [
+        "program"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "languages": {
+          "type": "string",
+          "description": "grammar names, space separated"
+        },
+        "program": {
+          "type": "string",
+          "description": "names tried in order on the login PATH and in paths, or a path inside the extension's folder"
+        },
+        "paths": {
+          "type": "string"
+        },
+        "args": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "transport": {
+          "enum": [
+            "stdio",
+            "tcp"
+          ],
+          "default": "stdio"
+        },
+        "requests": {
+          "type": "string",
+          "pattern": "^\\s*(launch|attach)(\\s+(launch|attach))*\\s*$"
+        },
+        "install": {
+          "type": "string"
+        },
+        "resolve": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no"
+        },
+        "templates": {
+          "type": "string"
+        }
+      },
+      "patternProperties": {
+        "^program\\.(linux-x86_64|macos-arm64|windows-x64)$": {
+          "type": "string"
+        },
+        "^args\\.(linux-x86_64|macos-arm64|windows-x64)$": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "^attr\\.[A-Za-z0-9_.-]+$": {
+          "type": "string",
+          "pattern": "^\\s*(string|path|int|bool|list|map|choice(\\s+[^\\s]+)+)\\s*$"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
