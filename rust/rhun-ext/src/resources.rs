@@ -12,6 +12,59 @@ pub enum UrlOpened {
     Copied,
 }
 
+/// A workspace folder: `id` stays the same for the rhun session; `flags` has 1 for the primary
+/// folder and 2 when it is trusted; `location` is `local`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Folder {
+    pub id: u64,
+    pub location: String,
+    pub flags: u32,
+    pub name: String,
+    pub path: String,
+}
+
+/// `0 folders LEN` (feature `workspace-folders`): the whole list, before `0 ready` and again when
+/// it changes for a program that keeps running.
+pub fn parse_folders(event: &Event) -> Option<Vec<Folder>> {
+    if event.name != "folders" {
+        return None;
+    }
+    let mut b = event.body.as_slice();
+    let nl = b.iter().position(|&c| c == b'\n')?;
+    let n: usize = std::str::from_utf8(&b[..nl]).ok()?.parse().ok()?;
+    if n > 16 {
+        return None;
+    }
+    b = &b[nl + 1..];
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let nl = b.iter().position(|&c| c == b'\n')?;
+        let head = std::str::from_utf8(&b[..nl]).ok()?;
+        let f: Vec<&str> = head.split(' ').collect();
+        if f.len() != 5 {
+            return None;
+        }
+        let (nlen, plen): (usize, usize) = (f[3].parse().ok()?, f[4].parse().ok()?);
+        b = &b[nl + 1..];
+        if nlen + plen > b.len() {
+            return None;
+        }
+        out.push(Folder {
+            id: f[0].parse().ok()?,
+            location: f[1].to_string(),
+            flags: f[2].parse().ok()?,
+            name: String::from_utf8_lossy(&b[..nlen]).into_owned(),
+            path: String::from_utf8_lossy(&b[nlen..nlen + plen]).into_owned(),
+        });
+        b = &b[nlen + plen..];
+    }
+    if b.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 /// `0 link ID LEN` + the link: the id of the [`Ext::link`] request that made the token, and the
 /// whole link as it reached rhun (with the path and query the browser added).
 pub fn parse_link(event: &Event) -> Option<(u64, String)> {
@@ -151,6 +204,22 @@ impl Ext {
         String::from_utf8(reply.body).map_err(|_| syntax("not UTF-8"))
     }
 
+    /// The id of the workspace folder `path` is in, or 0 (feature `workspace-folders`).
+    pub fn folder_of(&self, path: &str) -> Result<u64, Error> {
+        if !self.has(Feature::WorkspaceFolders) {
+            return Err(not_agreed("workspace-folders"));
+        }
+        if path.is_empty() || path.contains(['\r', '\n']) {
+            return Err(syntax("invalid path"));
+        }
+        let reply = self.request(&format!("folder-of {path}"), None)?;
+        Ok(reply
+            .fields
+            .first()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
     /// Opens a virtual document (feature `uris`): rhun asks the scheme's provider for its text.
     /// A `file:` URI opens that file. [`Ext::open`] takes a URI as well.
     pub fn open_uri(&self, uri: &str, at: Pos) -> Result<Doc, Error> {
@@ -243,6 +312,23 @@ impl Ext {
             .filter(|k| !k.is_empty())
             .map(str::to_string)
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+    #[test]
+    fn folders_parse() {
+        let ev = Event {
+            name: "folders".into(),
+            fields: vec!["x".into()],
+            rest: String::new(),
+            body: b"2\n1 local 3 3 6\napp/w/app4 local 2 3 6\nlib/w/lib".to_vec(),
+        };
+        let f = parse_folders(&ev).unwrap();
+        assert_eq!(f[1].id, 4);
+        assert_eq!(f[0].path, "/w/app");
     }
 }
 

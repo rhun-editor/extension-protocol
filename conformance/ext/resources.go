@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -216,6 +217,23 @@ func (h *host) resourcesRequest(verb string, id int64, args []string, body func(
 			return true
 		}
 		h.filesRequest(verb, id, args, b, reply, rerr)
+	case "folder-of":
+		if !h.features["workspace-folders"] {
+			h.fail("features", "folder-of without workspace-folders agreed after hello")
+			rerr("unknown", "no such request")
+			return true
+		}
+		path := strings.Join(args, " ")
+		if path == "" {
+			h.fail("request grammar", "folder-of takes a path")
+			rerr("syntax", "cannot parse the line")
+			return true
+		}
+		folder := 0
+		if rel, err := filepath.Rel(h.project, strings.TrimPrefix(path, "file://")); err == nil && !strings.HasPrefix(rel, "..") {
+			folder = 1
+		}
+		reply(fmt.Sprintf("ok %d %d", id, folder))
 	case "setting-get":
 		if !h.features["scoped-settings"] {
 			h.fail("features", "setting-get without scoped-settings agreed after hello")
@@ -343,4 +361,14 @@ func scopedSettingsManifest(m *manifest, bad, warn func(string)) {
 			bad(fmt.Sprintf("[settings] %s.languages = %s is not yes or no", key, f["languages"]))
 		}
 	}
+}
+
+// sendFolders: "0 folders LEN" before "0 ready" for an extension that agreed workspace-folders: the
+// checker's project as the one, primary and trusted, folder
+func (h *host) sendFolders() {
+	if !h.features["workspace-folders"] {
+		return
+	}
+	body := fmt.Sprintf("1\n1 local 3 7 %d\nproject%s", len(h.project), h.project)
+	h.write(fmt.Sprintf("0 folders %d\n%s", len(body), body))
 }

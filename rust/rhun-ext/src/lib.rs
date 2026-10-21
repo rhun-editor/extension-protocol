@@ -77,7 +77,7 @@ pub mod tasks;
 pub mod testing;
 pub mod views;
 pub mod watch;
-pub use resources::{parse_link, Content, UrlOpened};
+pub use resources::{parse_folders, parse_link, Content, Folder, UrlOpened};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -373,6 +373,8 @@ pub enum Feature {
     /// Settings per workspace, folder and language: [`Ext::setting_get`], the event
     /// `setting-changed`.
     ScopedSettings,
+    /// Workspace folders: the event `folders` ([`resources::parse_folders`]), [`Ext::folder_of`].
+    WorkspaceFolders,
     /// Programs in terminal tabs: [`Ext::open_terminal`] and the other terminal verbs, the
     /// events [`tasks::parse_terminal_event`] decodes; needs `[needs] terminal = run`.
     Terminals,
@@ -448,6 +450,7 @@ impl Feature {
             Feature::Urls => "urls",
             Feature::Files => "files",
             Feature::ScopedSettings => "scoped-settings",
+            Feature::WorkspaceFolders => "workspace-folders",
             Feature::Terminals => "terminals",
             Feature::Tasks => "tasks",
             Feature::Named(n) => n,
@@ -2309,6 +2312,7 @@ impl Ext {
                         || run_body
                         || ev.name == "link"
                         || ev.name == "found"
+                        || ev.name == "folders" && ev.fields.len() == 1
                         || ev.name == "terminal-output" && ev.fields.len() == 3
                     {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the

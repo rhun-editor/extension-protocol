@@ -636,6 +636,16 @@ static void on_ready_setting(rx_ext *ext, const char *project, void *user) {
     assert(!v && strncmp(rx_error(ext), "refused", 7) == 0);
     setting_ok = 1;
 }
+static int folders_seen;
+static void on_folders_event(rx_ext *ext, const rx_event *ev, void *user) {
+    (void)user;
+    rx_folder f[4];
+    if (rx_parse_folders(ev, f, 4) == 2) {
+        assert(f[0].flags == 3 && f[1].id == 4 && f[1].path_len == 6 && memcmp(f[1].path, "/w/lib", 6) == 0);
+        assert(rx_folder_of(ext, "/w/lib/x.go") == 4);
+        folders_seen = 1;
+    }
+}
 static int files_ok;
 static void on_ready_files(rx_ext *ext, const char *project, void *user) {
     (void)project, (void)user;
@@ -707,6 +717,14 @@ static void resources_requests(void) {
     run_bytes("scoped-settings", &h, input, strlen(input), &got);
     same(&got, "hello 1 scoped-settings\n1 setting-get style 1 Visual_Basic\n2 setting-get none 0 -\n");
     assert(setting_ok);
+    /* workspace-folders: the folders event and folder-of */
+    rx_buf_clear(&got);
+    memset(&h, 0, sizeof h);
+    h.event = on_folders_event;
+    input = "0 features workspace-folders\n0 folders 48\n2\n1 local 3 3 6\napp/w/app4 local 2 3 6\nlib/w/libok 1 4\n0 bye\n";
+    run_bytes("workspace-folders", &h, input, strlen(input), &got);
+    same(&got, "hello 1 workspace-folders\n1 folder-of /w/lib/x.go\n");
+    assert(folders_seen);
     rx_buf_free(&got);
 }
 

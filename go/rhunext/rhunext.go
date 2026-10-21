@@ -514,6 +514,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 3
 		} else if (ev.Name == "link" || ev.Name == "found") && len(ev.Args) == 2 {
 			lenAt = 1
+		} else if ev.Name == "folders" && len(ev.Args) == 1 {
+			lenAt = 0 // workspace-folders: the folders
 		} else if ev.Name == "editor-path" && len(ev.Args) == 2 {
 			lenAt = 1 // a custom editor's new path
 		} else if ev.Name == "terminal-output" && len(ev.Args) == 3 {

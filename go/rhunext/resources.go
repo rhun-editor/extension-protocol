@@ -6,6 +6,7 @@ package rhunext
 // callbacks (feature "urls"; sign-in helpers in auth.go).
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -19,6 +20,8 @@ const (
 	FeatureURLs    = "urls"
 	// FeatureScopedSettings: setting-get and the setting-changed event.
 	FeatureScopedSettings = "scoped-settings"
+	// FeatureWorkspaceFolders: the folders event and folder-of.
+	FeatureWorkspaceFolders = "workspace-folders"
 	// SecretValueMax is the most bytes one value holds.
 	SecretValueMax = 8192
 )
@@ -280,4 +283,69 @@ func ParseSettingChanged(ev Event) (string, bool) {
 		return "", false
 	}
 	return ev.Args[0], true
+}
+
+// Folder is a workspace folder: ID stays the same for the rhun session; Flags has 1 for the
+// primary folder (0 ready's PROJECT) and 2 when it is trusted; Location is "local".
+type Folder struct {
+	ID       int64
+	Location string
+	Flags    int
+	Name     string
+	Path     string
+}
+
+// ParseFolders reads "0 folders LEN" (feature workspace-folders): the whole list, sent before
+// "0 ready" and again when it changes for a program that keeps running.
+func ParseFolders(ev Event) ([]Folder, bool) {
+	if ev.Name != "folders" {
+		return nil, false
+	}
+	b := ev.Body
+	nl := bytes.IndexByte(b, '\n')
+	if nl < 0 {
+		return nil, false
+	}
+	n, err := strconv.Atoi(string(b[:nl]))
+	if err != nil || n < 0 || n > 16 {
+		return nil, false
+	}
+	b = b[nl+1:]
+	out := make([]Folder, 0, n)
+	for i := 0; i < n; i++ {
+		nl = bytes.IndexByte(b, '\n')
+		if nl < 0 {
+			return nil, false
+		}
+		f := strings.Fields(string(b[:nl]))
+		if len(f) != 5 {
+			return nil, false
+		}
+		id, e1 := strconv.ParseInt(f[0], 10, 64)
+		flags, e2 := strconv.Atoi(f[2])
+		nlen, e3 := strconv.Atoi(f[3])
+		plen, e4 := strconv.Atoi(f[4])
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || nlen < 0 || plen < 0 || nl+1+nlen+plen > len(b) {
+			return nil, false
+		}
+		b = b[nl+1:]
+		out = append(out, Folder{ID: id, Location: f[1], Flags: flags, Name: string(b[:nlen]), Path: string(b[nlen : nlen+plen])})
+		b = b[nlen+plen:]
+	}
+	return out, len(b) == 0
+}
+
+// FolderOfContext returns the id of the workspace folder path is in, or 0.
+func (e *Ext) FolderOfContext(ctx context.Context, path string) (int64, error) {
+	if !e.Has(FeatureWorkspaceFolders) {
+		return 0, notAgreed(FeatureWorkspaceFolders)
+	}
+	if path == "" || strings.ContainsAny(path, "\r\n") {
+		return 0, &Error{Code: "syntax", Text: "invalid path"}
+	}
+	r, err := e.RequestContext(ctx, "folder-of", nil, path)
+	if err != nil {
+		return 0, err
+	}
+	return int64(argInt(r, 0)), nil
 }

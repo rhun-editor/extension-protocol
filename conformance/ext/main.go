@@ -1702,6 +1702,7 @@ func main() {
 	if !h.expectHello() {
 		report(h)
 	}
+	h.sendFolders()
 	h.write("0 ready " + h.project + "\n")
 	h.sendSettings()
 	h.catchUp()
@@ -1856,6 +1857,7 @@ func main() {
 	h.rtcmds = nil
 	if err := h.start(); err == nil {
 		if h.expectHello() {
+			h.sendFolders()
 			h.write("0 ready " + h.project + "\n")
 			h.sendSettings()
 			h.catchUp()
