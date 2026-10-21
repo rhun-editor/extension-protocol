@@ -1225,6 +1225,8 @@ func (h *host) handle(msg message) {
 		h.termRequest(id, verb, args, msg, reply, rerr)
 	case "debug-start":
 		h.debugStart(id, args, msg, reply, rerr)
+	case "debug-stop":
+		h.debugStop(id, args, reply, rerr)
 	case "vpatch", "vshow", "vreveal", "vtab":
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	case "select-many", "reveal", "show-locations", "diff", "diff-close":

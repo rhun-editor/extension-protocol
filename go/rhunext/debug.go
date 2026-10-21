@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-// FeatureDebug: debug-start, debug-ended (and debug-resolve).
+// FeatureDebug: debug-start, debug-stop, debug-ended (and debug-resolve).
 const FeatureDebug = "debug"
 
 // The kinds of a configuration leaf.
@@ -298,6 +298,21 @@ func (e *Ext) DebugStart(ctx context.Context, name string, cfg DebugConfig) (int
 		return 0, &Error{Code: "syntax", Text: "debug-start answered without a session"}
 	}
 	return strconv.ParseInt(r.Args[0], 10, 64)
+}
+
+// DebugStop stops a session this extension started (as the toolbar's Stop: terminate, then
+// disconnect, then the adapter is killed). It returns once the stop was asked; the session's
+// debug-ended follows when it is over. One already over is fine; errors: refused (not a session
+// this extension started).
+func (e *Ext) DebugStop(ctx context.Context, session int64) error {
+	if !e.Has(FeatureDebug) {
+		return &Error{Code: "unknown", Text: "debug was not negotiated"}
+	}
+	if session <= 0 {
+		return &Error{Code: "syntax", Text: "a session id is a positive number"}
+	}
+	_, err := e.RequestContext(ctx, "debug-stop", nil, strconv.FormatInt(session, 10))
+	return err
 }
 
 // DebugEnded is the debug-ended event: a session this extension started is over. HasCode is

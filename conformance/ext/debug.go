@@ -180,6 +180,38 @@ func (h *host) debugStart(id int64, args []string, msg message, reply func(strin
 	h.ok("starts a debug session of its own debugger " + cfg.String("type"))
 }
 
+// debugStop answers debug-stop SESSION: one of the sessions debug-start "started" (each ended at
+// once, and stopping a session already over is ok)
+func (h *host) debugStop(id int64, args []string, reply func(string), rerr func(string, string)) {
+	if !h.features["debug"] {
+		h.fail("debug", "debug-stop without debug agreed after hello")
+		rerr("unknown", "no such request")
+		return
+	}
+	if h.m.needs["debug"] != "yes" {
+		h.fail("needs", "debug-stop needs debug = yes in [needs]")
+		rerr("needs", "debug=yes")
+		return
+	}
+	var s int64
+	var err error
+	if len(args) == 1 {
+		s, err = strconv.ParseInt(args[0], 10, 64)
+	}
+	if len(args) != 1 || err != nil || s < 0 || strings.HasPrefix(args[0], "+") {
+		h.fail("request grammar", "debug-stop: SESSION, a number")
+		rerr("syntax", "cannot parse the line")
+		return
+	}
+	if s < 1 || s > h.debugSessions {
+		h.fail("debug", fmt.Sprintf("debug-stop %d: not a session debug-start gave it", s))
+		rerr("refused", "not a session you started")
+		return
+	}
+	reply(fmt.Sprintf("ok %d", id))
+	h.ok("stops a debug session it started")
+}
+
 // checkDebug: debuggers with resolve = yes answer debug-resolve for each of their templates (and a
 // minimal configuration) within 5 s, with a configuration that parses, and keep answering after a
 // cancel
