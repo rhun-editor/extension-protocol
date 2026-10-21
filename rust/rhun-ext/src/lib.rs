@@ -73,6 +73,7 @@ pub mod scmpanel;
 pub mod snippet;
 pub mod snippet_context;
 pub mod snippet_transform;
+pub mod tasks;
 pub mod testing;
 pub mod views;
 pub mod watch;
@@ -369,6 +370,12 @@ pub enum Feature {
     Urls,
     /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
     Files,
+    /// Programs in terminal tabs: [`Ext::open_terminal`] and the other terminal verbs, the
+    /// events [`tasks::parse_terminal_event`] decodes; needs `[needs] terminal = run`.
+    Terminals,
+    /// Published tasks: [`Ext::set_tasks`], [`Ext::start_task`], [`Ext::run_task`] (agreed only with
+    /// [`Feature::Terminals`]).
+    Tasks,
     /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
     /// its requests go through [`Ext::request`].
     Named(&'static str),
@@ -437,6 +444,8 @@ impl Feature {
             Feature::StatusItems => "status-items",
             Feature::Urls => "urls",
             Feature::Files => "files",
+            Feature::Terminals => "terminals",
+            Feature::Tasks => "tasks",
             Feature::Named(n) => n,
         }
     }
@@ -459,7 +468,7 @@ pub struct Event {
     pub fields: Vec<String>,
     /// The rest of the line after the name, for events whose last field may hold spaces (paths).
     pub rest: String,
-    /// The body, for `edits` and `action`.
+    /// The body, for `edits`, `action` and `terminal-output`.
     pub body: Vec<u8>,
 }
 
@@ -2188,6 +2197,7 @@ impl Ext {
                                 | "external-uri"
                                 | "link"
                                 | "editor-read"
+                                | "terminal-screen"
                         )
                     {
                         let len: usize = if verb == "snippet-context" {
@@ -2294,6 +2304,7 @@ impl Ext {
                         || run_body
                         || ev.name == "link"
                         || ev.name == "found"
+                        || ev.name == "terminal-output" && ev.fields.len() == 3
                     {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
                         // session ends rather than allocate it

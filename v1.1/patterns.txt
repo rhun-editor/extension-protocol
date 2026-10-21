@@ -1,0 +1,32 @@
+# pattern<TAB>line<TAB>what print-pattern prints (tasks design 3.3); rhun tests/task-patterns.py; every SDK tests against these
+{file}:{line}:{col}: {message}	./main.go:4:7: undefined: undefinedThing	match=1 file=./main.go line=4 col=7 message=undefined: undefinedThing
+{file}:{line}:{col}: {message}	main.go:4: no column	match=0
+{file}:{line}:{col}: {message}	http://host:8080: x	match=0
+{file}:{line}:{col}: {message}	C:/src/a.go:1:2: drive letters work	match=1 file=C:/src/a.go line=1 col=2 message=drive letters work
+{file}:{line}:{col}: {message}	 ./lead.go:1:2: a leading blank is not a file	match=0
+{file}:{line}: {severity}: {message}	foo.c:12: bogus: not a severity	match=0
+{file}:{line}:{col}: {severity}: {message}	a.c:2:10: error: use of undeclared identifier 'undefined_x'	match=1 file=a.c line=2 col=10 severity=error message=use of undeclared identifier 'undefined_x'
+{file}:{line}:{col}: {severity}: {message}	a.c:3:14: warning: adding 'int' to a string	match=1 file=a.c line=3 col=14 severity=warning message=adding 'int' to a string
+{file}:{line}:{col}: {severity}: {message}	a.c:3:14: note: use array indexing	match=1 file=a.c line=3 col=14 severity=note message=use array indexing
+{file}:{line}:{col}: {severity}: {message}	foo.c:1:2: fatal error: no.h: No such file or directory	match=1 file=foo.c line=1 col=2 severity=fatal error message=no.h: No such file or directory
+{file}:{line}:{col}: {severity}: {message}	foo.c:1:2: Warning: any case	match=1 file=foo.c line=1 col=2 severity=Warning message=any case
+{severity}[{code}]: {message}	error[E0425]: cannot find value `x` in this scope	match=1 severity=error code=E0425 message=cannot find value `x` in this scope
+{severity}: {message}	warning: unused variable: `unused`	match=1 severity=warning message=unused variable: `unused`
+{severity}: {message}	help: maybe	match=1 severity=help message=maybe
+{file}({line},{col}): {severity} {code}: {message}	src/a.ts(4,7): error TS2322: Type 'string' is not assignable to type 'number'.	match=1 file=src/a.ts line=4 col=7 severity=error code=TS2322 message=Type 'string' is not assignable to type 'number'.
+{file}:{line}:{col} - {severity} {code}: {message}	src/a.ts:4:7 - error TS2322: Type 'string' is not assignable.	match=1 file=src/a.ts line=4 col=7 severity=error code=TS2322 message=Type 'string' is not assignable.
+{file}({line},{col},{endline},{endcol}): {severity} {code}: {message}	Program.cs(10,5,10,9): warning CS0168: The variable 'e' is declared but never used	match=1 file=Program.cs line=10 col=5 endline=10 endcol=9 severity=warning code=CS0168 message=The variable 'e' is declared but never used
+{file}:{line}:{col}: {message}	a.go:1234567890:1: ten digits are not a line	match=0
+{file}:{line}:{col}: {message}	a.go:0:0: zero is a number	match=1 file=a.go line=0 col=0 message=zero is a number
+{file} {line} {message}	spaced.go   7	blanks and a tab	match=1 file=spaced.go line=7 message=blanks and a tab
+{_}error{_}	some error here	match=1
+{_}error{_}	nothing	match=0
+{file}{{x}}	f{x}	match=1 file=f
+literal only	literal only	match=1
+literal only	literal only and more	match=0
+{file}:{line}:{col}: {message}	é/ü.go:1:2: non-ASCII bytes are characters too	match=1 file=é/ü.go line=1 col=2 message=non-ASCII bytes are characters too
+{nope}	x	error=unknown field
+a}b	x	error=a } alone (write }})
+{file	x	error={ without }
+{file}{file}	x	error=a field twice
+{_}{_}	two any fields are fine	match=1
