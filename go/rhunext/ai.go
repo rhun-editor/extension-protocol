@@ -331,17 +331,28 @@ func ParseProposal(ev Event) (ProposalEvent, bool) {
 }
 
 // Propose sends an edit for the user to review: the proposal's id, at once (FeatureEditReview).
+// The edit goes in 12g's grammar whatever was agreed: a hash as "-", without its Label and
+// Confirm; file operations are refused (an *Error with code unknown).
 func (e *Ext) Propose(label, sid string, edit WorkspaceEdit) (int64, error) {
-	eb, err := edit.Encode()
-	if err != nil {
-		return 0, &Error{Code: "toobig", Text: err.Error()}
+	body, bad := proposalBody(label, sid, edit)
+	if bad != nil {
+		return 0, bad
 	}
-	body := append([]byte(fmt.Sprintf("%d %d\n%s%s", len(label), len(sid), label, sid)), eb...)
 	r, err := e.Request("propose", body, strconv.Itoa(len(body)))
 	if err != nil {
 		return 0, err
 	}
 	return argInt(r, 0), nil
+}
+
+// proposalBody is a proposal's head and its edit in 12g's grammar (the Review tab reads 12g), or
+// the refusal to return (toobig, unknown for file operations).
+func proposalBody(label, sid string, edit WorkspaceEdit) ([]byte, *Error) {
+	eb, bad := edit.encodeWith(editCaps{})
+	if bad != nil {
+		return nil, bad
+	}
+	return append([]byte(fmt.Sprintf("%d %d\n%s%s", len(label), len(sid), label, sid)), eb...), nil
 }
 
 // Unpropose withdraws a proposal.

@@ -1157,7 +1157,24 @@ static void retained_patches(void) {
 }
 
 /* protocol 1.1's agents, proposals and tools: the bodies */
+static void proposals_are_12g(void) {
+    rx_wedit e = {0};
+    rx_buf b = {NULL, 0, 0};
+    rx_wedit_file_hashed(&e, "/p/a.txt", "x\r\n", 3);
+    rx_wedit_edit(&e, R(1, 1, 1, 1), "y", 1);
+    rx_wedit_label(&e, "Fix");
+    rx_wedit_confirm(&e);
+    assert(rx_proposal_body("L", "s1", &e, &b) == 0);
+    same(&b, "1 2\nLs1" "1\n8 - 1\n/p/a.txt1 1 1 1 1\ny");
+    rx_buf_free(&b), rx_wedit_free(&e);
+    rx_wedit o = {0};
+    rx_wedit_create(&o, "/p/b.txt", 0);
+    assert(rx_proposal_body("L", NULL, &o, &b) < 0 && strcmp(o.fail, "unknown") == 0);
+    rx_buf_free(&b), rx_wedit_free(&o);
+}
+
 static void ai_bodies(void) {
+    proposals_are_12g();
     rx_transcript t;
     memset(&t, 0, sizeof t);
     t.total = 2;
