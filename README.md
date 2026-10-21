@@ -43,6 +43,15 @@ where `DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` a
 headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
 
+## Remote windows
+
+In a remote window (SSH, a container, WSL) an extension runs on the Linux x86-64 host by default,
+so a release that should work there carries `run.linux-x86_64` (rhun fetches that archive for the
+host when the installed folder holds another system's build), or is a script or a WebAssembly
+module. `where = local` in the manifest keeps it on the user's computer instead; it may not ask for
+`project` or `home` then. Paths in the protocol are the host's, as they are; `RHUN_REMOTE` names
+the remote, and the checker enforces the `where` rules (v1.1/v1.1.md, section "Remote windows").
+
 ## WebAssembly
 
 An extension may ship one `wasm32-wasip1` module instead of (or besides) a binary per system:

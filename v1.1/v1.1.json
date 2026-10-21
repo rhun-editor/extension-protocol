@@ -58,6 +58,11 @@
       "minLength": 1,
       "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)"
     },
+    "where": {
+      "enum": ["workspace", "local"],
+      "default": "workspace",
+      "description": "where it runs in a remote window: on the host (workspace) or on this computer (local); a local window ignores it. where = local may not ask for project or home in [needs]"
+    },
     "requires": {
       "type": "string",
       "description": "shown when the runtime is missing or too old; not checked by rhun 0.18.0"

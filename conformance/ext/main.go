@@ -54,6 +54,7 @@ type manifest struct {
 	top                         map[string]string // top-level keys of later features (idle, runs)
 	tools                       []string          // [tools] names (protocol 1.1)
 	pack                        string            // a pack's members: OWNER/NAME, space separated
+	where                       string            // remote windows: workspace (the default) or local
 	cmdOptions                  map[string]string // [command-options] NAME.FIELD -> value
 	statusItems                 int               // [status] items
 }
@@ -76,6 +77,24 @@ func packProblem(m *manifest) string {
 		}
 	}
 	return ""
+}
+
+// whereProblem(m): remote windows: where it runs is workspace (the default) or local, and an
+// extension on this computer may not ask for the host's project or home there
+func whereProblem(m *manifest) string {
+	switch m.where {
+	case "", "workspace":
+		return ""
+	case "local":
+		if p := m.needs["project"]; p != "" && p != "no" {
+			return "where = local cannot go with project in [needs]"
+		}
+		if m.needs["home"] == "read" {
+			return "where = local cannot go with home in [needs]"
+		}
+		return ""
+	}
+	return fmt.Sprintf("where = %s is not workspace or local", m.where)
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -133,6 +152,8 @@ func readManifest(dir string) (*manifest, error) {
 				m.top[k] = v
 			case k == "pack":
 				m.pack = v
+			case k == "where":
+				m.where = v
 			}
 		case "settings":
 			key, field, ok := strings.Cut(k, ".")
@@ -1561,6 +1582,9 @@ func main() {
 	}
 	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) {
 		bad("no run.TARGET entry and no runtime with run")
+	}
+	if why := whereProblem(m); why != "" {
+		bad(why)
 	}
 	for _, w := range strings.Fields(m.on) {
 		if w != "startup" && w != "command" && w != "project" && !strings.HasPrefix(w, "lang:") && !strings.HasPrefix(w, "open:") {
