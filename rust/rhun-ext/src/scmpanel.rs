@@ -23,7 +23,8 @@ pub const SCM_BODY_MAX: usize = 4 << 20;
 pub const SCM_TIP_MAX: usize = 1000;
 
 /// A command of the extension (its local name) with an icon (a tree icon name such as `check`,
-/// or empty for none), ARGS (the body of `0 run EXT.NAME DOC ref LEN` with command-args agreed)
+/// or empty for none; a group's or resource's action with an icon is also a button on its row
+/// while the row is hovered), ARGS (the body of `0 run EXT.NAME DOC ref LEN` with command-args agreed)
 /// and a label (empty: the command's title).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScmAction {
@@ -53,7 +54,8 @@ impl ScmAction {
 
 /// A changed file: its path relative to the root, a status letter (`M`, `A`, `D`, `?`, …), a
 /// color (`added`, `modified`, `deleted`, `conflict`, `untracked`, `ignored`, or empty), the
-/// command its click runs (`None` opens the file), its menu's actions, and a tooltip (at most
+/// command its click runs (`None`: a diff of the file against its quick-diff base, else the
+/// file), its menu's actions, and a tooltip (at most
 /// 1000 bytes).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScmResource {
