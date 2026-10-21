@@ -78,7 +78,7 @@ pub mod tasks;
 pub mod testing;
 pub mod views;
 pub mod watch;
-pub use resources::{parse_link, Content, UrlOpened};
+pub use resources::{parse_folders, parse_link, Content, Folder, UrlOpened};
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -375,6 +375,11 @@ pub enum Feature {
     Urls,
     /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
     Files,
+    /// Settings per workspace, folder and language: [`Ext::setting_get`], the event
+    /// `setting-changed`.
+    ScopedSettings,
+    /// Workspace folders: the event `folders` ([`resources::parse_folders`]), [`Ext::folder_of`].
+    WorkspaceFolders,
     /// Programs in terminal tabs: [`Ext::open_terminal`] and the other terminal verbs, the
     /// events [`tasks::parse_terminal_event`] decodes; needs `[needs] terminal = run`.
     Terminals,
@@ -450,6 +455,8 @@ impl Feature {
             Feature::StatusItems => "status-items",
             Feature::Urls => "urls",
             Feature::Files => "files",
+            Feature::ScopedSettings => "scoped-settings",
+            Feature::WorkspaceFolders => "workspace-folders",
             Feature::Terminals => "terminals",
             Feature::Tasks => "tasks",
             Feature::Named(n) => n,
@@ -1421,6 +1428,43 @@ where
     Ok(())
 }
 
+/// [`run_on`] without threads, as on `wasm32-wasip1`, on any target (tests of that path).
+#[doc(hidden)]
+pub fn run_on_threadless<R, W, H>(
+    input: R,
+    output: W,
+    features: &[Feature],
+    mut handler: H,
+) -> io::Result<()>
+where
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
+    H: Handler + 'static,
+{
+    let ext = Ext {
+        shared: Arc::new(Mutex::new(Shared {
+            out: Box::new(output),
+            next_id: 1,
+        })),
+        pending: Arc::new(Mutex::new(Pending::default())),
+        features: Arc::new(Mutex::new(Vec::new())),
+        inline: Some(Arc::new(Inline {
+            input: Mutex::new(Box::new(BufReader::new(input))),
+            queue: Mutex::new(VecDeque::new()),
+        })),
+        procs: Arc::default(),
+        queries: Arc::new(Mutex::new(HashMap::new())),
+    };
+    let mut hello = String::from("hello 1");
+    for f in features {
+        hello.push(' ');
+        hello.push_str(f.name());
+    }
+    ext.write(&hello, &[])?;
+    ext.dispatch_inline(&mut handler);
+    Ok(())
+}
+
 impl Ext {
     /// Whether rhun agreed to a feature.
     pub fn has(&self, f: Feature) -> bool {
@@ -1500,6 +1544,36 @@ impl Ext {
             }
         }
         rx.recv().ok()
+    }
+
+    /// Without threads: reads one message from rhun as a waiting request does (test-out and
+    /// test-exit go to their streams, the rest waits for the handler); false once rhun is gone,
+    /// and always false with threads (the reader thread reads).
+    pub(crate) fn pump(&self) -> bool {
+        let Some(inline) = &self.inline else {
+            return false;
+        };
+        let msg = {
+            let mut input = inline.input.lock().unwrap();
+            self.read_msg(&mut **input)
+        };
+        match msg {
+            Msg::Delivered => true,
+            Msg::End => {
+                self.close();
+                inline.queue.lock().unwrap().push_back(Msg::End);
+                false
+            }
+            other => {
+                inline.queue.lock().unwrap().push_back(other);
+                true
+            }
+        }
+    }
+
+    /// Whether the connection reads rhun's input without a thread (`wasm32-wasip1`).
+    pub(crate) fn threadless(&self) -> bool {
+        self.inline.is_some()
     }
 
     /// [`Ext::request`] whose `0 found ID` batches and reply come through the receiver
@@ -2201,6 +2275,7 @@ impl Ext {
                                 | "git-log"
                                 | "git-show"
                                 | "secret-get"
+                                | "setting-get"
                                 | "secret-keys"
                                 | "tools"
                                 | "tool-call"
@@ -2295,15 +2370,21 @@ impl Ext {
                             return Msg::End;
                         }
                         if let Ok(ex) = ev.fields[0].parse() {
-                            testing::test_out(&self.procs, ex, &ev.fields[1], &body);
+                            testing::test_out(
+                                &self.procs,
+                                ex,
+                                &ev.fields[1],
+                                &body,
+                                self.inline.is_none(),
+                            );
                         }
-                        continue;
+                        return Msg::Delivered;
                     }
                     if ev.name == "test-exit" && ev.fields.len() >= 2 {
                         if let Ok(ex) = ev.fields[0].parse() {
                             testing::test_exit(&self.procs, ex, &ev.fields[1..].join(" "));
                         }
-                        continue;
+                        return Msg::Delivered;
                     }
                     let view_body =
                         ev.name == "view" && ev.fields.get(1).is_some_and(|w| views::has_body(w));
@@ -2316,6 +2397,7 @@ impl Ext {
                         || run_body
                         || ev.name == "link"
                         || ev.name == "found"
+                        || ev.name == "folders" && ev.fields.len() == 1
                         || ev.name == "terminal-output" && ev.fields.len() == 3
                     {
                         // rhun sends at most 4 MB here: a larger length is not rhun's, and the
@@ -2406,7 +2488,6 @@ impl Ext {
     }
 
     /// The handler loop without threads: queued messages first, then rhun's input.
-    #[cfg(target_os = "wasi")]
     fn dispatch_inline<H: Handler>(&self, h: &mut H) {
         let inline = self.inline.clone().expect("inline input");
         loop {
@@ -2584,6 +2665,18 @@ impl Ext {
                     fields,
                     body: req_body,
                 } => {
+                    if verb == "test-run" && self.inline.is_some() && self.has(Feature::Tests) {
+                        if let Some(run) = testing::parse_test_run(&fields, &req_body) {
+                            // without threads the run happens inside run_tests: rhun hears ok
+                            // first (it waits 10 s for it); a refusal ends the run errored
+                            let _ = self.write(&format!("ok {id} 0"), &[]);
+                            self.finish_query(id);
+                            if let Err(e) = h.run_tests(self, &run) {
+                                testing::end_refused(self, run.run, &e);
+                            }
+                            return true;
+                        }
+                    }
                     let out = self.stream(id);
                     // a call's error code is the callee's own
                     let mut call_code = String::new();

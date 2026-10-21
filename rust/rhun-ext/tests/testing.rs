@@ -7,8 +7,9 @@ use std::thread;
 use std::time::Duration;
 
 use rhun_ext::{
-    run_on, CoverageRange, Error, Ext, Feature, FileCoverage, Handler, Pos, Range, TestCommand,
-    TestItem, TestKind, TestMessage, TestReporter, TestResult, TestRun, TestState,
+    run_on, run_on_threadless, CoverageRange, Error, Ext, Feature, FileCoverage, Handler, Pos,
+    Range, TestCommand, TestItem, TestKind, TestMessage, TestReporter, TestResult, TestRun,
+    TestState,
 };
 
 struct ChanReader {
@@ -383,4 +384,85 @@ fn a_test_out_length_rhun_never_sends_ends_the_session() {
     host.send("0 test-out 1 out 99999999\n");
     done.join().unwrap().unwrap();
     drop(host);
+}
+
+/// Without threads (`wasm32-wasip1`): ok comes first and the run happens inside run_tests; the
+/// streams and the wait read rhun's input themselves; the reporter sends from its calls.
+#[test]
+fn a_run_without_threads() {
+    struct Inline(Sender<String>);
+    impl Handler for Inline {
+        fn run_tests(&mut self, ext: &Ext, run: &TestRun) -> Result<(), Error> {
+            if run.profile == "debug" {
+                return Err(Error {
+                    code: "busy".into(),
+                    text: "no debugger".into(),
+                });
+            }
+            let p = ext.test_exec(run.run, &TestCommand::new("go")).unwrap();
+            let mut out = String::new();
+            p.stdout.clone().read_to_string(&mut out).unwrap();
+            let code = p.wait();
+            let rep = TestReporter::new(ext, run.run);
+            rep.add(TestResult::new("t", TestState::Passed));
+            rep.close().unwrap();
+            ext.end_test_run(run.run).unwrap();
+            self.0.send(format!("{code} {out:?}")).unwrap();
+            Ok(())
+        }
+    }
+    let (log, seen) = channel();
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let done = thread::spawn(move || {
+        run_on_threadless(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Tests],
+            Inline(log),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 tests");
+    host.send("0 features tests\n0 ready -\n5 test-run 1 run 0 0\n");
+    assert_eq!(host.line(), "ok 5 0");
+    let (id, line, _) = host.request();
+    assert_eq!(line, "test-exec 1 10");
+    // output and the end before the reply, then more input the handler must not wait for
+    host.send(&format!(
+        "ok {id} 2\n0 test-out 2 out 3\nab\n0 test-exit 2 0\n"
+    ));
+    let (id, line, body) = host.request();
+    assert_eq!(
+        (line.as_str(), body.as_str()),
+        ("test-update 1 16", "1\npassed - 1 0\nt")
+    );
+    host.send(&format!("ok {id}\n"));
+    let (id, line, _) = host.request();
+    assert_eq!(line, "test-end 1");
+    host.send(&format!("ok {id}\n"));
+    assert_eq!(
+        seen.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "0 \"ab\\n\""
+    );
+    // a refusal: ok, then the run errored with its reason
+    host.send("6 test-run 2 debug 0 0\n");
+    assert_eq!(host.line(), "ok 6 0");
+    let (id, line, body) = host.request();
+    assert_eq!(line, format!("test-update 2 {}", body.len()));
+    assert_eq!(body, "1\nerrored - 0 22\nmessage 11\nno debugger");
+    host.send(&format!("ok {id}\n"));
+    let (id, line, _) = host.request();
+    assert_eq!(line, "test-end 2");
+    host.send(&format!("ok {id}\n0 bye\n"));
+    done.join().unwrap().unwrap();
 }

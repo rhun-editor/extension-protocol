@@ -163,6 +163,16 @@ files-status = "complete" / "limit" / "partial"
 event        =/ "0" SP "found" SP id SP len        ; body: N LF and N records (find: FOLDER SP PATH_LEN LF PATH;
               ; search: FOLDER SP DOC SP VERSION SP PATH_LEN SP M LF PATH, M x LINE SP COL SP END SP PRE SP TEXT_LEN LF TEXT)
 
+; scoped-settings: [settings] KEY.scope = user / workspace / folder, KEY.languages = yes
+feature      =/ "scoped-settings"
+request      =/ id SP "setting-get" SP field SP num SP lang   ; ok ID LEN + the value
+event        =/ "0" SP "setting-changed" SP field
+
+; workspace-folders: the folders event before ready and on every change; folder-of
+feature      =/ "workspace-folders"
+event        =/ "0" SP "folders" SP len   ; body: N LF, N x FOLDER SP LOCATION SP FLAGS SP NAME_LEN SP PATH_LEN LF NAME PATH
+request      =/ id SP "folder-of" SP rest   ; ok ID FOLDER (0: none)
+
 ; Agents, proposals and tools (v1.1.md). Strings are length-framed and follow without separators.
 ; agents: [provides] agents = yes; agent-sessions replaces the extension's rows.
 feature      =/ "agents"
