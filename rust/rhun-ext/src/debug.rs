@@ -314,6 +314,27 @@ impl Ext {
                 text: "debug-start answered without a session".into(),
             })
     }
+
+    /// Stops a session this extension started (as the toolbar's Stop: terminate, then
+    /// disconnect, then the adapter is killed). Returns once the stop was asked; the session's
+    /// `debug-ended` follows when it is over. One already over is fine; errors: `refused` (not a
+    /// session this extension started).
+    pub fn debug_stop(&self, session: i64) -> Result<(), Error> {
+        if !self.has(Feature::Debug) {
+            return Err(Error {
+                code: "unknown".into(),
+                text: "debug was not negotiated".into(),
+            });
+        }
+        if session <= 0 {
+            return Err(Error {
+                code: "syntax".into(),
+                text: "a session id is a positive number".into(),
+            });
+        }
+        self.request(&format!("debug-stop {session}"), None)
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]

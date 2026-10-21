@@ -2235,6 +2235,60 @@ fn debug_start_and_ended() {
 }
 
 #[test]
+fn debug_stop() {
+    struct Dbg(Sender<String>);
+    impl Handler for Dbg {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            for session in [7, 8, 0] {
+                let r = ext.debug_stop(session);
+                self.0.send(format!("{:?}", r.map_err(|e| e.code))).unwrap();
+            }
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, results) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::Debug],
+            Dbg(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 debug");
+    host.send("0 features debug\n0 ready -\n");
+    assert_eq!(host.line(), "1 debug-stop 7");
+    host.send("ok 1\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "Ok(())"
+    );
+    assert_eq!(host.line(), "2 debug-stop 8");
+    host.send("error 2 refused not a session you started\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "Err(\"refused\")"
+    );
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "Err(\"syntax\")"
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+#[test]
 fn debug_resolve_answers() {
     struct Res;
     impl Handler for Res {

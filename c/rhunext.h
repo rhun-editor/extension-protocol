@@ -830,6 +830,9 @@ int rx_debug_config_parse(const unsigned char *body, size_t len, rx_debug_config
 /* starts a session of one of the extension's own debuggers (the config's "type"), within 10 s of
  * one of its commands; the session's id, or -1 (rx_error: refused, cancelled, busy, toobig ...) */
 int64_t rx_debug_start(rx_ext *ext, const char *name, const rx_debug_config *c);
+/* stops a session this extension started (as the toolbar's Stop); 0 once the stop was asked (its
+ * debug-ended follows), -1 (rx_error: refused, not a session it started) */
+int rx_debug_stop(rx_ext *ext, int64_t session);
 /* "0 debug-ended SESSION CODE": 1 with the session and code (*has_code 0 when unknown), else 0 */
 int rx_parse_debug_ended(const rx_event *ev, int64_t *session, int *code, int *has_code);
 /* what debug_resolve gets */
@@ -3059,6 +3062,20 @@ int64_t rx_debug_start(rx_ext *ext, const char *name, const rx_debug_config *c) 
     int64_t id = rx_req_num(ext, line, body.data, body.len);
     rx_buf_free(&body);
     return id;
+}
+
+int rx_debug_stop(rx_ext *ext, int64_t session) {
+    if (!rx_has(ext, "debug")) {
+        snprintf(ext->error, sizeof ext->error, "unknown debug was not negotiated");
+        return -1;
+    }
+    if (session <= 0) {
+        snprintf(ext->error, sizeof ext->error, "syntax a session id is a positive number");
+        return -1;
+    }
+    char line[64];
+    snprintf(line, sizeof line, "debug-stop %lld", (long long)session);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
 }
 
 int rx_parse_debug_ended(const rx_event *ev, int64_t *session, int *code, int *has_code) {

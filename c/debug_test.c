@@ -44,6 +44,37 @@ static void resolve_through_rx_answer(void) {
     }
 }
 
+/* debug-stop through rx_run, with files in place of the pipes */
+static void on_ready_stop(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    assert(rx_debug_stop(ext, 7) == 0);
+    assert(rx_debug_stop(ext, 8) == -1 && !strcmp(rx_error(ext), "refused not a session you started"));
+    assert(rx_debug_stop(ext, 0) == -1 && !strncmp(rx_error(ext), "syntax", 6));     /* not sent */
+}
+
+static void debug_stop_on_the_wire(void) {
+    static const char input[] = "0 features debug\n0 ready -\nok 1\nerror 2 refused not a session you started\n0 bye\n";
+    FILE *in = fopen("rhunext-debug.in", "wb");
+    assert(in && fwrite(input, 1, sizeof input - 1, in) == sizeof input - 1);
+    fclose(in);
+    FILE *r = freopen("rhunext-debug.in", "rb", stdin), *w = freopen("rhunext-debug.out", "wb", stdout);
+    assert(r && w);
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_ready_stop;
+    assert(rx_run("debug", &h, NULL) == 0);
+    fflush(stdout);
+    char got[256] = {0};
+    FILE *out = fopen("rhunext-debug.out", "rb");
+    assert(out);
+    size_t n = fread(got, 1, sizeof got - 1, out);
+    fclose(out);
+    got[n] = 0;
+    assert(strstr(got, "1 debug-stop 7\n2 debug-stop 8\n") && !strstr(got, "debug-stop 0"));
+    remove("rhunext-debug.in");
+    remove("rhunext-debug.out");
+}
+
 int main(void) {
     resolve_through_rx_answer();
     rx_debug_config c = {0};
@@ -81,6 +112,7 @@ int main(void) {
     rx_debug_config_free(&got);
     rx_buf_free(&b);
     rx_buf_free(&ctx.path);
-    puts("ok");
+    debug_stop_on_the_wire();
+    fputs("ok\n", stderr);
     return 0;
 }

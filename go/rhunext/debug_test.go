@@ -97,6 +97,38 @@ func TestDebugStartAndEnded(t *testing.T) {
 	}
 }
 
+func TestDebugStop(t *testing.T) {
+	p := &debugProbe{ready: make(chan *Ext, 1), ended: make(chan DebugEnded, 1)}
+	s := startHost(t, []string{FeatureDebug}, p)
+	s.expect("hello 1 debug")
+	s.send("0 features debug\n0 ready /project\n")
+	ext := <-p.ready
+	errs := make(chan error, 3)
+	go func() {
+		errs <- ext.DebugStop(context.Background(), 7)
+		errs <- ext.DebugStop(context.Background(), 8)
+		errs <- ext.DebugStop(context.Background(), 0)
+	}()
+	s.expect("1 debug-stop 7")
+	s.send("ok 1\n")
+	if err := <-errs; err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	s.expect("2 debug-stop 8")
+	s.send("error 2 refused not a session you started\n")
+	var e *Error
+	if err := <-errs; !errors.As(err, &e) || e.Code != "refused" {
+		t.Fatalf("not its own: %v", err)
+	}
+	if err := <-errs; !errors.As(err, &e) || e.Code != "syntax" {
+		t.Fatalf("session 0: %v", err)
+	}
+	s.send("0 debug-ended 7 143\n")
+	if d := <-p.ended; d != (DebugEnded{7, 143, true}) {
+		t.Fatalf("ended %+v", d)
+	}
+}
+
 type resolveProbe struct {
 	debugProbe
 	answer func(req DebugResolveRequest) (DebugConfig, error)
