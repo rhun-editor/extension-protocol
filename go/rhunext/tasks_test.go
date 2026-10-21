@@ -165,7 +165,7 @@ func TestTaskListChecks(t *testing.T) {
 		tasks []Task
 		want  string
 	}{
-		{[]Task{{ID: "a", Label: "A", Program: shell}, {ID: "a", Label: "B", Program: shell}}, "task 2: id listed twice"},
+		{[]Task{{ID: "a", Label: "A", Program: shell}, {ID: "a", Label: "B", Program: shell}}, "task 1: id listed twice"},
 		{[]Task{{ID: "a", Label: "A", Program: shell, Depends: []string{"lint"}}}, `task 1: depends: no task "lint"`},
 		{[]Task{{ID: "a", Label: "A", Program: shell, Depends: []string{"b"}}, {ID: "b", Label: "B", Program: shell, Depends: []string{"a"}}}, "depends: a cycle"},
 	} {
