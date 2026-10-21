@@ -33,8 +33,9 @@
  * rx_code_action, code_action_resolve), "hover-query" (hover), "selection-ranges"
  * (selection_ranges), "hierarchy" (call_hierarchy, calls_in, calls_out, type_hierarchy, supertypes,
  * subtypes), "workspace-symbols" (workspace_symbols), "document-links" (document_links) and
- * "file-diagnostics" (rx_file_diagnostics, rx_reset_diagnostics), and "tests" for a test controller
- * (rx_test_item, rx_test_update, rx_test_exec and the tests handlers).
+ * "file-diagnostics" (rx_file_diagnostics, rx_reset_diagnostics), "tests" for a test controller
+ * (rx_test_item, rx_test_update, rx_test_exec and the tests handlers), and "terminals tasks" for
+ * programs in terminal tabs and published tasks (rx_open_terminal, rx_set_tasks).
  * Strings in and out are UTF-8; positions are 1-based lines and 1-based byte columns.
  * The same source builds for wasm32-wasip1 (clang --target=wasm32-wasip1 with a WASI sysroot), one
  * module rhun runs itself on every system: run.wasm32-wasip1 = bin/NAME.wasm in the manifest.
@@ -1370,6 +1371,76 @@ rx_pos rx_word_start(const unsigned char *text, size_t len, rx_pos at);
  * "opened DOC VERSION LANG PATH" (a path may hold spaces, which argv splits) */
 const char *rx_event_tail(const rx_event *ev, int n);
 
+/* Terminals and tasks (protocol 1.1): feature "terminals" runs programs in terminal tabs of rhun's
+ * panel, feature "tasks" (agreed only with "terminals") publishes tasks rhun lists, runs with their
+ * dependencies and turns into problems. [needs] terminal = run (input for rx_terminal_input,
+ * output for rx_terminal_screen and output events). Programs run as the user after one approval
+ * per extension and project. Lists are NULL-terminated arrays of strings, or NULL. */
+typedef uint64_t rx_term;       /* a terminal tab it opened or one running its task; 0 none */
+typedef struct {
+    const char *shell;          /* a command line (/bin/sh -c; powershell.exe -Command), or NULL */
+    const char *const *argv;    /* else the program (looked up on PATH without a slash) and its arguments */
+    const char *cwd;            /* NULL or "": the project folder; relative: inside it */
+    const char *const *env;     /* "NAME=value" */
+    const char *const *unset;   /* NAME */
+} rx_program;
+typedef struct {
+    const char *id;             /* [a-z0-9_.-]{1,64}, from a letter or digit */
+    const char *label, *detail; /* detail NULL: the command */
+    rx_program program;
+    const char *group;          /* NULL, "build" or "test" */
+    int is_default;             /* its group's default */
+    const char *const *depends; /* task ids */
+    int parallel;               /* the dependencies run together, else in order */
+    const char *const *builtin_matchers;   /* go gcc rustc tsc msbuild */
+    const char *const *matcher_texts;      /* inline matchers (rx_check_matcher) */
+    const char *const *ready;   /* patterns: a background task, done when a line matches */
+    const char *const *busy;    /* patterns: a new cycle began */
+    const char *reveal;         /* NULL, "show", "focus" or "silent" */
+    int output;                 /* terminal-output events (terminal = output) */
+} rx_task;
+typedef struct {
+    const char *label, *detail;
+    rx_program program;         /* shell and argv NULL: the user's interactive shell */
+    const char *reveal;
+    int output;
+} rx_terminal_spec;
+/* the definitions on the wire (0, or -1 with the reason in *why): checked as rhun checks them */
+int rx_task_encode(const rx_task *t, rx_buf *out, const char **why);
+int rx_terminal_encode(const rx_terminal_spec *s, rx_buf *out, const char **why);
+int rx_set_tasks(rx_ext *ext, const rx_task *tasks, size_t n);
+rx_term rx_start_task(rx_ext *ext, const char *id);               /* 0 and rx_error on failure */
+rx_term rx_run_task(rx_ext *ext, const rx_task *t);
+rx_term rx_open_terminal(rx_ext *ext, const rx_terminal_spec *s);
+int rx_stop_terminal(rx_ext *ext, rx_term t);       /* Ctrl+C, then what is left is killed 2 s later */
+int rx_restart_terminal(rx_ext *ext, rx_term t);
+int rx_close_terminal(rx_ext *ext, rx_term t);
+int rx_show_terminal(rx_ext *ext, rx_term t, int focus);
+int rx_terminal_input(rx_ext *ext, rx_term t, const void *bytes, size_t len);
+/* the body "ROWS COLS CURSOR_ROW CURSOR_COL\n" then the visible rows, one per line */
+int rx_terminal_screen(rx_ext *ext, rx_term t, rx_buf *body);
+typedef struct {
+    char kind[8];               /* started ended output closed ready busy */
+    rx_term term;
+    int64_t pid;                /* started */
+    char task[72];              /* started: "" for a terminal */
+    char reason[8];             /* ended: exit stopped failed */
+    int64_t code;               /* ended: -1 when it could not start */
+    int64_t errors, warnings;   /* ended, ready */
+    int64_t dropped;            /* output: lines left out since the last */
+    const unsigned char *lines; /* output: finished lines, each ending with LF (the event's body) */
+    size_t lines_len;
+} rx_terminal_event;
+/* 1 for terminal-started, -ended, -output, -closed, task-ready and task-busy, else 0 */
+int rx_parse_terminal_event(const rx_event *ev, rx_terminal_event *out);
+/* Problem patterns as rhun matches them: NULL when fine, else the reason */
+const char *rx_check_pattern(const char *p, size_t len);
+const char *rx_check_matcher(const char *text, size_t len);
+/* 1 when the whole line matches; caps[k] = {start, length} of PATTERN_FIELDS k (file line col
+ * endline endcol severity code message) and bit k of *has set for each field the pattern holds */
+int rx_match_pattern(const char *p, size_t plen, const char *line, size_t llen, size_t caps[8][2], unsigned *has);
+const char *rx_builtin_matcher(const char *name);   /* its text, or NULL */
+
 /* Tests (feature "tests"). An item: kind group, file, suite or test; id unique and stable (1 to
  * 512 bytes, one line); path "" or absolute (or "#DOC"); range NULL for none (it needs a path);
  * flags NULL, "lazy" (rhun asks for its children with resolve_tests), "nodebug" or
@@ -1600,7 +1671,7 @@ static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
         strncmp(line, "0 selections ", 13) == 0 || strncmp(line, "0 nb-run ", 9) == 0 ||
         strncmp(line, "0 link ", 7) == 0 || strncmp(line, "0 test-out ", 11) == 0 ||
-        strncmp(line, "0 editor-path ", 14) == 0)
+        strncmp(line, "0 editor-path ", 14) == 0 || strncmp(line, "0 terminal-output ", 18) == 0)
         return 1;
     if (strncmp(line, "0 run ", 6) == 0) return rx_nfields(line) == 6;    /* command-args */
     if (line[0] >= '1' && line[0] <= '9') {
@@ -1728,7 +1799,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
                      strncmp(verb_args, "git-show ", 9) == 0 || strncmp(verb_args, "scm-input ", 10) == 0 ||
                      strcmp(verb_args, "tools") == 0 || strncmp(verb_args, "tool-call ", 10) == 0 ||
-                     strncmp(verb_args, "editor-read ", 12) == 0;
+                     strncmp(verb_args, "editor-read ", 12) == 0 || strncmp(verb_args, "terminal-screen ", 16) == 0;
     int run_body = strncmp(verb_args, "run-command ", 12) == 0;
     wants_body = wants_body || run_body;
     char want[64];
@@ -5756,6 +5827,480 @@ static void rx_test_answer(rx_ext *ext, const rx_handlers *h, void *user, char *
     }
     rx_buf_free(&line);
     rx_buf_free(&out);
+}
+
+/* ---- terminals and tasks */
+
+static const char *const rx_pat_fields[] = {"file", "line", "col", "endline", "endcol", "severity", "code", "message"};
+static const char *const rx_sev_words[] = {"fatal error", "error", "fatal", "warning", "warn", "info", "note", "hint", "help"};
+#define RX_TOK_LIT -1
+#define RX_TOK_BLANK -2
+#define RX_TOK_ANY 8
+typedef struct { int kind; size_t lit, litlen; } rx_ptok;
+typedef struct { rx_ptok t[32]; int n; char lit[512]; size_t nlit; } rx_pattern;
+
+static const char *rx_pattern_compile(const char *p, size_t len, rx_pattern *cp) {
+    unsigned seen = 0;
+    cp->n = 0;
+    cp->nlit = 0;
+    if (len == 0 || len > 512) return "a pattern is 1 to 512 bytes";
+    for (size_t i = 0; i < len;) {
+        unsigned char c = (unsigned char)p[i];
+        int kind = RX_TOK_LIT;
+        if (c < 0x20 || c == 0x7f) return "a pattern is one line of text";
+        if (c == ' ') {
+            while (i < len && p[i] == ' ') i++;
+            kind = RX_TOK_BLANK;
+        } else if (c == '{' && i + 1 < len && p[i + 1] == '{') {
+            i += 2;
+        } else if (c == '{') {
+            const char *end = i + 1 < len ? (const char *)memchr(p + i + 1, '}', len - i - 1) : NULL;
+            if (!end) return "{ without }";
+            size_t n = (size_t)(end - (p + i + 1));
+            kind = -3;
+            if (n == 1 && p[i + 1] == '_') kind = RX_TOK_ANY;
+            for (int k = 0; k < 8; k++)
+                if (strlen(rx_pat_fields[k]) == n && memcmp(rx_pat_fields[k], p + i + 1, n) == 0) kind = k;
+            if (kind == -3) return "unknown field";
+            if (kind != RX_TOK_ANY) {
+                if (seen & (1u << kind)) return "a field twice";
+                seen |= 1u << kind;
+            }
+            i += n + 2;
+        } else if (c == '}') {
+            if (i + 1 >= len || p[i + 1] != '}') return "a } alone (write }})";
+            i += 2;
+        } else {
+            i++;
+        }
+        if (kind == RX_TOK_LIT && cp->n > 0 && cp->t[cp->n - 1].kind == RX_TOK_LIT) {
+            cp->t[cp->n - 1].litlen++;
+        } else {
+            if (cp->n >= 32) return "more than 32 parts";
+            cp->t[cp->n].kind = kind;
+            cp->t[cp->n].lit = cp->nlit;
+            cp->t[cp->n].litlen = kind == RX_TOK_LIT;
+            cp->n++;
+        }
+        if (kind == RX_TOK_LIT) cp->lit[cp->nlit++] = (char)c;
+    }
+    return NULL;
+}
+
+const char *rx_check_pattern(const char *p, size_t len) {
+    rx_pattern cp;
+    return rx_pattern_compile(p, len, &cp);
+}
+
+typedef struct { const rx_pattern *cp; const char *line; size_t len; int steps; size_t (*caps)[2]; } rx_prun;
+
+static int rx_pmatch(rx_prun *m, int tok, size_t pos) {
+    if (++m->steps > 10000) return 0;
+    if (tok == m->cp->n) return pos == m->len;
+    const rx_ptok *t = &m->cp->t[tok];
+    const char *l = m->line;
+    if (t->kind == RX_TOK_LIT) {
+        if (pos + t->litlen > m->len || memcmp(l + pos, m->cp->lit + t->lit, t->litlen) != 0) return 0;
+        return rx_pmatch(m, tok + 1, pos + t->litlen);
+    }
+    if (t->kind == RX_TOK_BLANK) {
+        for (size_t q = pos; q < m->len && (l[q] == ' ' || l[q] == '\t');) {
+            if (rx_pmatch(m, tok + 1, ++q)) return 1;
+            if (m->steps > 10000) return 0;
+        }
+        return 0;
+    }
+    if (t->kind == 5) {
+        for (int w = 0; w < 9; w++) {
+            size_t n = strlen(rx_sev_words[w]), k;
+            if (pos + n > m->len) continue;
+            for (k = 0; k < n; k++) {
+                char c = l[pos + k];
+                if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+                if (c != rx_sev_words[w][k]) break;
+            }
+            if (k < n) continue;
+            m->caps[5][0] = pos, m->caps[5][1] = n;
+            if (rx_pmatch(m, tok + 1, pos + n)) return 1;
+        }
+        return 0;
+    }
+    if (t->kind >= 1 && t->kind <= 4) {
+        for (size_t n = 1; n <= 9 && pos + n <= m->len; n++) {
+            if (l[pos + n - 1] < '0' || l[pos + n - 1] > '9') return 0;
+            m->caps[t->kind][0] = pos, m->caps[t->kind][1] = n;
+            if (rx_pmatch(m, tok + 1, pos + n)) return 1;
+            if (m->steps > 10000) return 0;
+        }
+        return 0;
+    }
+    /* {file}, {code}, {message}: 1 or more bytes; {_}: 0 or more; the fewest first */
+    if (t->kind == 0 && (pos >= m->len || l[pos] == ' ' || l[pos] == '\t')) return 0;
+    for (size_t n = t->kind == RX_TOK_ANY ? 0 : 1; pos + n <= m->len; n++) {
+        if (t->kind == 0 && n >= 3 && memcmp(l + pos + n - 3, "://", 3) == 0) return 0;
+        if (t->kind != RX_TOK_ANY) m->caps[t->kind][0] = pos, m->caps[t->kind][1] = n;
+        if (rx_pmatch(m, tok + 1, pos + n)) return 1;
+        if (m->steps > 10000) return 0;
+    }
+    return 0;
+}
+
+int rx_match_pattern(const char *p, size_t plen, const char *line, size_t llen, size_t caps[8][2], unsigned *has) {
+    rx_pattern cp;
+    if (rx_pattern_compile(p, plen, &cp)) return 0;
+    rx_prun m = {&cp, line, llen, 0, caps};
+    memset(caps, 0, sizeof(size_t) * 16);
+    if (has) {
+        *has = 0;
+        for (int i = 0; i < cp.n; i++)
+            if (cp.t[i].kind >= 0 && cp.t[i].kind < 8) *has |= 1u << cp.t[i].kind;
+    }
+    return rx_pmatch(&m, 0, 0);
+}
+
+const char *rx_builtin_matcher(const char *name) {
+    static const char *const names[] = {"go", "gcc", "rustc", "tsc", "msbuild"};
+    static const char *const texts[] = {
+        "columns bytes\n1 {file}:{line}:{col}: {message}\n1 vet: {file}:{line}:{col}: {message}\n1  {file}:{line}: {message}\n",
+        "columns bytes\n1 {file}:{line}:{col}: {severity}: {message}\n1 {file}:{line}: {severity}: {message}\n",
+        "1 {severity}[{code}]: {message}\n1 {severity}: {message}\n2  --> {file}:{line}:{col}\n",
+        "1 {file}({line},{col}): {severity} {code}: {message}\n1 {file}:{line}:{col} - {severity} {code}: {message}\n",
+        "1 {file}({line},{col}): {severity} {code}: {message}\n1 {file}({line},{col},{endline},{endcol}): {severity} {code}: {message}\n"};
+    for (int i = 0; i < 5; i++)
+        if (strcmp(name, names[i]) == 0) return texts[i];
+    return NULL;
+}
+
+const char *rx_check_matcher(const char *text, size_t len) {
+    static const char bad[] = "a matcher line is severity S, columns chars|bytes, N PATTERN or loop";
+    int steps = 0, alts[4] = {0, 0, 0, 0};
+    if (len > 4096) return "a matcher is at most 4096 bytes";
+    for (size_t at = 0; at <= len;) {
+        const char *nl = (const char *)memchr(text + at, '\n', len - at);
+        size_t end = nl ? (size_t)(nl - text) : len, s = at, e = end;
+        at = end + 1;
+        while (s < e && (text[s] == ' ' || text[s] == '\t' || text[s] == '\r')) s++;
+        while (e > s && (text[e - 1] == ' ' || text[e - 1] == '\t' || text[e - 1] == '\r')) e--;
+        if (s == e) continue;
+        size_t w = s;
+        while (w < e && text[w] != ' ' && text[w] != '\t') w++;
+        size_t wl = w - s;
+        const char *rest = text + w + 1;
+        size_t rl = w < e ? e - w - 1 : 0;
+        if (wl == 4 && memcmp(text + s, "loop", 4) == 0) {
+            if (w < e) return bad;
+        } else if (w >= e) {
+            return bad;
+        } else if (wl == 8 && memcmp(text + s, "severity", 8) == 0) {
+            if (!(rl == 5 && !memcmp(rest, "error", 5)) && !(rl == 7 && !memcmp(rest, "warning", 7)) &&
+                !(rl == 4 && (!memcmp(rest, "info", 4) || !memcmp(rest, "hint", 4))))
+                return bad;
+        } else if (wl == 7 && memcmp(text + s, "columns", 7) == 0) {
+            if (rl != 5 || (memcmp(rest, "bytes", 5) && memcmp(rest, "chars", 5))) return bad;
+        } else if (wl == 1 && text[s] >= '1' && text[s] <= '4') {
+            int n = text[s] - '0';
+            if (n != steps && n != steps + 1) return "steps go 1, 2, 3, 4 in order";
+            steps = n;
+            if (alts[n - 1] >= 8) return "more than 8 patterns in a step";
+            alts[n - 1]++;
+            const char *why = rx_check_pattern(rest, rl);
+            if (why) return why;
+        } else {
+            return bad;
+        }
+        if (!nl) break;
+    }
+    return steps ? NULL : "a matcher needs a step 1 pattern";
+}
+
+static int rx_task_id_ok(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (n == 0 || n > 64) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (i > 0 && (c == '_' || c == '.' || c == '-')))) return 0;
+    }
+    return 1;
+}
+
+/* one line of text without control characters (rhun also refuses bidi controls and invalid UTF-8) */
+static int rx_line_ok(const char *s, size_t limit) {
+    size_t n = s ? strlen(s) : 0;
+    if (n == 0 || n > limit) return 0;
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)s[i] < 0x20 || s[i] == 0x7f) return 0;
+    return 1;
+}
+
+static void rx_record(rx_buf *b, const char *name, const char *args, const char *data, size_t len) {
+    rx_buf_fmt(b, args ? "%s %s %zu\n" : "%s%s%zu\n", name, args ? args : " ", len);
+    if (len) rx_buf_add(b, data, len);
+}
+
+static int rx_encode(const char *id, const char *label, const char *detail, const rx_program *p, const char *reveal,
+                     int output, const rx_buf *more, int task, rx_buf *out, const char **why) {
+    rx_buf cmd = {NULL, 0, 0}, extra = {NULL, 0, 0};
+    const char *form = "shell";
+    const char *err = NULL;
+    if (!rx_line_ok(label, 128)) err = "label: 1 to 128 bytes of plain text";
+    if (p->shell && p->shell[0]) {
+        if (!rx_line_ok(p->shell, 4096)) err = "command: 1 to 4096 bytes of plain text";
+        rx_buf_str(&cmd, p->shell);
+    } else if (p->argv && p->argv[0]) {
+        int n = 0;
+        form = "argv";
+        if (!p->argv[0][0]) err = "argv: 1 to 64 arguments, each ending with a NUL, the first not empty";
+        for (const char *const *a = p->argv; *a; a++, n++) rx_buf_add(&cmd, *a, strlen(*a) + 1);
+        if (n > 64 || cmd.len > 32768) err = "argv: 1 to 64 arguments, each ending with a NUL, the first not empty";
+    } else if (task) {
+        err = "command: 1 to 4096 bytes of plain text";
+    }
+    if (detail && detail[0]) {
+        if (!rx_line_ok(detail, 200)) err = "detail: one line, at most 200 bytes";
+        rx_record(&extra, "detail", NULL, detail, strlen(detail));
+    }
+    for (const char *const *v = p->env; v && *v; v++) {
+        const char *eq = strchr(*v, '=');
+        char name[72];
+        size_t nl = eq ? (size_t)(eq - *v) : 0;
+        if (!eq || nl == 0 || nl > 64 || strchr(eq, '\n')) {
+            err = "env: NAME is [A-Za-z_][A-Za-z0-9_]*, the value one line";
+            continue;
+        }
+        memcpy(name, *v, nl);
+        name[nl] = 0;
+        rx_record(&extra, "env", name, eq + 1, strlen(eq + 1));
+    }
+    for (const char *const *v = p->unset; v && *v; v++) rx_record(&extra, "unset", *v, NULL, 0);
+    if (reveal) {
+        if (strcmp(reveal, "show") && strcmp(reveal, "focus") && strcmp(reveal, "silent")) err = "reveal: show, focus or silent";
+        rx_record(&extra, "reveal", reveal, NULL, 0);
+    }
+    if (output) rx_record(&extra, "output", NULL, NULL, 0);
+    if (more) rx_buf_add(&extra, more->data, more->len);
+    const char *cwd = p->cwd ? p->cwd : "";
+    if (strlen(cwd) > 4096 || strchr(cwd, '\n')) err = "cwd: at most 4096 bytes, no NUL or LF";
+    if (!err) {
+        rx_buf_fmt(out, "%s %s %zu %zu %zu %zu\n", id, form, strlen(label), cmd.len, strlen(cwd), extra.len);
+        rx_buf_str(out, label);
+        rx_buf_add(out, cmd.data, cmd.len);
+        rx_buf_str(out, cwd);
+        rx_buf_add(out, extra.data, extra.len);
+    }
+    rx_buf_free(&cmd);
+    rx_buf_free(&extra);
+    if (why) *why = err;
+    return err ? -1 : 0;
+}
+
+int rx_task_encode(const rx_task *t, rx_buf *out, const char **why) {
+    rx_buf more = {NULL, 0, 0};
+    const char *err = NULL;
+    int n = 0;
+    if (!rx_task_id_ok(t->id)) err = "id: 1 to 64 bytes of a-z 0-9 _ . -, from a letter or digit";
+    if (t->group) {
+        if (strcmp(t->group, "build") && strcmp(t->group, "test")) err = "group: build or test";
+        rx_record(&more, "group", t->group, NULL, 0);
+    }
+    if (t->is_default) rx_record(&more, "default", NULL, NULL, 0);
+    if (t->depends && t->depends[0]) {
+        rx_buf ids = {NULL, 0, 0};
+        int k = 0;
+        for (const char *const *d = t->depends; *d; d++, k++) {
+            if (!rx_task_id_ok(*d) || k >= 16) err = "depends: 1 to 16 task ids";
+            if (k) rx_buf_str(&ids, " ");
+            rx_buf_str(&ids, *d);
+        }
+        rx_record(&more, "depends", t->parallel ? "parallel" : "sequence", ids.data, ids.len);
+        rx_buf_free(&ids);
+    }
+    for (const char *const *m = t->builtin_matchers; m && *m; m++, n++) {
+        if (!rx_builtin_matcher(*m)) err = "matcher: go, gcc, rustc, tsc or msbuild";
+        rx_record(&more, "matcher", *m, NULL, 0);
+    }
+    for (const char *const *m = t->matcher_texts; m && *m; m++, n++) {
+        const char *w = rx_check_matcher(*m, strlen(*m));
+        if (w) err = w;
+        rx_record(&more, "matcher", "-", *m, strlen(*m));
+    }
+    if (n > 4) err = "too many: 64 env, 4 matchers, 8 patterns";
+    for (int r = 0; r < 2; r++) {
+        const char *const *list = r ? t->busy : t->ready;
+        rx_buf pats = {NULL, 0, 0};
+        int k = 0;
+        for (; list && *list; list++, k++) {
+            const char *w = rx_check_pattern(*list, strlen(*list));
+            if (w) err = w;
+            if (k) rx_buf_str(&pats, "\n");
+            rx_buf_str(&pats, *list);
+        }
+        if (k > 8) err = "too many: 64 env, 4 matchers, 8 patterns";
+        if (k) rx_record(&more, r ? "busy" : "ready", NULL, pats.data, pats.len);
+        rx_buf_free(&pats);
+    }
+    if (t->busy && t->busy[0] && !(t->ready && t->ready[0])) err = "busy needs ready";
+    int rc = err ? -1 : rx_encode(t->id, t->label, t->detail, &t->program, t->reveal, t->output, &more, 1, out, &err);
+    rx_buf_free(&more);
+    if (why) *why = err;
+    return err ? -1 : rc;
+}
+
+int rx_terminal_encode(const rx_terminal_spec *s, rx_buf *out, const char **why) {
+    return rx_encode("-", s->label, s->detail, &s->program, s->reveal, s->output, NULL, 0, out, why);
+}
+
+static int rx_term_agreed(rx_ext *ext, const char *feature) {
+    if (rx_has(ext, feature)) return 1;
+    snprintf(ext->error, sizeof ext->error, "unknown %s was not agreed", feature);
+    return 0;
+}
+
+static rx_term rx_term_request(rx_ext *ext, const char *verb_args, const void *body, size_t len) {
+    rx_buf f = {NULL, 0, 0};
+    rx_term t = 0;
+    if (rx_request(ext, verb_args, body, len, &f, NULL) == 0) t = f.data ? strtoull(f.data, NULL, 10) : 0;
+    rx_buf_free(&f);
+    return t;
+}
+
+int rx_set_tasks(rx_ext *ext, const rx_task *tasks, size_t n) {
+    if (!rx_term_agreed(ext, "tasks")) return -1;
+    rx_buf body = {NULL, 0, 0};
+    rx_buf_fmt(&body, "%zu\n", n);
+    for (size_t i = 0; i < n; i++) {
+        const char *why;
+        if (rx_task_encode(&tasks[i], &body, &why) < 0) {
+            snprintf(ext->error, sizeof ext->error, "syntax task %zu: %s", i + 1, why);
+            rx_buf_free(&body);
+            return -1;
+        }
+    }
+    char line[48];
+    snprintf(line, sizeof line, "tasks-set %zu", body.len);
+    int r = rx_request(ext, line, body.data, body.len, NULL, NULL);
+    rx_buf_free(&body);
+    return r;
+}
+
+rx_term rx_start_task(rx_ext *ext, const char *id) {
+    if (!rx_term_agreed(ext, "tasks")) return 0;
+    if (!rx_task_id_ok(id)) {
+        snprintf(ext->error, sizeof ext->error, "syntax a task id");
+        return 0;
+    }
+    char line[96];
+    snprintf(line, sizeof line, "task-start %s", id);
+    return rx_term_request(ext, line, NULL, 0);
+}
+
+static rx_term rx_start_def(rx_ext *ext, const char *verb, const rx_buf *def) {
+    char line[48];
+    snprintf(line, sizeof line, "%s %zu", verb, def->len);
+    return rx_term_request(ext, line, def->data, def->len);
+}
+
+rx_term rx_run_task(rx_ext *ext, const rx_task *t) {
+    if (!rx_term_agreed(ext, "tasks")) return 0;
+    rx_buf b = {NULL, 0, 0};
+    const char *why;
+    rx_term r = 0;
+    if (rx_task_encode(t, &b, &why) < 0) snprintf(ext->error, sizeof ext->error, "syntax definition: %s", why);
+    else r = rx_start_def(ext, "task-run", &b);
+    rx_buf_free(&b);
+    return r;
+}
+
+rx_term rx_open_terminal(rx_ext *ext, const rx_terminal_spec *s) {
+    if (!rx_term_agreed(ext, "terminals")) return 0;
+    rx_buf b = {NULL, 0, 0};
+    const char *why;
+    rx_term r = 0;
+    if (rx_terminal_encode(s, &b, &why) < 0) snprintf(ext->error, sizeof ext->error, "syntax definition: %s", why);
+    else r = rx_start_def(ext, "terminal-open", &b);
+    rx_buf_free(&b);
+    return r;
+}
+
+static int rx_term_verb(rx_ext *ext, const char *verb, rx_term t, const char *more) {
+    if (!rx_term_agreed(ext, "terminals")) return -1;
+    char line[96];
+    snprintf(line, sizeof line, "%s %llu%s", verb, (unsigned long long)t, more);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+int rx_stop_terminal(rx_ext *ext, rx_term t) { return rx_term_verb(ext, "terminal-stop", t, ""); }
+int rx_restart_terminal(rx_ext *ext, rx_term t) { return rx_term_verb(ext, "terminal-restart", t, ""); }
+int rx_close_terminal(rx_ext *ext, rx_term t) { return rx_term_verb(ext, "terminal-close", t, ""); }
+int rx_show_terminal(rx_ext *ext, rx_term t, int focus) {
+    return rx_term_verb(ext, "terminal-show", t, focus ? " focus" : " show");
+}
+
+int rx_terminal_input(rx_ext *ext, rx_term t, const void *bytes, size_t len) {
+    if (!rx_term_agreed(ext, "terminals")) return -1;
+    if (len > 65536) {
+        snprintf(ext->error, sizeof ext->error, "toobig 65536 bytes");
+        return -1;
+    }
+    char line[96];
+    snprintf(line, sizeof line, "terminal-input %llu %zu", (unsigned long long)t, len);
+    return rx_request(ext, line, bytes, len, NULL, NULL);
+}
+
+int rx_terminal_screen(rx_ext *ext, rx_term t, rx_buf *body) {
+    if (!rx_term_agreed(ext, "terminals")) return -1;
+    char line[64];
+    snprintf(line, sizeof line, "terminal-screen %llu", (unsigned long long)t);
+    return rx_request(ext, line, NULL, 0, NULL, body);
+}
+
+static int rx_unum(const char *s, int64_t *out) {
+    if (!s || !*s || strlen(s) > 18) return 0;
+    for (const char *p = s; *p; p++)
+        if (*p < '0' || *p > '9') return 0;
+    *out = atoll(s);
+    return 1;
+}
+
+int rx_parse_terminal_event(const rx_event *ev, rx_terminal_event *out) {
+    int64_t term = 0;
+    memset(out, 0, sizeof *out);
+    if (ev->argc < 1 || !rx_unum(ev->argv[0], &term) || term == 0) return 0;
+    out->term = (rx_term)term;
+    const char *n = ev->name;
+    if (strcmp(n, "terminal-started") == 0 && ev->argc == 3) {
+        if (!rx_unum(ev->argv[1], &out->pid) || strlen(ev->argv[2]) > 64) return 0;
+        if (strcmp(ev->argv[2], "-")) snprintf(out->task, sizeof out->task, "%s", ev->argv[2]);
+        snprintf(out->kind, sizeof out->kind, "started");
+        return 1;
+    }
+    if (strcmp(n, "terminal-ended") == 0 && ev->argc == 5) {
+        out->code = -1;
+        if (strcmp(ev->argv[2], "-") && !rx_unum(ev->argv[2], &out->code)) return 0;
+        if (strlen(ev->argv[1]) > 7 || !rx_unum(ev->argv[3], &out->errors) || !rx_unum(ev->argv[4], &out->warnings)) return 0;
+        snprintf(out->reason, sizeof out->reason, "%s", ev->argv[1]);
+        snprintf(out->kind, sizeof out->kind, "ended");
+        return 1;
+    }
+    if (strcmp(n, "terminal-output") == 0 && ev->argc == 3) {
+        if (!rx_unum(ev->argv[1], &out->dropped)) return 0;
+        out->lines = ev->body, out->lines_len = ev->body_len;
+        snprintf(out->kind, sizeof out->kind, "output");
+        return 1;
+    }
+    if (strcmp(n, "terminal-closed") == 0 && ev->argc == 1) {
+        snprintf(out->kind, sizeof out->kind, "closed");
+        return 1;
+    }
+    if (strcmp(n, "task-ready") == 0 && ev->argc == 3) {
+        if (!rx_unum(ev->argv[1], &out->errors) || !rx_unum(ev->argv[2], &out->warnings)) return 0;
+        snprintf(out->kind, sizeof out->kind, "ready");
+        return 1;
+    }
+    if (strcmp(n, "task-busy") == 0 && ev->argc == 1) {
+        snprintf(out->kind, sizeof out->kind, "busy");
+        return 1;
+    }
+    return 0;
 }
 
 /* ---- the loop */
