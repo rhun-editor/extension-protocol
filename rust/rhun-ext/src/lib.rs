@@ -58,6 +58,7 @@ pub mod chart;
 pub mod commands;
 pub mod complete;
 pub mod custom_editor;
+pub mod debug;
 pub mod editor;
 pub mod edits;
 pub mod files;
@@ -97,6 +98,7 @@ pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, Resolution, ResolveRequest,
     SignatureHelp, SignatureInfo, SignatureList, SignatureRequest,
 };
+pub use debug::{DebugConfig, DebugEnded, DebugResolve, DebugValue, Resolved};
 pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show};
 pub use edits::{Change, Located, OrderError};
 pub use lang::{
@@ -277,6 +279,9 @@ pub enum Feature {
     /// Quick-diff bases for the gutter: [`Handler::quickdiff`], [`Ext::quickdiff_refresh`];
     /// `[provides] quickdiff = PATTERNS`.
     QuickDiff,
+    /// Debuggers: [`Ext::debug_start`], [`Handler::resolve_debug`] and the [`DebugEnded`] event;
+    /// `[needs] debug = yes`.
+    Debug,
     /// Retained views: manifest `[views]`, [`Ext::patch`], [`Ext::vshow`],
     /// [`Handler::view_open`] and [`Handler::view_event`] (protocol 1.1, [`views`]).
     ViewTree,
@@ -404,6 +409,7 @@ impl Feature {
             Feature::GitData => "git-data",
             Feature::CommitMessage => "commit-message",
             Feature::QuickDiff => "quickdiff",
+            Feature::Debug => "debug",
             Feature::ViewTree => "view-tree",
             Feature::Idle => "idle",
             Feature::Secrets => "secrets",
@@ -1136,6 +1142,12 @@ pub trait Handler: Send {
     }
     /// The user pressed Stop in one of its sessions (feature agent-prompts).
     fn agent_stop(&mut self, _ext: &Ext, _sid: &str) {}
+    /// rhun shows a debugger's configuration before launching it (feature `debug`, a debugger
+    /// with `resolve = yes`): the complete resolved configuration, or launch it unchanged, or
+    /// abandon the launch quietly or with a sentence. It may ask the user (choose, ask).
+    fn resolve_debug(&mut self, _ext: &Ext, _req: &DebugResolve) -> Resolved {
+        Resolved::Unchanged
+    }
     /// rhun is about to stop the extension.
     fn bye(&mut self, _ext: &Ext) {}
     /// rhun asks for a virtual document's text (feature `uris`): a URI of one of the schemes in
@@ -2417,6 +2429,8 @@ impl Ext {
                         let body_max: Option<usize> = match verb.as_str() {
                             // BRANCH_LEN DIFF_LEN LF + both: rhun sends at most 4 MB
                             "commit-message" => Some(4 << 20),
+                            // TYPE REQUEST NODEBUG LEN + a configuration body (debug)
+                            "debug-resolve" => Some(debug::MAX_DEBUG_BODY),
                             // vkids, vmore: the node id follows (at most 1000 bytes)
                             v if views::request_has_body(v) => Some(4096),
                             // tests: the parent item's id, the run's items
@@ -2922,6 +2936,18 @@ impl Ext {
                         "quickdiff" if self.has(Feature::QuickDiff) => {
                             QuickDiffRequest::parse(id, &fields)
                                 .map(|r| Ok(h.quickdiff(self, &r).unwrap_or_default()))
+                        }
+                        "debug-resolve" if self.has(Feature::Debug) => {
+                            DebugResolve::parse(id, &fields, &req_body).map(|r| {
+                                match h.resolve_debug(self, &r) {
+                                    Resolved::Unchanged => Ok(Vec::new()),
+                                    Resolved::Config(c) => c.encode().map_err(|e| ("toobig", e)),
+                                    Resolved::Cancel => {
+                                        Err(("cancelled", "the launch was cancelled".to_string()))
+                                    }
+                                    Resolved::Refuse(why) => Err(("refused", why)),
+                                }
+                            })
                         }
                         "commit-message" if self.has(Feature::CommitMessage) => {
                             CommitMessageRequest::parse(id, &req_body).map(|r| {
