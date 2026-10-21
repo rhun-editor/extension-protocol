@@ -625,6 +625,19 @@ func (e *Ext) answer(h Handler, f []string, reqBody []byte) {
 				}
 			}
 		}
+	case "debug-resolve":
+		id, _ := strconv.ParseInt(f[0], 10, 64)
+		source := e.sourceFor(id)
+		if source != nil {
+			defer e.finishSource(source)
+		}
+		r, is := h.(DebugResolver)
+		if is && source != nil && e.Has(FeatureDebug) {
+			if req, ok := parseDebugResolve(id, f, reqBody, source.ctx); ok {
+				known = true
+				body, rerr = answerDebugResolve(e, r, req)
+			}
+		}
 	case FeatureCommitMessage:
 		id, _ := strconv.ParseInt(f[0], 10, 64)
 		source := e.sourceFor(id)

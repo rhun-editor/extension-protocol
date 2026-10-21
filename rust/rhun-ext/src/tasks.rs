@@ -523,8 +523,9 @@ pub fn parse_task_list(body: &[u8]) -> Result<Vec<Definition>, Error> {
     }
     let mut index = HashMap::new();
     for (i, d) in list.iter().enumerate() {
-        if index.insert(d.id.clone(), i).is_some() {
-            return Err(syntax(format!("task {}: id listed twice", i + 1)));
+        if let Some(first) = index.insert(d.id.clone(), i) {
+            // rhun names the first of the two
+            return Err(syntax(format!("task {}: id listed twice", first + 1)));
         }
     }
     for (i, d) in list.iter().enumerate() {
@@ -1328,7 +1329,7 @@ mod tests {
         ];
         assert_eq!(
             encode_task_list(&dup).unwrap_err().text,
-            "task 2: id listed twice"
+            "task 1: id listed twice"
         );
     }
 

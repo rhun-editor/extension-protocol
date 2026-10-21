@@ -219,6 +219,8 @@ class Ext:
         log('<', esc(line))
         f = text.split(' ')
         if f[0] == '0':
+            if len(f) == 5 and f[1] == 'terminal-output':     # TERM DROPPED LEN + the lines (1.1)
+                body_record('B', self.conn.readexact(int(f[4])))
             self.event(text)
             return text
         if f[0] in ('ok', 'error'):
@@ -228,7 +230,7 @@ class Ext:
             if f[0] == 'ok' and verb in ('text', 'range') and len(f) >= 4:
                 body = self.conn.readexact(int(f[3]))
                 body_record('B', body)
-            elif f[0] == 'ok' and verb == 'ask' and len(f) >= 3:       # ok ID LEN + the answer
+            elif f[0] == 'ok' and verb in ('ask', 'terminal-screen') and len(f) >= 3:   # ok ID LEN + body
                 body = self.conn.readexact(int(f[2]))
                 body_record('B', body)
             r = Reply(text.rstrip('\r'), body)
