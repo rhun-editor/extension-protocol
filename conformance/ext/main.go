@@ -240,25 +240,6 @@ type host struct {
 	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
 
-<<<<<<< HEAD
-	features    map[string]bool // section 12: agreed after hello
-	views       map[int64]bool  // views it opened
-	nextView    int64
-	pictures    int               // draw requests that passed
-	hostSeq     int64             // the last id of a request the checker sent
-	hostReqs    map[int64]string  // those waiting for an answer
-	hostAnswers map[int64]message // and the answers
-	saveScope   *saveScope
-	rviews      map[int64]*rview     // retained views it was given (views.go)
-	notes       map[int64]*noteState // notifications open (notify.go)
-	progs       map[int64]*progState // progress not ended
-	noteSeq     int64
-	quickQ      int64 // the quick input open (quick.go), 0 none
-	quickSeq    int64
-	images      map[int64]bool    // view-images handles (views.go)
-	patches     int               // vpatch requests that passed
-	secrets     map[string][]byte // secret-set values (resources.go)
-=======
 	features      map[string]bool // section 12: agreed after hello
 	views         map[int64]bool  // views it opened
 	nextView      int64
@@ -272,10 +253,11 @@ type host struct {
 	notes         map[int64]*noteState // notifications open (notify.go)
 	progs         map[int64]*progState // progress not ended
 	noteSeq       int64
+	quickQ        int64 // the quick input open (quick.go), 0 none
+	quickSeq      int64
 	images        map[int64]bool    // view-images handles (views.go)
 	patches       int               // vpatch requests that passed
 	secrets       map[string][]byte // secret-set values (resources.go)
->>>>>>> rhun-0.18
 
 	warnedConsent bool               // said once that a disk change needs the user's consent
 	diffs         map[int64]string   // the diff tabs it opened: "LEFT RIGHT TITLE"
