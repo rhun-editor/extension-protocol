@@ -56,7 +56,10 @@ fn cut(s: &str, max: usize) -> &str {
 impl Note {
     /// The message: at most 2000 bytes (LF breaks a line; long lines wrap).
     pub fn new(msg: &str) -> Note {
-        Note { msg: cut(msg, 2000).to_string(), ..Note::default() }
+        Note {
+            msg: cut(msg, 2000).to_string(),
+            ..Note::default()
+        }
     }
     /// A muted line under the message.
     pub fn detail(mut self, text: &str) -> Note {
@@ -71,15 +74,18 @@ impl Note {
     /// A button that reports [`NoteEvent::Pressed`] (3 at most).
     pub fn button(mut self, title: &str) -> Note {
         if self.buttons.len() < 3 {
-            self.buttons.push((cut(&title.replace('\n', " "), 60).to_string(), None));
+            self.buttons
+                .push((cut(&title.replace('\n', " "), 60).to_string(), None));
         }
         self
     }
     /// A button that runs one of the extension's commands with ARGS (a command reference).
     pub fn button_command(mut self, title: &str, command: &str, args: &[u8]) -> Note {
         if self.buttons.len() < 3 {
-            self.buttons
-                .push((cut(&title.replace('\n', " "), 60).to_string(), Some((command.to_string(), args.to_vec()))));
+            self.buttons.push((
+                cut(&title.replace('\n', " "), 60).to_string(),
+                Some((command.to_string(), args.to_vec())),
+            ));
         }
         self
     }
@@ -165,21 +171,46 @@ mod tests {
     use super::*;
 
     fn event(name: &str, fields: &[&str]) -> Event {
-        Event { name: name.into(), fields: fields.iter().map(|f| f.to_string()).collect(), ..Event::default() }
+        Event {
+            name: name.into(),
+            fields: fields.iter().map(|f| f.to_string()).collect(),
+            ..Event::default()
+        }
     }
 
     #[test]
     fn a_note_encodes_its_records_in_order() {
-        let n = Note::new("Saved").detail("3 files").sticky().button("A").button("B").button("C").button("D");
-        assert_eq!(n.encode(), b"5 55\nSaveddetail 7\n3 filessticky 0\nbutton 1\nAbutton 1\nBbutton 1\nC".to_vec());
+        let n = Note::new("Saved")
+            .detail("3 files")
+            .sticky()
+            .button("A")
+            .button("B")
+            .button("C")
+            .button("D");
+        assert_eq!(
+            n.encode(),
+            b"5 55\nSaveddetail 7\n3 filessticky 0\nbutton 1\nAbutton 1\nBbutton 1\nC".to_vec()
+        );
     }
 
     #[test]
     fn events_parse() {
-        assert_eq!(parse_note_event(&event("notify", &["4", "pressed", "2"])), Some((4, NoteEvent::Pressed(2))));
-        assert_eq!(parse_note_event(&event("notify", &["4", "closed"])), Some((4, NoteEvent::Closed)));
-        assert_eq!(parse_progress_cancel(&event("progress", &["7", "cancel"])), Some(7));
-        assert_eq!(parse_progress_cancel(&event("progress", &["7", "other"])), None);
+        assert_eq!(
+            parse_note_event(&event("notify", &["4", "pressed", "2"])),
+            Some((4, NoteEvent::Pressed(2)))
+        );
+        assert_eq!(
+            parse_note_event(&event("notify", &["4", "closed"])),
+            Some((4, NoteEvent::Closed))
+        );
+        assert_eq!(
+            parse_progress_cancel(&event("progress", &["7", "cancel"])),
+            Some(7)
+        );
+        assert_eq!(
+            parse_progress_cancel(&event("progress", &["7", "other"])),
+            None
+        );
         assert_eq!(ProgressWhere::View(3).word(), "view:3");
     }
 }

@@ -143,7 +143,8 @@ impl Ext {
     /// An owned model differs from its file (`true`) or not: the dirty dot and the close question.
     pub fn editor_dirty(&self, cdoc: CDoc, dirty: bool) -> Result<(), Error> {
         agreed(self)?;
-        self.request(&format!("editor-dirty {cdoc} {}", dirty as u8), None).map(|_| ())
+        self.request(&format!("editor-dirty {cdoc} {}", dirty as u8), None)
+            .map(|_| ())
     }
 }
 
@@ -153,9 +154,15 @@ mod tests {
 
     #[test]
     fn parses_and_parts() {
-        let f: Vec<String> = ["3", "7", "owned", "file", "6"].iter().map(|s| s.to_string()).collect();
+        let f: Vec<String> = ["3", "7", "owned", "file", "6"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let o = EditorOpen::parse(1, &f, b"/a.bin").unwrap();
-        assert_eq!((o.cdoc, o.view, o.model, o.path.as_str()), (3, 7, Model::Owned, "/a.bin"));
+        assert_eq!(
+            (o.cdoc, o.view, o.model, o.path.as_str()),
+            (3, 7, Model::Owned, "/a.bin")
+        );
         let f: Vec<String> = ["3", "saveas", "2"].iter().map(|s| s.to_string()).collect();
         let s = EditorSave::parse(1, &f).unwrap();
         assert_eq!((s.kind, s.part), (SaveKind::SaveAs, 2));

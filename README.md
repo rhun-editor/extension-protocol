@@ -384,6 +384,21 @@ check agreement before encoding or sending; completion builders snapshot declara
 (Go/Rust own their metadata; C encodes borrowed inputs during the call). Later edits
 copy the primary value normally. Formatting uses this initial-layout primitive; deferred transforms can use it as well.
 
+## Terminals and tasks
+
+Protocol 1.1's `terminals` and `tasks` features (`[needs] terminal = run`): programs in terminal
+tabs and published tasks with dependencies, readiness and problem matchers. Go: `Task`, `Program`,
+`TerminalSpec`, `SetTasks`, `StartTask`, `RunTask`, `OpenTerminal` (their `…Context` forms send
+`cancel` when the context ends while the approval dialog is open, and stop a terminal whose start
+won that race), `StopTerminal`, `RestartTerminal`, `CloseTerminal`, `ShowTerminal`,
+`TerminalInput`, `TerminalScreen`, `ParseTerminalEvent`. Rust: the `tasks` module and the same
+`Ext` methods. C: `rx_task`, `rx_terminal_spec`, `rx_set_tasks`, `rx_start_task`, `rx_run_task`,
+`rx_open_terminal` and the `rx_*_terminal` calls, `rx_parse_terminal_event`. Every SDK checks a
+definition as rhun reads it before sending it, and has rhun's pattern matcher (`CheckPattern`,
+`MatchPattern`, `CheckMatcher`; `check_pattern`…; `rx_check_pattern`…), tested against the shared
+vectors in `v1.1/patterns.txt`. The checker validates `tasks-set` and every definition exactly as
+rhun does and plays the events of a run.
+
 ## Checking a host
 
 `python3 conformance/host/run.py RHUN_BINARY` runs rhun against extensions written only from
