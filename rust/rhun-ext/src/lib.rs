@@ -1520,7 +1520,8 @@ impl Ext {
     /// `badpos`, `nodoc`, `nofile`, …). Needs `documents = write`. For a language server's
     /// `workspace/applyEdit`. With [`Feature::WorkspaceEdits`] the edit is a transaction (files
     /// that are not open edited on disk, one undo) and the error names the entry at fault; file
-    /// operations need [`Feature::FileOperations`] too (`unknown` without, nothing sent).
+    /// operations need [`Feature::FileOperations`] too. An edit that needs a feature rhun did not
+    /// agree (as [`Ext::encode_edit`]) is `unknown`, and nothing is sent.
     pub fn apply(&self, edit: &WorkspaceEdit) -> Result<(), ApplyError> {
         let body = edit
             .encode_with(self.edit_caps())
@@ -1536,10 +1537,24 @@ impl Ext {
 
     /// The parts of the workspace edit grammar rhun agreed to.
     fn edit_caps(&self) -> lang::EditCaps {
-        lang::EditCaps {
-            ws: self.has(Feature::WorkspaceEdits),
-            ops: self.has(Feature::FileOperations),
-        }
+        lang::EditCaps::agreed(
+            self.has(Feature::WorkspaceEdits),
+            self.has(Feature::FileOperations),
+        )
+    }
+
+    /// The body of a workspace edit in the grammar this rhun agreed, as [`Ext::apply`], a rename
+    /// answer and a code action's edit send it: the transaction with [`Feature::WorkspaceEdits`],
+    /// 12g's without. An edit that needs what was not agreed (file operations without
+    /// [`Feature::WorkspaceEdits`] and [`Feature::FileOperations`]; a hashed file, a label or
+    /// `confirm` without [`Feature::WorkspaceEdits`]) is an error with code `unknown`; a limit
+    /// one with `toobig`.
+    pub fn encode_edit(&self, edit: &WorkspaceEdit) -> Result<Vec<u8>, Error> {
+        edit.encode_with(self.edit_caps())
+            .map_err(|(code, text)| Error {
+                code: code.into(),
+                text,
+            })
     }
 
     fn need(&self, f: Feature) -> Result<(), Error> {
@@ -1773,7 +1788,7 @@ impl Ext {
             });
         }
         let body = edit
-            .encode_with(lang::EditCaps::V1)
+            .encode_with(lang::EditCaps::fixed("save-apply"))
             .map_err(|(code, text)| Error {
                 code: code.into(),
                 text,
@@ -2532,13 +2547,15 @@ impl Ext {
                         "range-format" if self.has(Feature::PartialFormat) => {
                             RangeFormatRequest::parse(&fields).map(|r| {
                                 // a format answer: 12g's grammar whatever was agreed
-                                h.range_format(self, &r).encode_with(lang::EditCaps::V1)
+                                h.range_format(self, &r)
+                                    .encode_with(lang::EditCaps::fixed("a range-format answer"))
                             })
                         }
                         "type-format" if self.has(Feature::PartialFormat) => {
                             TypeFormatRequest::parse(&fields).map(|r| {
                                 // a format answer: 12g's grammar whatever was agreed
-                                h.type_format(self, &r).encode_with(lang::EditCaps::V1)
+                                h.type_format(self, &r)
+                                    .encode_with(lang::EditCaps::fixed("a type-format answer"))
                             })
                         }
                         "code-actions" if self.has(Feature::CodeActions) => {
@@ -2548,13 +2565,13 @@ impl Ext {
                                     .into_iter()
                                     .filter(|a| r.wants(&a.kind_word()))
                                     .collect();
-                                Ok(encode_code_actions(&acts))
+                                Ok(actions::encode_code_actions_with(&acts, self.edit_caps()))
                             })
                         }
                         "code-action-resolve" if self.has(Feature::CodeActions) => {
                             ActionResolveRequest::parse(id, &fields, &req_body).map(|r| {
                                 match h.code_action_resolve(self, &r) {
-                                    Ok(res) => res.encode().map_err(|why| ("toobig", why)),
+                                    Ok(res) => res.encode_with(self.edit_caps()),
                                     Err(why) => Err(("refused", why)),
                                 }
                             })
@@ -2634,7 +2651,10 @@ impl Ext {
                         }
                         // format and save actions keep 12g's grammar (one open document)
                         "format" => FormatRequest::parse(&fields)
-                            .map(|r| h.format(self, &r).encode_with(lang::EditCaps::V1)),
+                            .map(|r| {
+                                h.format(self, &r)
+                                    .encode_with(lang::EditCaps::fixed("a format answer"))
+                            }),
                         "vcopy" if self.has(Feature::ViewKeys) => {
                             let view: View = fields.first().and_then(|v| v.parse().ok()).unwrap_or(0);
                             let cut = fields.get(1).map(String::as_str) == Some("cut");
@@ -2661,7 +2681,9 @@ impl Ext {
                         "save-actions" if self.has(Feature::SaveActions) => {
                             SaveActionsRequest::parse(id, &fields).map(|r| {
                                 match h.save_actions(self, &r) {
-                                    Ok(e) => e.encode_with(lang::EditCaps::V1),
+                                    Ok(e) => e.encode_with(lang::EditCaps::fixed(
+                                        "a save-actions answer",
+                                    )),
                                     Err(why) => Err(("refused", why)),
                                 }
                             })

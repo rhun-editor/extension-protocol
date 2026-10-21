@@ -506,9 +506,16 @@ impl Ext {
     }
 
     /// Proposes an edit for the user to review (feature edit-review): the proposal's id, at once.
-    /// What becomes of it arrives as [`crate::Handler::proposal`] events.
+    /// What becomes of it arrives as [`crate::Handler::proposal`] events. The edit is in 12g's
+    /// grammar whatever was agreed: file operations, a hashed file, a label or `confirm` are
+    /// `unknown`, and nothing is sent.
     pub fn propose(&self, label: &str, sid: &str, edit: &WorkspaceEdit) -> Result<u64, Error> {
-        let e = edit.encode().map_err(|e| Error { code: "toobig".into(), text: e })?;
+        let e = edit
+            .encode_with(crate::lang::EditCaps::fixed("propose"))
+            .map_err(|(code, text)| Error {
+                code: code.into(),
+                text,
+            })?;
         let mut body = format!("{} {}\n{label}{sid}", label.len(), sid.len()).into_bytes();
         body.extend_from_slice(&e);
         let r = self.request("propose", Some(&body))?;

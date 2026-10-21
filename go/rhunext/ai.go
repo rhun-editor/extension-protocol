@@ -331,10 +331,12 @@ func ParseProposal(ev Event) (ProposalEvent, bool) {
 }
 
 // Propose sends an edit for the user to review: the proposal's id, at once (FeatureEditReview).
+// The edit is in 12g's grammar whatever was agreed: file operations, a hashed file, a label or
+// confirm are an *Error with code unknown, and nothing is sent.
 func (e *Ext) Propose(label, sid string, edit WorkspaceEdit) (int64, error) {
-	eb, err := edit.Encode()
-	if err != nil {
-		return 0, &Error{Code: "toobig", Text: err.Error()}
+	eb, bad := edit.encodeWith(editCaps{fixed: "propose"})
+	if bad != nil {
+		return 0, bad // toobig, or unknown
 	}
 	body := append([]byte(fmt.Sprintf("%d %d\n%s%s", len(label), len(sid), label, sid)), eb...)
 	r, err := e.Request("propose", body, strconv.Itoa(len(body)))

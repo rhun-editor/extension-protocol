@@ -928,11 +928,17 @@ fn without_the_features_requests_fail_and_edits_stay_v1() {
                 .unwrap();
             let ops = WorkspaceEdit::new().create("/p/x", Create::default());
             self.0.send(ext.apply(&ops).unwrap_err().code).unwrap();
+            // a hash or a label needs workspace-edits: refused, nothing sent
             let e = WorkspaceEdit::new().label("L").file_hashed(
                 "/p/a",
                 b"x",
                 vec![TextEdit::default()],
             );
+            let err = ext.apply(&e).unwrap_err();
+            self.0
+                .send(format!("{} {} {}", err.code, err.entry, err.text))
+                .unwrap();
+            let e = WorkspaceEdit::new().file("/p/a", None, vec![TextEdit::default()]);
             let err = ext.apply(&e).unwrap_err();
             self.0
                 .send(format!("{} {} {}", err.code, err.entry, err.text))
@@ -965,6 +971,10 @@ fn without_the_features_requests_fail_and_edits_stay_v1() {
     let next = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(next(&got), "unknown");
     assert_eq!(next(&got), "unknown");
+    assert_eq!(
+        next(&got),
+        "unknown 0 the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed"
+    );
     let body = "1\n4 - 1\n/p/a0 0 0 0 0\n";
     assert_eq!(host.line(), format!("1 apply {}", body.len()));
     assert_eq!(host.body(body.len()), body);
@@ -972,6 +982,185 @@ fn without_the_features_requests_fail_and_edits_stay_v1() {
     assert_eq!(next(&got), "stale 0 2 documents changed");
     // a selections event the extension did not agree is not delivered (and its body is read)
     host.send("0 selections 4 1 8\n1 1 1 1\n0 bye\n");
+    done.join().unwrap().unwrap();
+}
+
+/// Answers with and makes edits that need the transaction grammar.
+struct TxProbe(Sender<String>);
+
+fn tx_hashed() -> rhun_ext::WorkspaceEdit {
+    rhun_ext::WorkspaceEdit::new().file_hashed(
+        "/p/a.rs",
+        b"x",
+        vec![rhun_ext::TextEdit::new(rg(1, 1, 1, 1), "y")],
+    )
+}
+
+fn tx_move() -> rhun_ext::WorkspaceEdit {
+    rhun_ext::WorkspaceEdit::new()
+        .label("Move")
+        .rename("/p/a.rs", "/p/b.rs", rhun_ext::Rename::default())
+}
+
+fn tx_plain() -> rhun_ext::WorkspaceEdit {
+    rhun_ext::WorkspaceEdit::new().doc(4, 7, vec![rhun_ext::TextEdit::new(rg(1, 1, 1, 1), "y")])
+}
+
+impl Handler for TxProbe {
+    fn ready(&mut self, ext: &Ext, _p: Option<&str>) {
+        let r = ext.apply(&tx_hashed());
+        let said = match r {
+            Ok(()) => "ok".to_string(),
+            Err(e) => format!("{}: {}", e.code, e.text),
+        };
+        self.0.send(said).unwrap();
+        let e = ext.propose("Move", "", &tx_move()).unwrap_err();
+        self.0.send(format!("{}: {}", e.code, e.text)).unwrap();
+        let said = match ext.encode_edit(&tx_move()) {
+            Ok(b) => String::from_utf8(b).unwrap(),
+            Err(e) => format!("{}: {}", e.code, e.text),
+        };
+        self.0.send(said).unwrap();
+    }
+    fn rename(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::RenameRequest,
+    ) -> Result<rhun_ext::WorkspaceEdit, String> {
+        Ok(tx_move())
+    }
+    fn format(&mut self, _ext: &Ext, _req: &rhun_ext::FormatRequest) -> rhun_ext::WorkspaceEdit {
+        tx_plain().label("Format")
+    }
+    fn actions(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::ActionsRequest,
+    ) -> Vec<rhun_ext::CodeAction> {
+        vec![
+            rhun_ext::CodeAction::new("quickfix", "Plain").edit(tx_plain()),
+            rhun_ext::CodeAction::new("quickfix", "Hashed").edit(tx_hashed()),
+        ]
+    }
+    fn code_actions(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::CodeActionsRequest,
+    ) -> Vec<rhun_ext::Action> {
+        vec![
+            rhun_ext::Action::new("quickfix", "Plain").edit(tx_plain()),
+            rhun_ext::Action::new("quickfix", "Hashed").edit(tx_hashed()),
+            rhun_ext::Action::new("quickfix", "Move").edit(tx_move()),
+        ]
+    }
+    fn code_action_resolve(
+        &mut self,
+        _ext: &Ext,
+        _req: &rhun_ext::ActionResolveRequest,
+    ) -> Result<rhun_ext::ResolvedAction, String> {
+        Ok(rhun_ext::ResolvedAction {
+            edit: Some(tx_hashed()),
+            command: None,
+        })
+    }
+}
+
+/// The requests whose answers carry an edit: v1 actions, rename, format, code-actions and
+/// code-action-resolve.
+fn tx_requests(host: &Host) {
+    host.send(
+        "2 actions 4 7 1 1 1 1\n3 rename 4 7 1 1 invoked b\n4 format 4 7 4 yes\n\
+         5 code-actions 4 7 1 1 1 1 invoked - -\n6 code-action-resolve 4 7 1\nR",
+    );
+}
+
+#[test]
+fn edits_follow_the_agreed_features() {
+    let plain = "1\n2 7 1\n#41 1 1 1 1\ny";
+    let hashed = format!(
+        "1\n7 fnv1a64:{:016x} 1\n/p/a.rs1 1 1 1 1\ny",
+        rhun_ext::fnv1a64(b"x")
+    );
+    let mv = "1\nrename 7 7 -\n/p/a.rs/p/b.rslabel 4\nMove";
+    let v1rec = |title: &str, edit: &str| {
+        format!("quickfix {} {} 0\n{title}{edit}", title.len(), edit.len())
+    };
+    let list = |recs: &[String]| format!("{}\n{}", recs.len(), recs.concat());
+    let propose = "unknown: propose keeps 12g's grammar, which has no file operations";
+    let format = "error 4 unknown a format answer keeps 12g's grammar, which has no label";
+    let next = |got: &Receiver<String>| got.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // without workspace-edits: what needs it is refused, an action with such an edit left out
+    let (seen, got) = channel();
+    let v1 = vec![
+        Feature::Actions,
+        Feature::Rename,
+        Feature::Format,
+        Feature::CodeActions,
+    ];
+    let (mut host, done) = session(v1, TxProbe(seen));
+    assert_eq!(host.line(), "hello 1 actions rename format code-actions");
+    host.send("0 features actions rename format code-actions\n0 ready -\n");
+    assert_eq!(
+        next(&got),
+        "unknown: the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed"
+    );
+    assert_eq!(next(&got), propose);
+    assert_eq!(
+        next(&got),
+        "unknown: file operations need the workspace-edits and file-operations features"
+    );
+    tx_requests(&host);
+    answer(&mut host, 2, &list(&[v1rec("Plain", plain)]));
+    assert_eq!(
+        host.line(),
+        "error 3 unknown file operations need the workspace-edits and file-operations features"
+    );
+    assert_eq!(host.line(), format);
+    answer(&mut host, 5, &list(&[v1rec("Plain", plain)]));
+    assert_eq!(
+        host.line(),
+        "error 6 unknown the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed"
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+
+    // with workspace-edits and file-operations: transactions, but format answers and proposals
+    // keep 12g's grammar
+    let (seen, got) = channel();
+    let ws = vec![
+        Feature::WorkspaceEdits,
+        Feature::FileOperations,
+        Feature::Actions,
+        Feature::Rename,
+        Feature::Format,
+        Feature::CodeActions,
+    ];
+    let (mut host, done) = session(ws, TxProbe(seen));
+    let names = "workspace-edits file-operations actions rename format code-actions";
+    assert_eq!(host.line(), format!("hello 1 {names}"));
+    host.send(&format!("0 features {names}\n0 ready -\n"));
+    assert_eq!(host.line(), format!("1 apply {}", hashed.len()));
+    assert_eq!(host.body(hashed.len()), hashed);
+    host.send("ok 1\n");
+    assert_eq!(next(&got), "ok");
+    assert_eq!(next(&got), propose);
+    assert_eq!(next(&got), mv);
+    tx_requests(&host);
+    answer(
+        &mut host,
+        2,
+        &list(&[v1rec("Plain", plain), v1rec("Hashed", &hashed)]),
+    );
+    answer(&mut host, 3, mv);
+    assert_eq!(host.line(), format);
+    answer(
+        &mut host,
+        5,
+        &list(&[v1rec("Plain", plain), v1rec("Hashed", &hashed), v1rec("Move", mv)]),
+    );
+    answer(&mut host, 6, &format!("{} 0\n{hashed}", hashed.len()));
+    host.send("0 bye\n");
     done.join().unwrap().unwrap();
 }
 

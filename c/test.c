@@ -1211,18 +1211,10 @@ static void transactions(void) {
                       "label 21\nRename to 'total' nowconfirm 0\n",
                (unsigned long long)rx_fnv1a64("a\r\nb\r\n", 6));
     same(&b, want.data);
-    /* without workspace-edits the hash goes as "-", the label and confirm are left out; without
-     * file-operations an edit with operations fails as unknown */
-    rx_buf_clear(&b);
-    rx_wedit_label(&e, "L");
-    rx_wedit_file_hashed(&e, "/p/a", "x", 1);
-    rx_wedit_file_hashed(&e, "/p/b", "y", 1);
-    rx_wedit_confirm(&e);
-    assert(rx_wedit_finish_caps(&e, &b, 0, 0) == 0);
-    same(&b, "2\n4 - 0\n/p/a4 - 0\n/p/b");
+    /* without file-operations an edit with operations fails as unknown (tx_parts has the rest) */
     rx_buf_clear(&b);
     rx_wedit_create(&e, "/p/x", 0);
-    assert(rx_wedit_finish_caps(&e, &b, 1, 0) == -1 && strcmp(e.fail, "unknown") == 0 && b.len == 0);
+    assert(rx_wedit_finish_caps(&e, &b, 1, 0, NULL) == -1 && strcmp(e.fail, "unknown") == 0 && b.len == 0);
     rx_wedit_free(&e);
     rx_wedit_delete(&e, "/p/x", RX_OVERWRITE);
     assert(rx_wedit_finish(&e, &b) == -1 && strcmp(e.fail, "syntax") == 0);
@@ -1232,6 +1224,86 @@ static void transactions(void) {
     rx_wedit_free(&e);
     rx_buf_free(&b);
     rx_buf_free(&want);
+}
+
+/* an edit of kind k: 0 a hashed group, 1 labelled, 2 with confirm, 3 a labelled rename, 4 plain text */
+static void tx_edit(rx_wedit *e, int k) {
+    if (k == 3) {
+        rx_wedit_label(e, "Move");
+        rx_wedit_rename(e, "/p/a.c", "/p/b.c", 0);
+        return;
+    }
+    if (k == 0) rx_wedit_file_hashed(e, "/p/a.c", "x", 1);
+    else rx_wedit_file(e, NULL, 4, 7);
+    rx_wedit_edit(e, R(1, 1, 1, 1), "y", 1);
+    if (k == 1) rx_wedit_label(e, "L");
+    if (k == 2) rx_wedit_confirm(e);
+}
+
+/* what only the transaction grammar has needs workspace-edits, and never goes in a 12g body */
+static void tx_parts(void) {
+    rx_wedit e = {0};
+    rx_buf b = {NULL, 0, 0};
+    char want[200];
+    const char *parts[3] = {"fnv1a64 precondition", "label", "confirm record"};
+    for (int k = 0; k < 3; k++) {
+        tx_edit(&e, k);
+        assert(rx_wedit_finish_caps(&e, &b, 0, 0, NULL) == -1 && strcmp(e.fail, "unknown") == 0 && b.len == 0);
+        snprintf(want, sizeof want, "the edit's %s needs the workspace-edits feature, which was not agreed", parts[k]);
+        assert(strcmp(e.why, want) == 0);
+        rx_wedit_free(&e);
+        tx_edit(&e, k);
+        assert(rx_wedit_finish_caps(&e, &b, 1, 1, "a format answer") == -1 && b.len == 0);
+        snprintf(want, sizeof want, "a format answer keeps 12g's grammar, which has no %s", parts[k]);
+        assert(strcmp(e.why, want) == 0);
+        rx_wedit_free(&e);
+        tx_edit(&e, k);
+        assert(rx_wedit_finish_caps(&e, &b, 1, 0, NULL) == 0 && b.len > 0);
+        rx_buf_clear(&b);
+    }
+    int caps[3][2] = {{0, 0}, {1, 0}, {0, 1}};
+    for (int i = 0; i < 3; i++) {
+        tx_edit(&e, 3);
+        assert(rx_wedit_finish_caps(&e, &b, caps[i][0], caps[i][1], NULL) == -1 && b.len == 0 &&
+               strcmp(e.why, "file operations need the workspace-edits and file-operations features") == 0);
+        rx_wedit_free(&e);
+    }
+    tx_edit(&e, 3);
+    assert(rx_wedit_finish_caps(&e, &b, 0, 0, "propose") == -1 &&
+           strcmp(e.why, "propose keeps 12g's grammar, which has no file operations") == 0);
+    rx_wedit_free(&e);
+    tx_edit(&e, 3);
+    assert(rx_wedit_finish(&e, &b) == 0);   /* the whole grammar */
+    same(&b, "1\nrename 6 6 -\n/p/a.c/p/b.clabel 4\nMove");
+    /* plain text edits are 12g's body whatever was agreed */
+    const char *fixed[3] = {NULL, NULL, "a format answer"};
+    for (int i = 0; i < 3; i++) {
+        rx_buf_clear(&b);
+        tx_edit(&e, 4);
+        rx_wedit_file(&e, "/p/d.c", 0, RX_ON_DISK);
+        rx_wedit_edit(&e, R(1, 1, 1, 1), "y", 1);
+        assert(rx_wedit_finish_caps(&e, &b, i == 1, i == 1, fixed[i]) == 0);
+        same(&b, "2\n2 7 1\n#41 1 1 1 1\ny6 - 1\n/p/d.c1 1 1 1 1\ny");
+    }
+    /* a resolve answer's edit built outside a handler is the whole grammar; with a handler's caps
+     * (1: neither feature) it cannot be sent, as an action of rx_action with those caps */
+    rx_resolved r;
+    memset(&r, 0, sizeof r);
+    tx_edit(&r.edit, 3);
+    rx_buf_clear(&b);
+    assert(rx_resolved_finish(&r, &b) == 0 && b.len > 0);
+    rx_wedit_free(&r.edit);
+    r.caps = 1;
+    tx_edit(&r.edit, 0);
+    assert(rx_resolved_finish(&r, &b) == -1 && strcmp(r.edit.fail, "unknown") == 0);
+    rx_wedit_free(&r.edit);
+    rx_actions l;
+    memset(&l, 0, sizeof l);
+    l.caps = 1;
+    tx_edit(&e, 1);
+    rx_action(&l, NULL, "Labelled", &e, NULL, 0);
+    assert(l.n == 0 && !e.fail);
+    rx_buf_free(&b);
 }
 
 /* a change of kind k */
@@ -1911,6 +1983,152 @@ static int on_code_action_resolve(rx_ext *ext, const rx_resolve_ask *req, rx_res
     return 1;
 }
 
+/* answers with and makes edits that need the transaction grammar */
+static char tx_seen[1024];
+
+static void tx_note(const char *s) {
+    assert(strlen(tx_seen) + strlen(s) + 2 < sizeof tx_seen);
+    strcat(tx_seen, s);
+    strcat(tx_seen, "|");
+}
+
+static void on_tx_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    rx_wedit e = {0};
+    rx_buf b = {NULL, 0, 0};
+    tx_edit(&e, 0);
+    tx_note(rx_apply(ext, &e) == 0 ? "ok" : rx_error(ext));
+    rx_wedit_free(&e);
+    tx_edit(&e, 3);
+    assert(rx_propose(ext, "Move", NULL, &e) == -1);
+    tx_note(rx_error(ext));
+    rx_wedit_free(&e);
+    tx_edit(&e, 3);
+    if (rx_wedit_finish_for(ext, &e, &b) == 0) {
+        rx_buf_add(&b, "", 1);
+        tx_note(b.data);
+    } else {
+        char note[300];
+        snprintf(note, sizeof note, "%s %s", e.fail, e.why);
+        tx_note(note);
+    }
+    rx_wedit_free(&e);
+    rx_buf_free(&b);
+}
+
+static int on_tx_rename(rx_ext *ext, const rx_rename_ask *req, rx_wedit *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    tx_edit(out, 3);
+    return 1;
+}
+
+static int on_tx_format(rx_ext *ext, const rx_format_ask *req, rx_wedit *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    tx_edit(out, 1);
+    return 1;
+}
+
+static int on_tx_actions(rx_ext *ext, const rx_actions_ask *req, rx_actions *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_wedit e = {0};
+    tx_edit(&e, 4);
+    rx_action(out, NULL, "Plain", &e, NULL, 0);
+    tx_edit(&e, 0);
+    rx_action(out, NULL, "Hashed", &e, NULL, 0);
+    return 1;
+}
+
+static int on_tx_code_actions(rx_ext *ext, const rx_code_actions_ask *req, rx_code_actions *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_wedit e = {0};
+    tx_edit(&e, 4);
+    rx_code_action(out, NULL, "Plain", &e, NULL);
+    tx_edit(&e, 0);
+    rx_code_action(out, NULL, "Hashed", &e, NULL);
+    tx_edit(&e, 3);
+    rx_code_action(out, NULL, "Move", &e, NULL);
+    return 1;
+}
+
+static int on_tx_resolve(rx_ext *ext, const rx_resolve_ask *req, rx_resolved *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    tx_edit(&out->edit, 0);
+    return 1;
+}
+
+static void tx_rec(rx_buf *want, const char *title, const char *edit) {
+    rx_buf_fmt(want, "quickfix %zu %zu 0\n%s%s", strlen(title), strlen(edit), title, edit);
+}
+
+/* v1 actions, rename, format, code-actions and code-action-resolve answers, apply, propose and
+ * rx_wedit_finish_for follow the features rhun agreed */
+static void tx_requests(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_tx_ready;
+    h.rename = on_tx_rename;
+    h.format = on_tx_format;
+    h.actions = on_tx_actions;
+    h.code_actions = on_tx_code_actions;
+    h.code_action_resolve = on_tx_resolve;
+    const char *plain = "1\n2 7 1\n#41 1 1 1 1\ny", *move = "1\nrename 6 6 -\n/p/a.c/p/b.clabel 4\nMove";
+    char hashed[64];
+    snprintf(hashed, sizeof hashed, "1\n6 fnv1a64:%016llx 1\n/p/a.c1 1 1 1 1\ny", (unsigned long long)rx_fnv1a64("x", 1));
+    const char *reqs = "2 actions 4 7 1 1 1 1\n3 rename 4 7 1 1 invoked b\n4 format 4 7 4 yes\n"
+                       "5 code-actions 4 7 1 1 1 1 invoked - -\n6 code-action-resolve 4 7 1\nR0 bye\n";
+    const char *propose = "unknown propose keeps 12g's grammar, which has no file operations";
+    const char *format = "error 4 unknown a format answer keeps 12g's grammar, which has no label\n";
+    rx_buf in = {NULL, 0, 0}, got = {NULL, 0, 0}, want = {NULL, 0, 0}, l = {NULL, 0, 0};
+
+    /* without workspace-edits: what needs it is refused, an action with such an edit left out */
+    const char *v1 = "actions rename format code-actions";
+    rx_buf_fmt(&in, "0 features %s\n0 ready -\n%s", v1, reqs);
+    tx_seen[0] = 0;
+    run(v1, &h, in.data, &got);
+    rx_buf_fmt(&want, "hello 1 %s\n", v1);
+    rx_buf_str(&l, "1\n");
+    tx_rec(&l, "Plain", plain);
+    ok(&want, 2, l.data);
+    rx_buf_str(&want, "error 3 unknown file operations need the workspace-edits and file-operations features\n");
+    rx_buf_str(&want, format);
+    ok(&want, 5, l.data);
+    rx_buf_str(&want, "error 6 unknown the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed\n");
+    same(&got, want.data);
+    rx_buf_clear(&want);
+    rx_buf_fmt(&want, "unknown the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed|%s|"
+                      "unknown file operations need the workspace-edits and file-operations features|", propose);
+    assert(strcmp(tx_seen, want.data) == 0);
+
+    /* with workspace-edits and file-operations: transactions, but format answers and proposals keep
+     * 12g's grammar */
+    const char *ws = "workspace-edits file-operations actions rename format code-actions";
+    rx_buf_clear(&in), rx_buf_clear(&got), rx_buf_clear(&want), rx_buf_clear(&l);
+    rx_buf_fmt(&in, "0 features %s\n0 ready -\nok 1\n%s", ws, reqs);
+    tx_seen[0] = 0;
+    run(ws, &h, in.data, &got);
+    rx_buf_fmt(&want, "hello 1 %s\n1 apply %zu\n%s", ws, strlen(hashed), hashed);
+    rx_buf_str(&l, "2\n");
+    tx_rec(&l, "Plain", plain);
+    tx_rec(&l, "Hashed", hashed);
+    ok(&want, 2, l.data);
+    ok(&want, 3, move);
+    rx_buf_str(&want, format);
+    rx_buf_clear(&l);
+    rx_buf_str(&l, "3\n");
+    tx_rec(&l, "Plain", plain);
+    tx_rec(&l, "Hashed", hashed);
+    tx_rec(&l, "Move", move);
+    ok(&want, 5, l.data);
+    rx_buf_clear(&l);
+    rx_buf_fmt(&l, "%zu 0\n%s", strlen(hashed), hashed);
+    ok(&want, 6, l.data);
+    same(&got, want.data);
+    rx_buf_clear(&want);
+    rx_buf_fmt(&want, "ok|%s|%s|", propose, move);
+    assert(strcmp(tx_seen, want.data) == 0);
+    rx_buf_free(&in), rx_buf_free(&got), rx_buf_free(&want), rx_buf_free(&l);
+}
+
 static void actions_requests(void) {
     rx_handlers h;
     memset(&h, 0, sizeof h);
@@ -2572,6 +2790,7 @@ int main(void) {
     actions();
     cuts();
     transactions();
+    tx_parts();
     ordered();
     test_builders();
     dispatch();                 /* last: standard output goes to a file from here on */
@@ -2586,6 +2805,7 @@ int main(void) {
     notebooks();
     query_requests();
     actions_requests();
+    tx_requests();
     tests_feature();
     langfeat_requests();
     fclose(stdout);

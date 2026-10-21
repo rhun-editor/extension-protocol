@@ -290,7 +290,8 @@ const OnDisk int64 = -1
 // FileEdit is the edits of one file, all made against one text: the open document at Version,
 // or the file on disk (Version OnDisk, or any negative). They must not overlap; insertions at
 // one position keep their order. With feature workspace-edits, Hashed says the file on disk must
-// still hash to Hash (Fnv1a64 of its bytes: PRE fnv1a64:HEX); without it, it is sent as "-".
+// still hash to Hash (Fnv1a64 of its bytes: PRE fnv1a64:HEX); without it such an edit is refused
+// (an *Error with code unknown) and not sent.
 type FileEdit struct {
 	Target  Target
 	Version int64
@@ -305,7 +306,10 @@ type FileEdit struct {
 // are not open are edited on disk, and it undoes as one step), named by Label, with the
 // confirmation list forced by Confirm; with file-operations Ops create, rename and delete files.
 // The body lists creates, then Files, then renames, then deletes (rhun's phases); Entry maps an
-// error's ENTRY back.
+// error's ENTRY back. Apply and the answers that carry an edit follow the features rhun agreed:
+// an edit with Ops, a hashed file, Label or Confirm is refused (an *Error with code unknown) when
+// they were not, and in the bodies that keep 12g's grammar (format and save-actions answers,
+// SaveApply, Propose).
 type WorkspaceEdit struct {
 	Files   []FileEdit
 	Ops     []FileOp
@@ -341,9 +345,22 @@ func (w WorkspaceEdit) Empty() bool {
 // protocol 1.1), or why it cannot be one: over MaxEditFiles entries (files and operations),
 // MaxEdits or MaxEditBody, or a path that is empty or over MaxPath bytes. An edit cut short would
 // leave the files half changed, so none is sent. Without Ops, hashes, Label and Confirm it is
-// exactly the 12g body.
+// exactly the 12g body. Ext.EncodeEdit is the body for the features a rhun agreed.
 func (w WorkspaceEdit) Encode() ([]byte, error) {
 	b, bad := w.encodeWith(editCaps{ws: true, ops: true})
+	if bad != nil {
+		return nil, encodeErr(bad)
+	}
+	return b, nil
+}
+
+// EncodeEdit is the body of a workspace edit in the grammar this rhun agreed, as Apply, a rename
+// answer and a code action's edit send it: the transaction with FeatureWorkspaceEdits, 12g's
+// without. An edit that needs what was not agreed (Ops without FeatureWorkspaceEdits and
+// FeatureFileOperations; a hashed file, Label or Confirm without FeatureWorkspaceEdits) is an
+// *Error with code unknown, and a limit an error as from Encode.
+func (e *Ext) EncodeEdit(w WorkspaceEdit) ([]byte, error) {
+	b, bad := w.encodeWith(e.editCaps())
 	if bad != nil {
 		return nil, encodeErr(bad)
 	}
@@ -353,9 +370,9 @@ func (w WorkspaceEdit) Encode() ([]byte, error) {
 // Apply asks rhun to make a workspace edit (the apply request; needs documents = write): checked
 // whole, then each document changed as one undo step, files that are not open opened in tabs,
 // unsaved. For a language server's workspace/applyEdit. An edit that cannot be encoded is
-// returned as an error without asking (an *Error with code unknown for file operations rhun did
-// not agree); rhun refusing it is an *Error (syntax, nofile, nodoc, stale, readonly, badpos,
-// toobig), and then nothing changed. With FeatureWorkspaceEdits agreed the edit is a transaction
+// returned as an error without asking (an *Error with code unknown for file operations, a hashed
+// file, a label or confirm rhun did not agree, as EncodeEdit); rhun refusing it is an *Error
+// (syntax, nofile, nodoc, stale, readonly, badpos, toobig), and then nothing changed. With FeatureWorkspaceEdits agreed the edit is a transaction
 // (files that are not open edited on disk, one undo) and a refusal is an *ApplyError naming the
 // entry at fault (it unwraps to the *Error).
 func (e *Ext) Apply(edit WorkspaceEdit) error {
@@ -396,15 +413,16 @@ type CodeAction struct {
 	Data  []byte
 }
 
-// EncodeActions is the body rhun reads for a list of code actions (section 12f). Actions without a
-// title, those whose edit cannot be encoded, and those past MaxActions or MaxActionsBody are left
-// out.
+// EncodeActions is the body rhun reads for a list of code actions (section 12f), their edits in
+// the grammar of a rhun that agreed workspace-edits and file-operations (an ActionProvider's answer
+// follows what was agreed). Actions without a title, those whose edit cannot be encoded, and those
+// past MaxActions or MaxActionsBody are left out.
 func EncodeActions(actions []CodeAction) []byte {
 	return encodeActionsWith(actions, editCaps{ws: true, ops: true})
 }
 
 // encodeActionsWith is EncodeActions for a rhun that agreed caps: an action whose edit needs a
-// feature it did not agree is left out.
+// feature it did not agree is left out (rhun would refuse the edit when it is chosen).
 func encodeActionsWith(actions []CodeAction, caps editCaps) []byte {
 	var recs bytes.Buffer
 	n := 0
@@ -511,7 +529,7 @@ func (e *Ext) answerLang(h Handler, verb string, f []string) (body []byte, rerr 
 	case "format":
 		fm, is := h.(Formatter)
 		if req, ok := parseFormatRequest(f); is && ok {
-			return encodeEditV1(fm.Format(e, req))
+			return encodeEditV1(fm.Format(e, req), "a format answer")
 		}
 	case "linked":
 		l, is := h.(LinkedEditor)
@@ -522,11 +540,10 @@ func (e *Ext) answerLang(h Handler, verb string, f []string) (body []byte, rerr 
 	return nil, nil, false
 }
 
-// encodeEditV1 is a format or save-actions answer: 12g's grammar whatever was agreed (one open
-// document), so a hash goes as "-", a label and confirm are left out and file operations are
-// unknown.
-func encodeEditV1(w WorkspaceEdit) ([]byte, *Error, bool) {
-	b, err := w.encodeWith(editCaps{})
+// encodeEditV1 is a format or save-actions answer, what names it: 12g's grammar whatever was
+// agreed (one open document), so file operations, a hash, a label or confirm are unknown.
+func encodeEditV1(w WorkspaceEdit, what string) ([]byte, *Error, bool) {
+	b, err := w.encodeWith(editCaps{fixed: what})
 	if err != nil {
 		return nil, err, true
 	}
@@ -534,7 +551,7 @@ func encodeEditV1(w WorkspaceEdit) ([]byte, *Error, bool) {
 }
 
 // encodeEdit is a workspace edit's answer for the features rhun agreed: its body, or the error
-// to answer with (toobig, or unknown for file operations it did not agree).
+// to answer with (toobig, or unknown for what needs a feature it did not agree).
 func (e *Ext) encodeEdit(w WorkspaceEdit) ([]byte, *Error, bool) {
 	b, err := w.encodeWith(e.editCaps())
 	if err != nil {

@@ -163,7 +163,7 @@ func (e *Ext) SaveApplyContext(ctx context.Context, requestID int64, doc Doc, ve
 	if requestID <= 0 || requestID > 2147483647 || doc <= 0 || version < 0 {
 		return 0, &Error{Code: "syntax", Text: "invalid save-action identity"}
 	}
-	body, bad := edit.encodeWith(editCaps{}) // 12g's grammar: one open document
+	body, bad := edit.encodeWith(editCaps{fixed: "save-apply"}) // 12g's grammar: one open document
 	if bad != nil {
 		return 0, encodeErr(bad)
 	}

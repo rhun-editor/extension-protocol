@@ -96,12 +96,18 @@ creates, then the text groups, then the renames, then the deletes; an apply erro
 in that order (`WorkspaceEdit::entry`, `Entry`). The ordered normaliser rewrites an edit that
 follows a rename to the name before it, composes repeated edits of one file into one group, and
 refuses what the phases cannot express with the index of the change at fault (for LSP's
-`failedChange`). Without the features an edit goes as 12g's grammar (the hash as `-`, no label or
-confirm) and file operations fail as `unknown` without being sent; format and save-action answers
-always keep 12g's grammar. A create path ending in `/` makes a folder: Go's `filepath.Join` and
-Rust's `Path::join` drop that slash, so append it after joining. The checker serves all of it: it
-makes transactions in its scratch project as rhun does (files written on disk, renamed documents
-reopened under a new id) and answers a refused apply with `error ID CODE ENTRY TEXT`.
+`failedChange`). Apply, rename answers, code actions (v1's and `code-actions`, with their
+resolve answers) follow the features rhun agreed: without `workspace-edits` an edit goes as 12g's
+grammar, and one with a hash, a label or `confirm` (or file operations, which also need
+`file-operations`) fails as `unknown` without being sent, an action with such an edit left out of
+its list. Format and save-action answers, save-apply and proposals always keep 12g's grammar, so
+those fail there whatever was agreed. `Ext::encode_edit`, `EncodeEdit` and `rx_wedit_finish_for`
+give the body for the features agreed; `encode`, `Encode` and `rx_wedit_finish` the whole
+grammar. A create path ending in `/` makes a folder: Go's `filepath.Join` and Rust's `Path::join`
+drop that slash, so append it after joining. The checker serves all of it: it makes transactions
+in its scratch project as rhun does (files written on disk, renamed documents reopened under a new
+id), answers a refused apply with `error ID CODE ENTRY TEXT`, and reads every edit an answer
+carries with the grammar rhun would, naming a transaction's part in an edit read as 12g's.
 
 ## Source actions before saving
 

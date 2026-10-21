@@ -23,6 +23,7 @@
  * "rename" and "format" for language support ("views complete definition"). Protocol 1.1 adds
  * workspace edits as transactions and file operations ("workspace-edits file-operations":
  * rx_wedit_file_hashed, rx_wedit_create/rename/delete, rx_wedit_label, rx_wedit_confirm,
+ * rx_wedit_finish_for for the grammar rhun agreed,
  * rx_wedit_from_ordered for LSP's ordered changes, rx_last_apply_error), several selections
  * ("selections": rx_select_many, rx_parse_selections), "reveal" (rx_reveal,
  * rx_show_locations), "diff" (rx_diff, rx_diff_close), "linked-editing" (the linked handler),
@@ -190,18 +191,19 @@ typedef struct {
     int files, edits, group_edits, open;
     const char *fail;               /* NULL, or the code it is refused with (toobig, refused, */
     char why[256];                  /* syntax, unknown) and why, one line */
-    /* protocol 1.1: the creates, renames and deletes so far, where hashed PREs start in body (for
-     * a rhun without workspace-edits), the label, confirm, and the open file's hash */
+    /* protocol 1.1: the creates, renames and deletes so far, where hashed PREs start in body (one
+     * offset per hashed group: a rhun without workspace-edits refuses them), the label, confirm,
+     * and the open file's hash */
     rx_buf ops[3], hashes, label;
     int nops, confirm, hashed;
     uint64_t hash;
 } rx_wedit;
 /* Protocol 1.1, code-actions: the answer, built with rx_code_action; kinds (set for you in the
  * code_actions handler: the kinds asked, NULL or "" for any) leaves out actions of other kinds */
-typedef struct { rx_buf recs; int n, full; const char *kinds; } rx_code_actions;
-/* code-action-resolve's answer: the edit (none while it names no file) and the command to run after
- * it (rx_command_ref(&out->command, ...); none: the action's own runs) */
-typedef struct { rx_wedit edit; rx_buf command; } rx_resolved;
+typedef struct { rx_buf recs; int n, full; const char *kinds; int caps; } rx_code_actions;   /* caps: set by rx_run */
+/* code-action-resolve's answer: the edit (none while it names no file and no file operation) and the
+ * command to run after it (rx_command_ref(&out->command, ...); none: the action's own runs) */
+typedef struct { rx_wedit edit; rx_buf command; int caps; } rx_resolved;   /* caps: set by rx_run */
 
 struct rx_view_open;            /* retained views, below */
 struct rx_retained_event;
@@ -950,8 +952,12 @@ int64_t rx_insert_snippet(rx_ext *ext, rx_doc doc, int64_t version, rx_range ran
  * open are edited on disk (a group from rx_wedit_file_hashed names the bytes it was made against),
  * documents written when the edit touches disk anyway, one undo everywhere. The body lists the
  * creates, then the text groups, then the renames, then the deletes, each in the order added: an
- * error's entry counts in that order. Without the features the hash goes as "-", the label and
- * confirm are left out, and file operations make the edit fail as unknown. */
+ * error's entry counts in that order. rx_apply, rx_wedit_finish_for and the answers that carry an
+ * edit (rename, code actions and their resolve) follow the features rhun agreed: without
+ * workspace-edits a hashed group, a label or confirm make the edit fail as unknown, and so do file
+ * operations without both features; nothing rhun would refuse is sent. Format and save-actions
+ * answers, rx_save_apply and rx_propose keep 12g's grammar whatever was agreed (those fail as
+ * unknown there too). rx_wedit_finish is the body for a rhun that agreed both. */
 
 /* the 64-bit FNV-1a hash of len bytes (offset basis 0xcbf29ce484222325, prime 0x100000001b3) */
 static inline uint64_t rx_fnv1a64(const void *data, size_t len) {
@@ -982,6 +988,10 @@ void rx_wedit_delete(rx_wedit *e, const char *path, int flags);
 void rx_wedit_label(rx_wedit *e, const char *label);
 /* shows the confirmation list even when the extension may write */
 void rx_wedit_confirm(rx_wedit *e);
+/* the body of e in the grammar ext agreed, appended to out, as rx_apply sends it: 0, or -1 when it
+ * cannot be sent (e->fail and e->why say why: unknown for what needs a feature rhun did not agree,
+ * toobig, ...); e is used up either way */
+int rx_wedit_finish_for(rx_ext *ext, rx_wedit *e, rx_buf *out);
 /* the last rx_apply refused with workspace-edits agreed ("error ID CODE ENTRY TEXT"): code
  * (syntax needs nofile nodoc stale readonly badpos toobig refused cancelled busy io, or unknown
  * for a feature rhun did not agree), entry the 1-based entry at fault (0 for none, and always 0
@@ -1185,9 +1195,11 @@ void rx_code_action(rx_code_actions *l, const char *kind, const char *title, rx_
 /* whether an action of kind matches the comma-separated kinds asked: it equals or descends from one
  * (source.organizeImports.go matches source.organizeImports); any kind for NULL, "" or "-" */
 int rx_kind_wanted(const char *kinds, const char *kind);
-/* The bodies, appended to out, for answers built outside a handler; each empties its builder.
- * rx_resolved_finish returns -1, appending nothing, when the edit cannot be sent (out->edit.fail and
- * out->edit.why say why). */
+/* The bodies, appended to out, for answers built outside a handler; each empties its builder. A
+ * builder's caps is 0 there: the edits in the grammar of a rhun that agreed workspace-edits and
+ * file-operations (in a handler rx_run sets it to what was agreed, and an action whose edit needs
+ * more is left out). rx_resolved_finish returns -1, appending nothing, when the edit cannot be sent
+ * (out->edit.fail and out->edit.why say why). */
 void rx_code_actions_finish(rx_code_actions *l, rx_buf *out);
 int rx_resolved_finish(rx_resolved *r, rx_buf *out);
 
@@ -1271,7 +1283,8 @@ void rx_wedit_edit(rx_wedit *e, rx_range r, const char *text, size_t len);
 int rx_refuse(rx_wedit *e, const char *why);
 /* Code actions (12f): kind quickfix (listed first), refactor, source or another word (NULL is
  * quickfix); title one line (an empty one leaves the action out); edit (NULL for none) is applied
- * when the action is chosen, and is used up here (one that cannot be sent leaves the action out);
+ * when the action is chosen, and is used up here (one that cannot be sent, or needs a feature rhun
+ * did not agree, leaves the action out);
  * data, len bytes of anything, comes back to the action handler. Past 1000 actions or 4 MB the rest
  * are left out. */
 void rx_action(rx_actions *l, const char *kind, const char *title, rx_wedit *edit, const void *data, size_t len);
@@ -3035,7 +3048,7 @@ int rx_unview(rx_ext *ext, int64_t view) {
     return rx_request(ext, line, NULL, 0, NULL, NULL);
 }
 
-static int rx_wedit_finish_caps(rx_wedit *e, rx_buf *out, int ws, int ops);
+static int rx_wedit_finish_caps(rx_wedit *e, rx_buf *out, int ws, int ops, const char *fixed);
 static int rx_positive_num(const char *s, int64_t max, int64_t *out);
 
 /* the workspace edit grammar rhun agreed: 1 workspace-edits, 2 file-operations */
@@ -3076,7 +3089,7 @@ int rx_apply(rx_ext *ext, rx_wedit *edit) {
     rx_buf body = {NULL, 0, 0};
     int caps = rx_edit_caps(ext);
     memset(&ext->apply_error, 0, sizeof ext->apply_error);
-    if (rx_wedit_finish_caps(edit, &body, caps & 1, (caps & 2) != 0) < 0) {
+    if (rx_wedit_finish_caps(edit, &body, caps & 1, (caps & 2) != 0, NULL) < 0) {
         snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
         rx_keep_apply_error(ext, ext->error, 0);
         rx_wedit_free(edit);
@@ -3115,7 +3128,7 @@ int64_t rx_save_apply(rx_ext *ext, int64_t request_id, rx_doc doc, int64_t versi
         rx_wedit_free(edit);
         return -1;
     }
-    if (rx_wedit_finish_caps(edit, &body, 0, 0) < 0) {       /* 12g's grammar: one open document */
+    if (rx_wedit_finish_caps(edit, &body, 0, 0, "save-apply") < 0) {   /* 12g's grammar: one open document */
         snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
         rx_wedit_free(edit);
     } else {
@@ -4166,8 +4179,8 @@ int rx_refuse(rx_wedit *e, const char *why) {
     return -1;
 }
 
-/* the open file's header and edits go after the files before it; a hashed PRE's offset is kept,
- * for a rhun without workspace-edits (it is then sent as "-") */
+/* the open file's header and edits go after the files before it; a hashed PRE's offset is kept
+ * (hashes counts the groups a rhun without workspace-edits would refuse) */
 static void rx_wedit_flush(rx_wedit *e) {
     if (!e->open) return;
     char v[32];
@@ -4298,53 +4311,67 @@ void rx_wedit_confirm(rx_wedit *e) {
     if (!e->fail) e->confirm = 1;
 }
 
-/* the body for a rhun that agreed workspace-edits (ws) and file-operations (ops) */
-static int rx_wedit_finish_caps(rx_wedit *e, rx_buf *out, int ws, int ops) {
-    if (!e->fail && e->nops && !(ws && ops))
-        rx_wedit_fail(e, "unknown", "file operations need the workspace-edits and file-operations features");
+/* the body for a rhun that agreed workspace-edits (ws) and file-operations (ops); fixed, when not
+ * NULL, names a body that keeps 12g's grammar whatever was agreed. What needs more than that
+ * (file operations without both features; a hashed group, a label or confirm without
+ * workspace-edits or in a fixed body) fails as unknown: nothing rhun would refuse is sent. */
+static int rx_wedit_finish_caps(rx_wedit *e, rx_buf *out, int ws, int ops, const char *fixed) {
+    if (!e->fail) rx_wedit_flush(e);
+    const char *part = e->nops ? "file operations" : e->hashes.len ? "fnv1a64 precondition"
+                     : e->label.len ? "label" : e->confirm ? "confirm record" : NULL;
+    if (!e->fail && part) {
+        char why[200];
+        if (fixed) snprintf(why, sizeof why, "%s keeps 12g's grammar, which has no %s", fixed, part);
+        else if (e->nops && !(ws && ops)) snprintf(why, sizeof why, "file operations need the workspace-edits and file-operations features");
+        else if (!ws) snprintf(why, sizeof why, "the edit's %s needs the workspace-edits feature, which was not agreed", part);
+        else why[0] = 0;
+        if (why[0]) rx_wedit_fail(e, "unknown", why);
+    }
     if (!e->fail) {
-        rx_wedit_flush(e);
         char head[32], lh[32] = "";
         int hl = snprintf(head, sizeof head, "%d\n", e->files + e->nops);
         size_t total = (size_t)hl + e->body.len + e->ops[0].len + e->ops[1].len + e->ops[2].len;
-        if (ws && e->label.len) total += (size_t)snprintf(lh, sizeof lh, "label %zu\n", e->label.len) + e->label.len;
-        if (ws && e->confirm) total += 10;
-        if (!ws) total -= 23 * (e->hashes.len / sizeof(size_t));
+        if (e->label.len) total += (size_t)snprintf(lh, sizeof lh, "label %zu\n", e->label.len) + e->label.len;
+        if (e->confirm) total += 10;
         if (total > RX_WEDIT_BODY) {
             rx_wedit_fail(e, "toobig", "over 4194304 bytes");
         } else {
             rx_buf_add(out, head, (size_t)hl);
             rx_buf_add(out, e->ops[0].data, e->ops[0].len);
-            /* without workspace-edits a hashed PRE "fnv1a64:" and 16 digits goes as "-" */
-            size_t from = 0, nh = ws ? 0 : e->hashes.len / sizeof(size_t);
-            for (size_t i = 0; i < nh; i++) {
-                size_t at;
-                memcpy(&at, e->hashes.data + i * sizeof at, sizeof at);
-                rx_buf_add(out, e->body.data + from, at - from);
-                rx_buf_add(out, "-", 1);
-                from = at + 24;
-            }
-            rx_buf_add(out, e->body.data + from, e->body.len - from);
+            rx_buf_add(out, e->body.data, e->body.len);
             rx_buf_add(out, e->ops[1].data, e->ops[1].len);
             rx_buf_add(out, e->ops[2].data, e->ops[2].len);
-            if (ws && e->label.len) {
+            if (e->label.len) {             /* label and confirm: refused above without workspace-edits */
                 rx_buf_str(out, lh);
                 rx_buf_add(out, e->label.data, e->label.len);
             }
-            if (ws && e->confirm) rx_buf_str(out, "confirm 0\n");
+            if (e->confirm) rx_buf_str(out, "confirm 0\n");
         }
     }
     rx_wedit_drop(e);
     return e->fail ? -1 : 0;
 }
 
-int rx_wedit_finish(rx_wedit *e, rx_buf *out) { return rx_wedit_finish_caps(e, out, 1, 1); }
+int rx_wedit_finish(rx_wedit *e, rx_buf *out) { return rx_wedit_finish_caps(e, out, 1, 1, NULL); }
+
+int rx_wedit_finish_for(rx_ext *ext, rx_wedit *e, rx_buf *out) {
+    int caps = rx_edit_caps(ext);
+    return rx_wedit_finish_caps(e, out, caps & 1, (caps & 2) != 0, NULL);
+}
+
+/* a builder's caps as rx_run sets them (1, and 2 for workspace-edits, 4 for file-operations) from
+ * rx_edit_caps' */
+static int rx_builder_caps(int caps) { return 1 | (caps & 1 ? 2 : 0) | (caps & 2 ? 4 : 0); }
+
+/* finishes an action's edit into eb for a builder's caps (0: the whole grammar) */
+static int rx_action_edit(rx_wedit *edit, rx_buf *eb, int caps) {
+    int ws = !caps || (caps & 2), ops = !caps || (caps & 4);
+    return rx_wedit_finish_caps(edit, eb, ws, ops, NULL);
+}
 
 void rx_action(rx_actions *l, const char *kind, const char *title, rx_wedit *edit, const void *data, size_t len) {
     rx_buf eb = {NULL, 0, 0};
-    /* caps 0: the whole grammar; set by rx_run: 1, and 2 for workspace-edits, 4 file-operations */
-    int ws = !l->caps || (l->caps & 2), ops = !l->caps || (l->caps & 4);
-    int bad = edit && rx_wedit_finish_caps(edit, &eb, ws, ops) < 0;
+    int bad = edit && rx_action_edit(edit, &eb, l->caps) < 0;
     if (edit) rx_wedit_free(edit);
     if (!title) title = "";
     size_t tl = rx_cut(title, strlen(title), RX_TEXT_MAX), mark = l->recs.len;
@@ -5091,7 +5118,7 @@ int rx_kind_wanted(const char *kinds, const char *kind) {
 void rx_code_action(rx_code_actions *l, const char *kind, const char *title, rx_wedit *edit,
                     const rx_action_extra *x) {
     rx_buf eb = {NULL, 0, 0}, xb = {NULL, 0, 0}, kb = {NULL, 0, 0};
-    int bad = edit && rx_wedit_finish(edit, &eb) < 0;
+    int bad = edit && rx_action_edit(edit, &eb, l->caps) < 0;
     if (edit) rx_wedit_free(edit);
     if (!title) title = "";
     size_t tl = rx_cut(title, strlen(title), RX_TEXT_MAX), mark = l->recs.len;
@@ -5137,7 +5164,7 @@ void rx_code_actions_finish(rx_code_actions *l, rx_buf *out) { rx_records_finish
 
 int rx_resolved_finish(rx_resolved *r, rx_buf *out) {
     rx_buf eb = {NULL, 0, 0};
-    int bad = r->edit.fail || (r->edit.files && rx_wedit_finish(&r->edit, &eb) < 0);
+    int bad = r->edit.fail || ((r->edit.files || r->edit.nops) && rx_action_edit(&r->edit, &eb, r->caps) < 0);
     if (!bad) {
         rx_buf_fmt(out, "%zu %zu\n", eb.len, r->command.len);
         rx_buf_add(out, eb.data, eb.len);
@@ -6019,7 +6046,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.range.end.col = atoi(f[7]);
         rx_actions l;
         memset(&l, 0, sizeof l);
-        l.caps = 1 | (caps & 1 ? 2 : 0) | (caps & 2 ? 4 : 0);
+        l.caps = rx_builder_caps(caps);
         if ((ok = h->actions(ext, &req, &l, user)) != 0) rx_actions_finish(&l, &body);
         rx_buf_free(&l.recs);
     } else if (strcmp(verb, "rename") == 0 && n >= 8 && rx_nums(f, 2, 6) && h->rename) {
@@ -6030,7 +6057,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.at.line = atoi(f[4]);
         req.at.col = atoi(f[5]);
         req.name = f[7];
-        if ((ok = h->rename(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, caps & 1, (caps & 2) != 0);
+        if ((ok = h->rename(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, caps & 1, (caps & 2) != 0, NULL);
     } else if (strcmp(verb, "format") == 0 && n >= 6 && rx_nums(f, 2, 5) && h->format &&
                (strcmp(f[5], "yes") == 0 || strcmp(f[5], "no") == 0)) {
         rx_format_ask req;
@@ -6039,7 +6066,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.version = atoll(f[3]);
         req.tab_width = atoi(f[4]);
         req.spaces = strcmp(f[5], "yes") == 0;     /* format keeps 12g's grammar */
-        if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
+        if ((ok = h->format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0, "a format answer");
     } else if (strcmp(verb, "content") == 0 && n >= 3 && h->content && rx_has(ext, "uris")) {
         rx_buf uri = {NULL, 0, 0};
         for (int i = 2; i < n; i++) {
@@ -6072,7 +6099,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
             rx_positive_num(f[2], INT64_MAX, &req.doc) && req.doc > 0 &&
             rx_positive_num(f[3], INT64_MAX, &req.version) && rx_source_kind(f[4])) {
             req.kind = f[4];
-            if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
+            if ((ok = h->save_actions(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0, "a save-actions answer");
         }
     } else if (strcmp(verb, "vcopy") == 0 && n >= 4 && h->view_copy && rx_has(ext, "view-keys")) {
         ok = h->view_copy(ext, atoll(f[2]), strcmp(f[3], "cut") == 0, &body, user) ? 1 : 0;
@@ -6194,7 +6221,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.range.end.line = atoi(f[6]);
         req.range.end.col = atoi(f[7]);
         req.tab_width = opt[0], req.spaces = opt[1], req.trim = opt[2], req.final_newline = opt[3];
-        if ((ok = h->range_format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
+        if ((ok = h->range_format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0, "a range-format answer");
     } else if (strcmp(verb, "type-format") == 0 && n == 11 && rx_nums(f, 2, 6) && rx_format_options(f, 7, opt) &&
                h->type_format && rx_has(ext, "partial-format")) {
         rx_type_format_ask req;
@@ -6205,7 +6232,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.at.col = atoi(f[5]);
         req.ch = f[6];
         req.tab_width = opt[0], req.spaces = opt[1], req.trim = opt[2], req.final_newline = opt[3];
-        if ((ok = h->type_format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0);
+        if ((ok = h->type_format(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, 0, 0, "a type-format answer");
     } else if (strcmp(verb, "code-actions") == 0 && n == 11 && rx_nums(f, 2, 8) &&
                (strcmp(f[8], "invoked") == 0 || strcmp(f[8], "auto") == 0) && h->code_actions &&
                rx_has(ext, "code-actions")) {
@@ -6223,6 +6250,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         rx_code_actions l;
         memset(&l, 0, sizeof l);
         l.kinds = req.kinds;
+        l.caps = rx_builder_caps(caps);
         if ((ok = h->code_actions(ext, &req, &l, user)) != 0) rx_code_actions_finish(&l, &body);
         rx_buf_free(&l.recs);
     } else if (strcmp(verb, "code-action-resolve") == 0 && n == 5 && rx_nums(f, 2, 5) && h->code_action_resolve &&
@@ -6235,6 +6263,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.len = data_len;
         rx_resolved r;
         memset(&r, 0, sizeof r);
+        r.caps = rx_builder_caps(caps);
         if ((ok = h->code_action_resolve(ext, &req, &r, user)) != 0 && rx_resolved_finish(&r, &body) < 0) {
             e.fail = r.edit.fail;               /* refused, or past a workspace edit's limits */
             memcpy(e.why, r.edit.why, sizeof e.why);
@@ -7302,7 +7331,7 @@ void rx_transcript_finish(rx_transcript *t, rx_buf *out) {
 int64_t rx_propose(rx_ext *ext, const char *label, const char *sid, rx_wedit *edit) {
     rx_buf e = {NULL, 0, 0}, b = {NULL, 0, 0};
     sid = sid ? sid : "", label = label ? label : "";
-    if (rx_wedit_finish(edit, &e) && edit->fail) {
+    if (rx_wedit_finish_caps(edit, &e, 0, 0, "propose") && edit->fail) {   /* 12g's grammar */
         snprintf(ext->error, sizeof ext->error, "%s %s", edit->fail, edit->why);
         rx_buf_free(&e);
         return -1;
