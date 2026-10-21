@@ -859,6 +859,10 @@ int rx_remove_context(rx_ext *ext, const char *key);
 /* 1 when the bytes show as they are on one line: UTF-8 without control characters (C0, DEL, C1),
  * bidirectional controls or zero-width characters */
 int rx_plain_text(const char *s, size_t n);
+/* When clauses (protocol 1.1, "When clauses"): 0 when the clause compiles as rhun compiles it,
+ * else -1 with the byte offset rhun reports in *offset and its reason in *msg (static). */
+int rx_when_check(const char *clause, size_t len, size_t *offset, const char **msg);
+
 /* Feature "status-items": a status bar item, at most 8 per extension (manifest items included).
  * align "left" or "right" (NULL: right); priority -1000..1000; text one line of at most 120 bytes
  * ("$(NAME)" an icon); tooltip at most 500 bytes; command one of its own (local name, NULL for
@@ -3004,6 +3008,278 @@ void rx_scm_click(rx_buf *b, const char *command, const char *args, size_t args_
 void rx_scm_tip(rx_buf *b, const char *tip) {
     rx_buf_fmt(b, "tip %zu\n", strlen(tip));
     rx_buf_str(b, tip);
+}
+
+/* ---- when clauses: rhun's grammar, limits, messages and offsets (v1.1/when-vectors.txt) ---- */
+
+static const char *const rx_when_keys[] = {
+    "editorFocus", "textInputFocus", "paletteFocus", "findFocus", "explorerFocus", "agentsFocus",
+    "terminalFocus", "scmInputFocus", "settingsFocus", "findVisible", "completionVisible", "signatureVisible",
+    "snippetActive", "activeTab", "activeTabPinned", "tabCount", "resourceLang", "resourceExt",
+    "resourceFilename", "resourceDirname", "resourcePath", "resourceScheme", "resourceInProject", "editorReadonly",
+    "editorDirty", "editorHasSelection", "editorHasMultipleSelections", "editorProviders", "vimMode", "sidebarVisible",
+    "agentsVisible", "terminalVisible", "projectOpen", "projectPath", "gitRepo", "gitBranch",
+    "gitChanges", "isLinux", "isMac", "isWindows", "isWayland", "targetKind",
+    "explorerResourceIsFolder", "explorerResourceIsRoot", "tabKind", "viewFocus", "view", "viewItem",
+    "debugState", "inDebugMode", "debugType", "gitTrusted", "scmProvider", "scmResourceGroup",
+    "scmResourceStatus", "notebookFocus", "notebookCellEditing", "notebookCellType", "notebookKernelState", "remoteName",
+    "remoteHost",
+    NULL};
+static const char *const rx_when_settings[] = {
+    "ui.follow_system", "ui.theme", "ui.dark_theme", "ui.light_theme",
+    "ui.scale", "ui.font_size", "ui.font", "ui.file_icons",
+    "ui.sidebar", "ui.sidebar_width", "ui.agents_panel", "ui.agents_width",
+    "ui.tooltips", "ui.auto_hide_scrollbars", "ui.decorations", "ui.scroll_sensitivity",
+    "ui.fast_scroll_sensitivity", "editor.font_size", "editor.font", "editor.line_height",
+    "editor.tab_width", "editor.insert_spaces", "editor.line_numbers", "editor.highlight_line",
+    "editor.animate_disk_changes", "editor.match_brackets", "editor.indent_guides", "editor.word_wrap",
+    "editor.whitespace", "editor.cursor_blink", "editor.smooth_caret", "editor.auto_pairs",
+    "editor.multi_cursor_paste", "editor.multi_cursor_modifier", "editor.scroll_past_end", "editor.vim_mode",
+    "editor.complete_replace", "editor.complete_commit_characters", "editor.lightbulb", "editor.format_on_type",
+    "editor.format_on_paste", "editor.folding", "files.trim_trailing_whitespace", "files.final_newline",
+    "files.format_on_save", "files.format_on_save_timeout", "files.code_actions_on_save", "files.code_actions_on_save_timeout",
+    "files.restore_session", "files.restore_project", "files.exclude", "agents.claude",
+    "agents.codex", "agents.grok", "agents.opencode", "terminal.shell",
+    "terminal.font_size", "terminal.font", "terminal.line_height", "terminal.scrollback",
+    "terminal.height", "git.enabled", "git.commit_ai", "git.commit_model",
+    "git.ai_setup", "extensions.secrets", "updates.check", "updates.check_now",
+    "updates.extensions", "updates.check_extensions", "debug.show_on_start", "debug.keys_in_terminal",
+    "debug.console_lines", "remote.agent_binary", "testing.gutter",
+    NULL};
+
+typedef struct {
+    const unsigned char *s;
+    size_t n, p, ops, depth, at;
+    const char *err;
+} rx_wp;
+
+static void rx_w_fail_at(rx_wp *w, size_t at, const char *m) {
+    if (!w->err) w->err = m, w->at = at;
+}
+static void rx_w_fail(rx_wp *w, const char *m) { rx_w_fail_at(w, w->p, m); }
+static void rx_w_ws(rx_wp *w) {
+    while (w->p < w->n && (w->s[w->p] == ' ' || w->s[w->p] == '\t')) w->p++;
+}
+static unsigned char rx_w_at(rx_wp *w, size_t i) { return i < w->n ? w->s[i] : 0; }
+static void rx_w_emit(rx_wp *w) {
+    if (w->ops >= 64) rx_w_fail(w, "too many operations (64 at most)");
+    else w->ops++;
+}
+static int rx_w_wordbyte(unsigned char c) {
+    return c == '_' || c == '.' || c == '/' || c == '-' || (c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z');
+}
+static size_t rx_w_word(rx_wp *w) {
+    size_t s = w->p;
+    while (w->p < w->n && rx_w_wordbyte(w->s[w->p])) w->p++;
+    return w->p - s;
+}
+static int rx_w_is(rx_wp *w, size_t s, size_t n, const char *word) {
+    return n == strlen(word) && memcmp(w->s + s, word, n) == 0;
+}
+static size_t rx_w_bare(rx_wp *w) {
+    size_t s = w->p;
+    while (w->p < w->n) {
+        unsigned char c = w->s[w->p];
+        if (!(strchr("_-./:*?+#@$", c) && c) && !((c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z'))) break;
+        w->p++;
+    }
+    return w->p - s;
+}
+static int rx_w_utf8(const unsigned char *s, size_t n) {
+    for (size_t i = 0; i < n;) {
+        unsigned c = s[i];
+        size_t k = c < 0x80 ? 0 : (c & 0xe0) == 0xc0 ? 1 : (c & 0xf0) == 0xe0 ? 2 : (c & 0xf8) == 0xf0 ? 3 : 9;
+        if (k == 9 || i + k >= n) return 0;
+        uint32_t v = k ? c & (0x3f >> k) : c;
+        for (size_t j = 1; j <= k; j++) {
+            if ((s[i + j] & 0xc0) != 0x80) return 0;
+            v = v << 6 | (s[i + j] & 0x3f);
+        }
+        static const uint32_t least[4] = {0, 0x80, 0x800, 0x10000};
+        if (v < least[k] || v > 0x10ffff || (v >= 0xd800 && v <= 0xdfff)) return 0;
+        i += k + 1;
+    }
+    return 1;
+}
+static void rx_w_quoted(rx_wp *w) {
+    unsigned char q = w->s[w->p];
+    size_t open = w->p, i = w->p + 1;
+    for (; i < w->n && w->s[i] != q; i++)
+        if (w->s[i] < 0x20 || w->s[i] == 0x7f) return rx_w_fail_at(w, open, "unclosed quote");
+    if (i >= w->n) return rx_w_fail_at(w, open, "unclosed quote");
+    if (!rx_w_utf8(w->s + open + 1, i - open - 1)) return rx_w_fail_at(w, open, "a quoted value that is not UTF-8");
+    w->p = i + 1;
+}
+static int rx_w_listed(const char *const *list, const unsigned char *s, size_t n) {
+    for (; *list; list++)
+        if (strlen(*list) == n && memcmp(*list, s, n) == 0) return 1;
+    return 0;
+}
+static void rx_w_key(rx_wp *w, size_t start, size_t n) {
+    const unsigned char *k = w->s + start;
+    int ok = 0;
+    if (n > 7 && memcmp(k, "config.", 7) == 0) {
+        const unsigned char *r = k + 7;
+        size_t rn = n - 7;
+        const unsigned char *d = (const unsigned char *)memchr(r, '.', rn);
+        ok = d && d > r && (size_t)(d - r) + 1 < rn && rx_w_listed(rx_when_settings, r, rn);
+    } else {
+        const unsigned char *d = (const unsigned char *)memchr(k, '.', n);
+        if (!d) {
+            ok = rx_w_listed(rx_when_keys, k, n);
+        } else if (d > k && (size_t)(d - k) + 1 < n) {
+            const unsigned char *r = d + 1;
+            size_t rn = n - (size_t)(r - k);
+            if (rn > 8 && memcmp(r, "setting.", 8) == 0) {
+                r += 8, rn -= 8;
+                ok = rn && rn <= 64;
+                for (size_t i = 0; ok && i < rn; i++) ok = r[i] == '_' || (r[i] >= '0' && r[i] <= '9') || (r[i] >= 'a' && r[i] <= 'z');
+            } else {
+                ok = rn && rn <= 40 && r[0] >= 'a' && r[0] <= 'z';
+                for (size_t i = 1; ok && i < rn; i++) ok = r[i] == '_' || (r[i] >= '0' && r[i] <= '9') || ((r[i] | 0x20) >= 'a' && (r[i] | 0x20) <= 'z');
+            }
+        }
+    }
+    if (ok) rx_w_emit(w);
+    else rx_w_fail_at(w, start, "unknown key");
+}
+static void rx_w_or(rx_wp *w);
+static int rx_w_in(rx_wp *w) {
+    size_t s = w->p, n = rx_w_word(w);
+    if (rx_w_is(w, s, n, "in")) return 1;
+    if (rx_w_is(w, s, n, "not")) {
+        rx_w_ws(w);
+        size_t a = w->p, m = rx_w_word(w);
+        if (rx_w_is(w, a, m, "in")) return 2;
+        w->p = a;
+        rx_w_fail(w, "expected in or not in");
+        return 0;
+    }
+    w->p = s;
+    return 0;
+}
+static void rx_w_list(rx_wp *w) {
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p);
+    if (a == '\'' || a == '"') {
+        rx_w_quoted(w);
+        if (!w->err) rx_w_emit(w);
+        return;
+    }
+    size_t s = w->p, n = rx_w_word(w);
+    if (!n) return rx_w_fail(w, "expected a key or a quoted list");
+    rx_w_key(w, s, n);
+}
+static void rx_w_value(rx_wp *w) {
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p);
+    if (a == '\'' || a == '"') rx_w_quoted(w);
+    else if (!rx_w_bare(w)) return rx_w_fail(w, "expected a value");
+    if (!w->err) rx_w_emit(w);
+}
+static void rx_w_tail(rx_wp *w) {
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p), b = rx_w_at(w, w->p + 1);
+    int two;
+    if (a == '=') {
+        if (b != '=' && b != '~') return rx_w_fail(w, "expected == != < <= > >= =~ in or not in");
+        two = 1;
+    } else if (a == '!') {
+        if (b != '=') return rx_w_fail(w, "expected == != < <= > >= =~ in or not in");
+        two = 1;
+    } else if (a == '<' || a == '>') {
+        two = b == '=';
+    } else {
+        if (rx_w_in(w)) {
+            rx_w_list(w);
+            rx_w_emit(w);
+        }
+        return;
+    }
+    w->p += two ? 2 : 1;
+    rx_w_value(w);
+    rx_w_emit(w);
+}
+static void rx_w_unary(rx_wp *w) {
+    if (w->err) return;
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p), b = rx_w_at(w, w->p + 1);
+    if (a == '!') {
+        if (b == '=') return rx_w_fail(w, "expected a key, true, false, ! or (");
+        w->p++;
+        if (++w->depth > 8) return rx_w_fail(w, "nested too deeply (8 levels at most)");
+        rx_w_unary(w);
+        w->depth--;
+        rx_w_emit(w);
+    } else if (a == '(') {
+        w->p++;
+        if (++w->depth > 8) return rx_w_fail(w, "nested too deeply (8 levels at most)");
+        rx_w_or(w);
+        if (w->err) return;
+        w->depth--;
+        rx_w_ws(w);
+        if (rx_w_at(w, w->p) != ')') return rx_w_fail(w, "expected )");
+        w->p++;
+    } else if (a == '\'' || a == '"') {
+        rx_w_quoted(w);
+        if (w->err) return;
+        rx_w_emit(w);
+        rx_w_ws(w);
+        if (!rx_w_in(w)) return rx_w_fail(w, "expected in or not in");
+        rx_w_list(w);
+        rx_w_emit(w);
+    } else {
+        size_t s = w->p, n = rx_w_word(w);
+        if (!n) return rx_w_fail(w, "expected a key, true, false, ! or (");
+        if (rx_w_is(w, s, n, "true") || rx_w_is(w, s, n, "false")) return rx_w_emit(w);
+        rx_w_key(w, s, n);
+        if (!w->err) rx_w_tail(w);
+    }
+}
+static void rx_w_and(rx_wp *w) {
+    rx_w_unary(w);
+    while (!w->err) {
+        rx_w_ws(w);
+        if (rx_w_at(w, w->p) != '&' || rx_w_at(w, w->p + 1) != '&') return;
+        w->p += 2;
+        rx_w_unary(w);
+        rx_w_emit(w);
+    }
+}
+static void rx_w_or(rx_wp *w) {
+    rx_w_and(w);
+    while (!w->err) {
+        rx_w_ws(w);
+        if (rx_w_at(w, w->p) != '|' || rx_w_at(w, w->p + 1) != '|') return;
+        w->p += 2;
+        rx_w_and(w);
+        rx_w_emit(w);
+    }
+}
+
+int rx_when_check(const char *clause, size_t len, size_t *offset, const char **msg) {
+    rx_wp w;
+    memset(&w, 0, sizeof w);
+    w.s = (const unsigned char *)clause;
+    w.n = len;
+    if (len > 512) {
+        w.err = "too long (512 bytes at most)", w.at = 512;
+    } else {
+        rx_w_ws(&w);
+        if (w.p >= w.n) {
+            w.err = "empty clause", w.at = 0;
+        } else {
+            rx_w_or(&w);
+            if (!w.err) {
+                rx_w_ws(&w);
+                if (w.p < w.n) rx_w_fail(&w, "expected && or ||");
+            }
+        }
+    }
+    if (!w.err) return 0;
+    if (offset) *offset = w.at;
+    if (msg) *msg = w.err;
+    return -1;
 }
 
 int rx_cmd(rx_ext *ext, const char *name) {

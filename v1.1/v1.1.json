@@ -337,7 +337,10 @@
         },
         "agents": {
           "type": "string",
-          "enum": ["yes", "no"],
+          "enum": [
+            "yes",
+            "no"
+          ],
           "description": "yes: the extension lists agent sessions in the agents panel (feature agents)."
         },
         "agents.title": {
@@ -423,7 +426,10 @@
         },
         "^[a-z0-9_]{1,40}\\.readonly$": {
           "type": "string",
-          "enum": ["yes", "no"]
+          "enum": [
+            "yes",
+            "no"
+          ]
         }
       },
       "additionalProperties": false
@@ -519,6 +525,34 @@
       },
       "additionalProperties": {
         "type": "string"
+      }
+    },
+    "^language\\.[^\\s]{1,64}$": {
+      "type": "object",
+      "description": "[language.NAME] (protocol 1.1): language keys for an existing grammar NAME (_ for a space): brackets, autoclose, autoclose_code, surround, indent_open, indent_close, indent_middle, indent_dedent_after, continue, doc_block, fold (brackets|indent), fold_markers, comment, block, ident, colon_indent (yes|no).",
+      "propertyNames": {
+        "enum": [
+          "brackets",
+          "autoclose",
+          "autoclose_code",
+          "surround",
+          "indent_open",
+          "indent_close",
+          "indent_middle",
+          "indent_dedent_after",
+          "continue",
+          "doc_block",
+          "fold",
+          "fold_markers",
+          "comment",
+          "block",
+          "ident",
+          "colon_indent"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
       }
     }
   }
