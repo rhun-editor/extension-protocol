@@ -516,7 +516,7 @@
     }
   },
   "patternProperties": {
-    "^(menu\\.(editor|explorer|tab|terminal|extension|editor_title|view_title|view_item|view_item_inline|history_commit|history_file|scm_resource|scm_group)|submenu\\.[a-z0-9_]{1,40})$": {
+    "^(menu\\.(editor|explorer|tab|terminal|extension|editor_title|view_title|view_item|view_item_inline|history_commit|history_file|scm_resource|scm_group|scm_title)|submenu\\.[a-z0-9_]{1,40})$": {
       "type": "object",
       "description": "[menu.LOCATION] and [submenu.NAME] (protocol 1.1): ITEM.command (a command as [keys] names it), ITEM.submenu (a [submenu.NAME]), ITEM.group, ITEM.order, ITEM.when, ITEM.args; [submenu.NAME] also has title. At most 16 items per extension per location.",
       "propertyNames": {
