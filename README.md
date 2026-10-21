@@ -120,6 +120,24 @@ repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
 
+## Resources, workspaces and sign-in (1.1)
+
+Protocol 1.1 adds these, specified in [v1.1](v1.1/v1.1.md#lifecycle-idle--stop-and-feature-idle):
+
+| Feature | Rust | Go | C |
+| --- | --- | --- | --- |
+| `idle` (with `idle = stop`): stay running while busy | `Ext::busy` | `BusyContext` | `rx_busy` |
+| `secrets` (`[needs] secrets = yes`): the system keychain | `Ext::secret_get`, `secret_set`, `secret_delete`, `secret_keys` | `SecretGetContext` … | `rx_secret_get` … |
+| `uris`: virtual documents for `[provides] schemes` | `Handler::content`, `Ext::open_uri`, `Ext::content_changed` | `ContentProvider`, `OpenURIContext`, `ContentChangedContext` | `rx_handlers.content`, `rx_content_changed` |
+| `urls`: open a web page, links back to the extension | `Ext::open_url`, `external_uri`, `link`, `parse_link`; `auth::{Pkce, Loopback}` | `OpenURLContext`, `ExternalURIContext`, `LinkContext`, `ParseLink`; `NewPKCE`, `ListenLoopback` | `rx_open_url`, `rx_external_uri`, `rx_link`; `RHUNEXT_AUTH`: `rx_pkce_new`, `rx_loopback_*` |
+| `files` (`project = read`): find files by glob, search text, in batches | `Ext::find_files`, `Ext::search_text` | `FindFilesContext`, `SearchTextContext`, `CompileSearchRegex` | `rx_find_files`, `rx_search_text` |
+| `scoped-settings`: settings per workspace, folder and language | `Ext::setting_get` | `SettingGetContext`, `ParseSettingChanged` | `rx_setting_get` |
+| `workspace-folders`: several folders in a window | `parse_folders`, `Ext::folder_of` | `ParseFolders`, `FolderOfContext` | `rx_parse_folders`, `rx_folder_of` |
+
+Sign in with OAuth's authorization code flow and PKCE: listen on a loopback port, pass its
+redirect URI through `external-uri`, open the provider's page with `open-url` (rhun asks the
+user), take the code from the redirect, exchange it, and keep the token with `secret-set`.
+
 ## Language features (1.1)
 
 The [language features](v1.1/v1.1.md#language-features) of protocol 1.1 add negotiated
@@ -380,6 +398,21 @@ must be negotiated. Plain prepared validators still require equal copies. Explic
 check agreement before encoding or sending; completion builders snapshot declarations
 (Go/Rust own their metadata; C encodes borrowed inputs during the call). Later edits
 copy the primary value normally. Formatting uses this initial-layout primitive; deferred transforms can use it as well.
+
+## Terminals and tasks
+
+Protocol 1.1's `terminals` and `tasks` features (`[needs] terminal = run`): programs in terminal
+tabs and published tasks with dependencies, readiness and problem matchers. Go: `Task`, `Program`,
+`TerminalSpec`, `SetTasks`, `StartTask`, `RunTask`, `OpenTerminal` (their `…Context` forms send
+`cancel` when the context ends while the approval dialog is open, and stop a terminal whose start
+won that race), `StopTerminal`, `RestartTerminal`, `CloseTerminal`, `ShowTerminal`,
+`TerminalInput`, `TerminalScreen`, `ParseTerminalEvent`. Rust: the `tasks` module and the same
+`Ext` methods. C: `rx_task`, `rx_terminal_spec`, `rx_set_tasks`, `rx_start_task`, `rx_run_task`,
+`rx_open_terminal` and the `rx_*_terminal` calls, `rx_parse_terminal_event`. Every SDK checks a
+definition as rhun reads it before sending it, and has rhun's pattern matcher (`CheckPattern`,
+`MatchPattern`, `CheckMatcher`; `check_pattern`…; `rx_check_pattern`…), tested against the shared
+vectors in `v1.1/patterns.txt`. The checker validates `tasks-set` and every definition exactly as
+rhun does and plays the events of a run.
 
 ## Checking a host
 

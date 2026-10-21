@@ -50,12 +50,14 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
-	views                       map[string]string // [views] KEY.FIELD -> value (views.go)
-	top                         map[string]string // top-level keys of later features (idle, runs)
-	tools                       []string          // [tools] names (protocol 1.1)
-	pack                        string            // a pack's members: OWNER/NAME, space separated
-	cmdOptions                  map[string]string // [command-options] NAME.FIELD -> value
-	statusItems                 int               // [status] items
+	views                       map[string]string            // [views] KEY.FIELD -> value (views.go)
+	top                         map[string]string            // top-level keys of later features (idle, runs)
+	tools                       []string                     // [tools] names (protocol 1.1)
+	pack                        string                       // a pack's members: OWNER/NAME, space separated
+	cmdOptions                  map[string]string            // [command-options] NAME.FIELD -> value
+	statusItems                 int                          // [status] items
+	debuggers                   []string                     // [debugger.TYPE] types, in manifest order (debug.go)
+	debugger                    map[string]map[string]string // type -> key -> value
 }
 
 // packProblem says what is wrong with a manifest's pack list, or "": at most 16 names, each
@@ -178,6 +180,17 @@ func readManifest(dir string) (*manifest, error) {
 				statusSeen[item] = true
 				m.statusItems++
 			}
+		default:
+			if t, ok := strings.CutPrefix(section, "debugger."); ok {
+				if m.debugger == nil {
+					m.debugger = map[string]map[string]string{}
+				}
+				if m.debugger[t] == nil {
+					m.debugger[t] = map[string]string{}
+					m.debuggers = append(m.debuggers, t)
+				}
+				m.debugger[t][k] = v
+			}
 		}
 	}
 	return m, nil
@@ -227,21 +240,22 @@ type host struct {
 	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
 
-	features    map[string]bool // section 12: agreed after hello
-	views       map[int64]bool  // views it opened
-	nextView    int64
-	pictures    int               // draw requests that passed
-	hostSeq     int64             // the last id of a request the checker sent
-	hostReqs    map[int64]string  // those waiting for an answer
-	hostAnswers map[int64]message // and the answers
-	saveScope   *saveScope
-	rviews      map[int64]*rview     // retained views it was given (views.go)
-	notes       map[int64]*noteState // notifications open (notify.go)
-	progs       map[int64]*progState // progress not ended
-	noteSeq     int64
-	images      map[int64]bool    // view-images handles (views.go)
-	patches     int               // vpatch requests that passed
-	secrets     map[string][]byte // secret-set values (resources.go)
+	features      map[string]bool // section 12: agreed after hello
+	views         map[int64]bool  // views it opened
+	nextView      int64
+	pictures      int               // draw requests that passed
+	hostSeq       int64             // the last id of a request the checker sent
+	debugSessions int64             // debuggers: sessions debug-start "started" (debug.go)
+	hostReqs      map[int64]string  // those waiting for an answer
+	hostAnswers   map[int64]message // and the answers
+	saveScope     *saveScope
+	rviews        map[int64]*rview     // retained views it was given (views.go)
+	notes         map[int64]*noteState // notifications open (notify.go)
+	progs         map[int64]*progState // progress not ended
+	noteSeq       int64
+	images        map[int64]bool    // view-images handles (views.go)
+	patches       int               // vpatch requests that passed
+	secrets       map[string][]byte // secret-set values (resources.go)
 
 	warnedConsent bool               // said once that a disk change needs the user's consent
 	diffs         map[int64]string   // the diff tabs it opened: "LEFT RIGHT TITLE"
@@ -262,6 +276,10 @@ type host struct {
 	problems      map[string]int // file-diagnostics: the sets kept, by target
 	fileDiagsSaid bool           // a set was kept (said once)
 	askedItem     []byte         // the PATH of the hierarchy item asked about (calls-out's sites are there)
+
+	terms    map[uint64]*checkerTerm // terminals and tasks: terminals.go
+	tasks    publishedTasks          // its published tasks
+	nextTerm uint64
 }
 
 // sub says whether the manifest subscribes to an event (any pattern but "no").
@@ -463,7 +481,9 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"nb-output": true, "nb-stream": true, "nb-kernel-label": true, "nb-exec": true, // notebooks: notebook.go
 	"query-part": true, "query-progress": true, "file-diagnostics": true, // language features: query.go, langfeat.go
 	"run-command": true, "status-item": true, // commands.go
-	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true} // test controllers: tests.go
+	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true, // test controllers: tests.go
+	"terminal-open": true, "terminal-input": true, "tasks-set": true, "task-run": true, // terminals and tasks: terminals.go
+	"debug-start": true} // debuggers: debug.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1131,7 +1151,7 @@ func (h *host) handle(msg message) {
 		if !ok {
 			return
 		}
-		if h.m.needs["terminal"] != "yes" {
+		if terminalLevel(h.m.needs["terminal"]) < 1 {
 			h.fail("needs", "term needs terminal=yes but the manifest does not say so")
 			rerr("needs", "terminal=yes")
 			return
@@ -1158,9 +1178,14 @@ func (h *host) handle(msg message) {
 		if needsCap == "write" && !need("write") {
 			return
 		}
-		if needsCap == "terminal" && h.m.needs["terminal"] != "yes" {
+		if needsCap == "terminal" && terminalLevel(h.m.needs["terminal"]) < 1 {
 			h.fail("needs", fmt.Sprintf("cmd %s needs terminal=yes but the manifest does not say so", args[0]))
 			rerr("needs", "terminal=yes")
+			return
+		}
+		if needsCap == "terminal-run" && terminalLevel(h.m.needs["terminal"]) < 2 {
+			h.fail("needs", fmt.Sprintf("cmd %s needs terminal=run but the manifest does not say so", args[0]))
+			rerr("needs", "terminal=run")
 			return
 		}
 		h.cmds = append(h.cmds, args[0])
@@ -1195,6 +1220,11 @@ func (h *host) handle(msg message) {
 		h.gitRequest(id, verb, args, msg, reply, rerr)
 	case "quickdiff-refresh":
 		h.quickdiffRefresh(id, args, msg, reply, rerr)
+	case "terminal-open", "terminal-stop", "terminal-restart", "terminal-close", "terminal-show", "terminal-input",
+		"terminal-screen", "tasks-set", "task-start", "task-run":
+		h.termRequest(id, verb, args, msg, reply, rerr)
+	case "debug-start":
+		h.debugStart(id, args, msg, reply, rerr)
 	case "vpatch", "vshow", "vreveal", "vtab":
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	case "select-many", "reveal", "show-locations", "diff", "diff-close":
@@ -1322,6 +1352,9 @@ var cmdAllowed = func() map[string]string {
 	}
 	for _, n := range strings.Fields(`toggle_terminal new_terminal clear_terminal`) {
 		m[n] = "terminal"
+	}
+	for _, n := range strings.Fields(`run_task run_build_task run_test_task rerun_last_task restart_task stop_task show_task`) {
+		m[n] = "terminal-run" // terminals and tasks: with terminal = run
 	}
 	for _, n := range strings.Fields(`select_all select_line select_next find replace find_next find_prev find_in_files
 		goto_line quick_open command_palette next_tab prev_tab reveal_file focus_explorer toggle_sidebar toggle_agents
@@ -1520,13 +1553,14 @@ func main() {
 			provider = true
 		}
 	}
-	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) {
+	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) && len(m.debuggers) == 0 {
 		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
 	schemaFails := 0
 	bad := func(why string) { schemaFails++; h.fail("manifest schema", why) }
 	resourcesManifest(m, bad)
+	scopedSettingsManifest(m, bad, func(why string) { h.warn("settings", why) })
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(m.name) {
 		bad(fmt.Sprintf("name %q is not [a-z0-9][a-z0-9-]*", m.name))
 	}
@@ -1543,8 +1577,11 @@ func main() {
 			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64, wasm32-wasip1)", t))
 		}
 	}
-	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) {
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) && len(m.debuggers) == 0 {
 		bad("no run.TARGET entry and no runtime with run")
+	}
+	for _, why := range debuggerProblems(dir, m) {
+		bad(why)
 	}
 	for _, w := range strings.Fields(m.on) {
 		if w != "startup" && w != "command" && w != "project" && !strings.HasPrefix(w, "lang:") && !strings.HasPrefix(w, "open:") {
@@ -1578,6 +1615,12 @@ func main() {
 		if notebook && k == "notebook.kernel" && v != "yes" && v != "no" {
 			bad("[provides] notebook.kernel is yes or no")
 		}
+		if handled, why := agentsProvidesProblem(k, v); handled { // agent sessions (ai.go)
+			if why != "" {
+				bad(why)
+			}
+			continue
+		}
 		if k == "commit_message" || k == "scm" { // source control: yes or no
 			if v != "yes" && v != "no" {
 				bad(fmt.Sprintf("[provides] %s = %s is not yes or no", k, v))
@@ -1599,12 +1642,16 @@ func main() {
 			ok = v == "none" || v == "read" || v == "write"
 		case "home":
 			ok = v == "none" || v == "read"
-		case "network", "terminal", "secrets":
+		case "network", "secrets":
 			ok = v == "no" || v == "yes"
+		case "terminal": // no, yes = suggest, run, input, output (terminals and tasks)
+			ok = v == "no" || terminalLevel(v) > 0
 		case "run":
 			ok = true
 		case "git": // source control: the project's Git data through rhun
 			ok = v == "none" || v == "read"
+		case "debug": // debuggers: adapters run as the user after one approval
+			ok = v == "no" || v == "yes"
 		case "kernels": // notebooks: programs rhun starts as the user (nb-exec)
 			ok = v != ""
 		case "tests":
@@ -1638,8 +1685,9 @@ func main() {
 		for field := range f {
 			switch field {
 			case "type", "default", "title", "description", "min", "max", "options":
+			case "scope", "languages": // scoped-settings (resources.go)
 			default:
-				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options)", key, field))
+				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options, scope, languages)", key, field))
 			}
 		}
 		switch f["type"] {
@@ -1675,6 +1723,11 @@ func main() {
 	}
 	h.active = 1
 
+	// an extension that only declares debuggers has no program to start
+	if len(m.run) == 0 && m.runtime == "" && len(m.debuggers) > 0 {
+		h.ok(fmt.Sprintf("declares %d debuggers and no program: nothing to start", len(m.debuggers)))
+		report(h)
+	}
 	// 1. start, hello, ready and catch-up; the extension must not speak before ready
 	if err := h.start(); err != nil {
 		h.fail("start", err.Error())
@@ -1683,6 +1736,7 @@ func main() {
 	if !h.expectHello() {
 		report(h)
 	}
+	h.sendFolders()
 	h.write("0 ready " + h.project + "\n")
 	h.sendSettings()
 	h.catchUp()
@@ -1837,6 +1891,7 @@ func main() {
 	h.rtcmds = nil
 	if err := h.start(); err == nil {
 		if h.expectHello() {
+			h.sendFolders()
 			h.write("0 ready " + h.project + "\n")
 			h.sendSettings()
 			h.catchUp()
