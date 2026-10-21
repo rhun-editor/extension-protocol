@@ -32,7 +32,8 @@ var knownFeatures = []string{"views", "complete", "signature", "definition", "re
 	"hover-query", "selection-ranges", "hierarchy", "workspace-symbols", "document-links", "file-diagnostics", // langfeat.go
 	"command-args", "context-keys", "status-items", // commands.go
 	"tests",              // test controllers: tests.go
-	"terminals", "tasks"} // terminals and tasks: terminals.go (tasks only with terminals)
+	"terminals", "tasks", // terminals and tasks: terminals.go (tasks only with terminals)
+	"debug"} // debuggers: debug.go
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -429,6 +430,7 @@ func (h *host) checkFeatures() {
 		return
 	}
 	h.checkTests()
+	h.checkDebug()
 	if h.cmdExited() {
 		return
 	}
