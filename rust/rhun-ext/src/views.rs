@@ -260,6 +260,11 @@ impl Node {
         record(&mut self.extra, "menu", k.as_bytes());
         self
     }
+    /// A table's next column (feature `view-table`): column 2, then 3, and so on.
+    pub fn cell(mut self, text: &str) -> Node {
+        record(&mut self.extra, "cell", one_line(text).as_bytes());
+        self
+    }
     /// A record this crate has no method for, as the wire writes it: `NAME ARGS... LEN` + data.
     pub fn record(mut self, head: &str, data: &[u8]) -> Node {
         record(&mut self.extra, head, data);
@@ -295,6 +300,171 @@ impl Node {
         out.extend_from_slice(self.label.as_bytes());
         out.extend_from_slice(&self.extra);
         Ok(())
+    }
+}
+
+/// A table's column (feature `view-table`, [`Patch::columns`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Column {
+    title: String,
+    right: bool,
+    min: u32,
+    sort: bool,
+}
+
+impl Column {
+    /// A left-aligned column that takes a share of the width the others leave.
+    pub fn new(title: &str) -> Column {
+        Column {
+            title: cut(&one_line(title), 200).to_string(),
+            right: false,
+            min: 0,
+            sort: false,
+        }
+    }
+    /// Its text aligned right (numbers).
+    pub fn right(mut self) -> Column {
+        self.right = true;
+        self
+    }
+    /// At least this many characters wide (0-200; 0 takes a share).
+    pub fn min(mut self, chars: u32) -> Column {
+        self.min = chars.min(200);
+        self
+    }
+    /// A click on its header sorts by it.
+    pub fn sortable(mut self) -> Column {
+        self.sort = true;
+        self
+    }
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(
+            format!(
+                "{} {} {} {}\n",
+                if self.right { "right" } else { "left" },
+                self.min,
+                if self.sort { "sort" } else { "-" },
+                self.title.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(self.title.as_bytes());
+    }
+}
+
+/// A form field's kind (feature `view-form`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldType {
+    Text,
+    /// Several lines.
+    Area,
+    Number,
+    Check,
+    /// A dropdown of options.
+    Select,
+    Button,
+    /// Static text.
+    Label,
+}
+
+impl FieldType {
+    fn word(self) -> &'static str {
+        match self {
+            FieldType::Text => "text",
+            FieldType::Area => "area",
+            FieldType::Number => "number",
+            FieldType::Check => "check",
+            FieldType::Select => "select",
+            FieldType::Button => "button",
+            FieldType::Label => "label",
+        }
+    }
+}
+
+/// A form field ([`Patch::form`], [`Patch::field`]): fields with the same row share a line, each
+/// taking `weight` (1-12) shares of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    key: String,
+    kind: FieldType,
+    row: u32,
+    weight: u32,
+    label: String,
+    extra: Vec<u8>,
+}
+
+impl Field {
+    /// KEY: 1 to 64 of `[A-Za-z0-9_.-]`; row 1-200; the label one line of at most 200 bytes.
+    pub fn new(key: &str, kind: FieldType, row: u32, weight: u32, label: &str) -> Field {
+        Field {
+            key: key.to_string(),
+            kind,
+            row: row.clamp(1, 200),
+            weight: weight.clamp(1, 12),
+            label: cut(&one_line(label), 200).to_string(),
+            extra: Vec::new(),
+        }
+    }
+    /// The value (a check's `yes`/`no`, a select's option). It applies when `seq` is the field's
+    /// user sequence (the last [`RetainedEvent::Change`] seen), and when the field is made; `None`
+    /// is 0.
+    pub fn value(mut self, seq: Option<u64>, value: &str) -> Field {
+        let s = seq.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+        record(&mut self.extra, &format!("value {s}"), value.as_bytes());
+        self
+    }
+    pub fn placeholder(mut self, text: &str) -> Field {
+        record(&mut self.extra, "placeholder", one_line(text).as_bytes());
+        self
+    }
+    /// A select's options.
+    pub fn options(mut self, options: &[&str]) -> Field {
+        record(&mut self.extra, "options", options.join("\n").as_bytes());
+        self
+    }
+    /// An area's height in lines.
+    pub fn lines(mut self, n: u32) -> Field {
+        record(&mut self.extra, &format!("lines {n}"), b"");
+        self
+    }
+    /// A number's Up and Down step within MIN and MAX.
+    pub fn range(mut self, min: f64, max: f64, step: f64) -> Field {
+        record(&mut self.extra, &format!("range {min} {max} {step}"), b"");
+        self
+    }
+    /// A line under the field: `info`, `warning` or `error`.
+    pub fn msg(mut self, severity: &str, text: &str) -> Field {
+        record(
+            &mut self.extra,
+            &format!("msg {severity}"),
+            one_line(text).as_bytes(),
+        );
+        self
+    }
+    pub fn disabled(mut self) -> Field {
+        record(&mut self.extra, "disabled", b"");
+        self
+    }
+    /// An accented button.
+    pub fn primary(mut self) -> Field {
+        record(&mut self.extra, "primary", b"");
+        self
+    }
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(
+            format!(
+                "{} {} {} {} {} {}\n",
+                self.key,
+                self.kind.word(),
+                self.row,
+                self.weight,
+                self.label.len(),
+                self.extra.len()
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(self.label.as_bytes());
+        out.extend_from_slice(&self.extra);
     }
 }
 
@@ -455,6 +625,51 @@ impl Patch {
     pub fn clear(&mut self) -> &mut Patch {
         self.op("clear", b"")
     }
+    /// A table's columns (feature `view-table`, 1 to 16), replacing the last ones.
+    pub fn columns(&mut self, columns: &[Column]) -> &mut Patch {
+        let mut data = Vec::new();
+        for c in columns.iter().take(16) {
+            c.encode(&mut data);
+        }
+        self.op(&format!("columns {}", columns.len().min(16)), &data)
+    }
+    /// The header's arrow when the extension sorted the rows itself: a column from 1 and
+    /// descending, or none.
+    pub fn sorted(&mut self, sorted: Option<(u32, bool)>) -> &mut Patch {
+        match sorted {
+            Some((col, desc)) => self.op(
+                &format!("sorted {col} {}", if desc { "desc" } else { "asc" }),
+                b"",
+            ),
+            None => self.op("sorted - -", b""),
+        }
+    }
+    /// The whole form (feature `view-form`): fields of a listed key keep what the user typed.
+    pub fn form(&mut self, fields: &[Field]) -> &mut Patch {
+        let mut data = Vec::new();
+        for f in fields {
+            f.encode(&mut data);
+        }
+        self.op(&format!("form {}", fields.len()), &data)
+    }
+    /// Adds or updates one field of a form.
+    pub fn field(&mut self, field: &Field) -> &mut Patch {
+        let mut data = Vec::new();
+        field.encode(&mut data);
+        self.op("field", &data)
+    }
+    /// A doc view's Markdown (feature `view-doc`, at most 1 MB).
+    pub fn doc(&mut self, markdown: &str) -> &mut Patch {
+        self.op("doc", markdown.as_bytes())
+    }
+    /// The absolute folder a doc's relative links name.
+    pub fn base(&mut self, folder: &str) -> &mut Patch {
+        self.op("base", one_line(folder).as_bytes())
+    }
+    /// While document DOC is the active one the doc view follows the editor's top line (0 stops).
+    pub fn follow(&mut self, doc: u64) -> &mut Patch {
+        self.op(&format!("follow {doc}"), b"")
+    }
     /// Several nodes may be selected (Ctrl and Shift).
     pub fn select_mode(&mut self, multi: bool) -> &mut Patch {
         self.op(
@@ -551,6 +766,35 @@ pub enum RetainedEvent {
     Closed,
     /// The user cleared a log view (its Clear button).
     Clear,
+    /// A table's header was sorted while children are paged: resend the rows (feature
+    /// `view-table`); the column from 1.
+    Sort {
+        rev: u64,
+        col: u32,
+        desc: bool,
+    },
+    /// A form field's value changed: its user sequence now (feature `view-form`).
+    Change {
+        rev: u64,
+        key: String,
+        seq: u64,
+        value: Vec<u8>,
+    },
+    /// A form button was pressed.
+    Press {
+        rev: u64,
+        key: String,
+    },
+    /// Enter in a text or number field, Ctrl+Enter in an area.
+    Submit {
+        rev: u64,
+        key: String,
+    },
+    /// A doc view's link rhun does not follow itself (feature `view-doc`).
+    Link {
+        rev: u64,
+        target: Vec<u8>,
+    },
     /// Any other `0 view VIEW WHAT ...` event: WHAT, the fields after it, the body.
     Other {
         what: String,
@@ -687,6 +931,29 @@ pub fn parse_retained(ev: &Event) -> Option<(View, RetainedEvent)> {
         | "open" | "key" | "text" | "paste" | "selectall" | "dblclick" => return None,
         "closed" => RetainedEvent::Closed,
         "clear" => RetainedEvent::Clear,
+        "sort" => RetainedEvent::Sort {
+            rev: num(2),
+            col: num(3) as u32,
+            desc: ev.fields.get(4).map(String::as_str) == Some("desc"),
+        },
+        "change" => RetainedEvent::Change {
+            rev: num(2),
+            key: ev.fields.get(3).cloned().unwrap_or_default(),
+            seq: num(4),
+            value: ev.body.clone(),
+        },
+        "press" => RetainedEvent::Press {
+            rev: num(2),
+            key: ev.fields.get(3).cloned().unwrap_or_default(),
+        },
+        "submit" => RetainedEvent::Submit {
+            rev: num(2),
+            key: ev.fields.get(3).cloned().unwrap_or_default(),
+        },
+        "link" => RetainedEvent::Link {
+            rev: num(2),
+            target: ev.body.clone(),
+        },
         _ => RetainedEvent::Other {
             what: what.to_string(),
             fields: ev.fields[2..].to_vec(),
@@ -713,6 +980,38 @@ mod tests {
         assert_eq!(
             body,
             b"3\ntitle 4\nTODObadge 3 0\nkids 0 1 0 28\n1 5 10 open\naAlphabadge 1 0\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn tables_forms_and_docs_encode_as_the_spec_says() {
+        let mut p = Patch::new();
+        p.columns(&[
+            Column::new("Name").sortable(),
+            Column::new("Size").right().min(6),
+        ])
+        .sorted(Some((2, true)))
+        .kids(b"", &[Node::new("a", "a.rs").cell("12")], false);
+        let body = p.encode().unwrap();
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            text.starts_with(
+                "3\ncolumns 2 34\nleft 0 sort 4\nNameright 6 - 4\nSizesorted 2 desc 0\n"
+            ),
+            "{text}"
+        );
+        assert!(text.ends_with("1 4 9 leaf\naa.rscell 2\n12"), "{text}");
+        let mut f = Patch::new();
+        f.field(&Field::new("port", FieldType::Number, 1, 1, "Port").value(None, "8080"));
+        assert_eq!(
+            f.encode().unwrap(),
+            b"1\nfield 39\nport number 1 1 4 14\nPortvalue - 4\n8080".to_vec()
+        );
+        let mut d = Patch::new();
+        d.doc("# Hi\n").base("/p").follow(3);
+        assert_eq!(
+            d.encode().unwrap(),
+            b"3\ndoc 5\n# Hi\nbase 2\n/pfollow 3 0\n".to_vec()
         );
     }
 
