@@ -69,3 +69,14 @@ func TestParseLink(t *testing.T) {
 		t.Errorf("%d %q %v", id, link, ok)
 	}
 }
+
+func TestParseFolders(t *testing.T) {
+	body := "2\n1 local 3 3 6\napp/w/app4 local 2 3 6\nlib/w/lib"
+	f, ok := ParseFolders(Event{Name: "folders", Args: []string{"x"}, Body: []byte(body)})
+	if !ok || len(f) != 2 || f[0].Path != "/w/app" || f[1].ID != 4 || f[1].Name != "lib" || f[0].Flags != 3 {
+		t.Fatalf("%+v %v", f, ok)
+	}
+	if _, ok := ParseFolders(Event{Name: "folders", Body: []byte("1\n1 local 3 3 99\napp")}); ok {
+		t.Fatal("a short body accepted")
+	}
+}

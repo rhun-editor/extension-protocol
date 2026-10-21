@@ -1560,6 +1560,7 @@ func main() {
 	schemaFails := 0
 	bad := func(why string) { schemaFails++; h.fail("manifest schema", why) }
 	resourcesManifest(m, bad)
+	scopedSettingsManifest(m, bad, func(why string) { h.warn("settings", why) })
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(m.name) {
 		bad(fmt.Sprintf("name %q is not [a-z0-9][a-z0-9-]*", m.name))
 	}
@@ -1684,8 +1685,9 @@ func main() {
 		for field := range f {
 			switch field {
 			case "type", "default", "title", "description", "min", "max", "options":
+			case "scope", "languages": // scoped-settings (resources.go)
 			default:
-				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options)", key, field))
+				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options, scope, languages)", key, field))
 			}
 		}
 		switch f["type"] {
@@ -1733,6 +1735,7 @@ func main() {
 	if !h.expectHello() {
 		report(h)
 	}
+	h.sendFolders()
 	h.write("0 ready " + h.project + "\n")
 	h.sendSettings()
 	h.catchUp()
@@ -1887,6 +1890,7 @@ func main() {
 	h.rtcmds = nil
 	if err := h.start(); err == nil {
 		if h.expectHello() {
+			h.sendFolders()
 			h.write("0 ready " + h.project + "\n")
 			h.sendSettings()
 			h.catchUp()

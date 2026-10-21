@@ -102,3 +102,42 @@ func TestParseFoundRejectsBadBatches(t *testing.T) {
 		}
 	}
 }
+
+type settingProbe struct{ out chan string }
+
+func (p *settingProbe) Ready(ext *Ext, project string) {
+	v, err := ext.SettingGetContext(context.Background(), "style", 1, "Visual Basic")
+	p.out <- fmt.Sprintf("%q %v", v, err)
+}
+func (p *settingProbe) Run(ext *Ext, command string, doc Doc) {}
+func (p *settingProbe) Event(ext *Ext, ev Event) {
+	if k, ok := ParseSettingChanged(ev); ok {
+		p.out <- "changed " + k
+	}
+}
+
+func TestSettingGet(t *testing.T) {
+	toExt, hostW := io.Pipe()
+	hostR, fromExt := io.Pipe()
+	p := &settingProbe{out: make(chan string, 4)}
+	go RunOnWith(toExt, fromExt, io.Discard, []string{FeatureScopedSettings}, p)
+	br := bufio.NewReader(hostR)
+	line := func() string {
+		s, _ := br.ReadString('\n')
+		return strings.TrimSuffix(s, "\n")
+	}
+	if l := line(); l != "hello 1 scoped-settings" {
+		t.Fatal(l)
+	}
+	io.WriteString(hostW, "0 features scoped-settings\n0 ready /p\n")
+	if l := line(); l != "1 setting-get style 1 Visual_Basic" {
+		t.Fatal(l)
+	}
+	io.WriteString(hostW, "ok 1 9\ngoimports0 setting-changed style\n")
+	if got := <-p.out; got != `"goimports" <nil>` {
+		t.Fatal(got)
+	}
+	if got := <-p.out; got != "changed style" {
+		t.Fatal(got)
+	}
+}

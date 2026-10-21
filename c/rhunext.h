@@ -707,6 +707,23 @@ int rx_parse_link(const rx_event *event, int64_t *id, const char **link, size_t 
  * matches, skipped files, status complete, limit or partial. Folder 1 is the primary folder, 0
  * every folder; max is 1 to 100000 paths or 1 to 20000 matches; globs are relative to the folder
  * (* ** ? [..] {a,b}; without / they match the base name). */
+/* Feature scoped-settings: the value of one of its own settings in force for a folder (its id, 0
+ * for the window) and a language (a grammar name, NULL or "" for none): malloc'd, NUL-terminated
+ * (free() it), or NULL on an error. The event "0 setting-changed KEY" says a stored value changed. */
+char *rx_setting_get(rx_ext *ext, const char *key, int64_t folder, const char *lang);
+/* Feature workspace-folders: rx_parse_folders reads "0 folders LEN" (the whole list, before ready
+ * and again when it changes) into out (at most max; strings point into the event's body): the
+ * number of folders, or -1. rx_folder_of: the id of the folder path is in, 0 for none, -1 on an
+ * error. flags: 1 the primary folder, 2 trusted. */
+typedef struct {
+    int64_t id;
+    int flags;
+    char location[16];
+    const char *name, *path;
+    size_t name_len, path_len;
+} rx_folder;
+int rx_parse_folders(const rx_event *event, rx_folder *out, int max);
+int64_t rx_folder_of(rx_ext *ext, const char *path);
 #define RX_FILES_IGNORED 1       /* ignored files too: no .gitignore, no exclude setting */
 #define RX_FILES_SKIP_HIDDEN 2
 #define RX_FILES_FOLLOW_LINKS 4
@@ -1675,7 +1692,8 @@ static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
         strncmp(line, "0 selections ", 13) == 0 || strncmp(line, "0 nb-run ", 9) == 0 ||
         strncmp(line, "0 link ", 7) == 0 || strncmp(line, "0 test-out ", 11) == 0 ||
-        strncmp(line, "0 editor-path ", 14) == 0 || strncmp(line, "0 terminal-output ", 18) == 0)
+        strncmp(line, "0 editor-path ", 14) == 0 || strncmp(line, "0 terminal-output ", 18) == 0 ||
+        strncmp(line, "0 folders ", 10) == 0)
         return 1;
     if (strncmp(line, "0 run ", 6) == 0) return rx_nfields(line) == 6;    /* command-args */
     if (line[0] >= '1' && line[0] <= '9') {
@@ -1798,6 +1816,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
                      strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0 ||
                      strncmp(verb_args, "external-uri ", 13) == 0 || strcmp(verb_args, "link") == 0 ||
+                     strncmp(verb_args, "setting-get ", 12) == 0 ||
 
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
@@ -2287,6 +2306,75 @@ int rx_loopback_wait(rx_loopback *lb, const char *state, int timeout_ms, char **
     }
 }
 #endif /* RHUNEXT_AUTH */
+
+char *rx_setting_get(rx_ext *ext, const char *key, int64_t folder, const char *lang) {
+    if (!rx_has(ext, "scoped-settings")) {
+        snprintf(ext->error, sizeof ext->error, "unknown scoped-settings feature was not agreed");
+        return NULL;
+    }
+    if (!key || !*key || strpbrk(key, " \r\n") || strlen(key) > 200 || (lang && strlen(lang) > 200)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid setting key");
+        return NULL;
+    }
+    char line[512], l[208];
+    snprintf(l, sizeof l, "%s", lang && *lang ? lang : "-");
+    for (char *p = l; *p; p++)
+        if (*p == ' ') *p = '_';
+    snprintf(line, sizeof line, "setting-get %s %lld %s", key, (long long)folder, l);
+    rx_buf b = {NULL, 0, 0};
+    if (rx_request(ext, line, NULL, 0, NULL, &b) < 0) {
+        rx_buf_free(&b);
+        return NULL;
+    }
+    rx_buf_add(&b, "", 1);
+    return b.data;
+}
+
+int rx_parse_folders(const rx_event *event, rx_folder *out, int max) {
+    if (!event || !event->name || strcmp(event->name, "folders") || !event->body) return -1;
+    const char *p = (const char *)event->body, *end = p + event->body_len;
+    const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+    if (!nl) return -1;
+    int n = atoi(p);
+    if (n < 0 || n > 16 || n > max) return -1;
+    p = nl + 1;
+    for (int i = 0; i < n; i++) {
+        nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        if (!nl) return -1;
+        long long id, flags, nlen, plen;
+        char loc[16], head[96];
+        size_t hl = (size_t)(nl - p);
+        if (hl >= sizeof head) return -1;
+        memcpy(head, p, hl);
+        head[hl] = 0;
+        if (sscanf(head, "%lld %15s %lld %lld %lld", &id, loc, &flags, &nlen, &plen) != 5 || nlen < 0 || plen < 0)
+            return -1;
+        p = nl + 1;
+        if (nlen + plen > end - p) return -1;
+        out[i].id = id, out[i].flags = (int)flags;
+        snprintf(out[i].location, sizeof out[i].location, "%s", loc);
+        out[i].name = p, out[i].name_len = (size_t)nlen;
+        out[i].path = p + nlen, out[i].path_len = (size_t)plen;
+        p += nlen + plen;
+    }
+    return p == end ? n : -1;
+}
+
+int64_t rx_folder_of(rx_ext *ext, const char *path) {
+    if (!rx_has(ext, "workspace-folders")) {
+        snprintf(ext->error, sizeof ext->error, "unknown workspace-folders feature was not agreed");
+        return -1;
+    }
+    if (!path || !*path || strpbrk(path, "\r\n") || strlen(path) > 4096) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid path");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "folder-of %s", path);
+    int64_t v = rx_req_num(ext, line.data, NULL, 0);
+    rx_buf_free(&line);
+    return v;
+}
 
 /* ---- feature files ---- */
 
