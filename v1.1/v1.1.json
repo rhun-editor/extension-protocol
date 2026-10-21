@@ -337,7 +337,10 @@
         },
         "agents": {
           "type": "string",
-          "enum": ["yes", "no"],
+          "enum": [
+            "yes",
+            "no"
+          ],
           "description": "yes: the extension lists agent sessions in the agents panel (feature agents)."
         },
         "agents.title": {
@@ -406,6 +409,34 @@
           "type": "string",
           "description": "run kinds the controller offers besides run, space separated",
           "pattern": "^(debug|coverage)( (debug|coverage))*$|^run( (debug|coverage))*$"
+        },
+        "folding": {
+          "$ref": "#/$defs/patterns",
+          "description": "Folding ranges (feature folding-ranges): its ranges replace indentation in matching documents; the language's single provider is asked."
+        },
+        "semantic_tokens": {
+          "$ref": "#/$defs/patterns",
+          "description": "Semantic tokens (feature semantic-tokens); the language's single provider is asked."
+        },
+        "inlay_hints": {
+          "$ref": "#/$defs/patterns",
+          "description": "Inlay hints (feature inlay-hints); every matching provider is asked."
+        },
+        "code_lens": {
+          "$ref": "#/$defs/patterns",
+          "description": "Code lens (feature code-lens); every matching provider is asked."
+        },
+        "highlights": {
+          "$ref": "#/$defs/patterns",
+          "description": "Document highlights (feature document-highlights); the language's single provider is asked."
+        },
+        "colors": {
+          "$ref": "#/$defs/patterns",
+          "description": "Document colors and color-edit (feature document-colors); every matching provider is asked."
+        },
+        "inline_complete": {
+          "$ref": "#/$defs/patterns",
+          "description": "Inline completion (feature inline-complete); the language's single provider is asked."
         }
       },
       "additionalProperties": false
@@ -423,7 +454,10 @@
         },
         "^[a-z0-9_]{1,40}\\.readonly$": {
           "type": "string",
-          "enum": ["yes", "no"]
+          "enum": [
+            "yes",
+            "no"
+          ]
         }
       },
       "additionalProperties": false

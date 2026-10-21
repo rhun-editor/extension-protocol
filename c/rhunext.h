@@ -293,6 +293,62 @@ typedef struct {
     rx_doc doc;
     int64_t version;
 } rx_doc_ask;
+
+/* Editor presentation (protocol 1.1; v1.1.md "Feature: decorations", "Feature: diagnostic-tags",
+ * "Presentation providers"). rx_decoration_type registers or restyles this extension's decoration
+ * type (name 1-40 of [a-z0-9_-]; body "KEY ARGS" lines: color, background, line-background, border,
+ * underline, strike, faded, before, after, width, gutter, scrollbar, grow, priority). rx_decorate
+ * replaces this extension's ranges of a type on doc whose first line is in from..to (0 0: all);
+ * version may be one rhun still keeps the edits since. rx_semantic_legend registers a legend: its
+ * token types and modifiers, space separated, each NAME or NAME=EFFECT. Each returns 0, or -1 with
+ * rx_error. rx_visible reads a "0 visible DOC L1 L2" event (1, or 0 for another event).
+ * rx_tagged_severity writes into out a diagnostics line's SEVERITY with its tags when the extension
+ * agreed diagnostic-tags ("hint+unnecessary"), the severity alone otherwise. */
+typedef struct {
+    rx_range r;
+    const char *before, *after, *tip;   /* virtual text (one line, 200 bytes) and a tip; NULL: none */
+    const char *command;                /* a command reference's NAME run by a click on its text, or NULL */
+    const void *args;
+    size_t args_len;
+} rx_decoration;
+int rx_decoration_type(rx_ext *ext, const char *name, const char *body);
+int rx_decorate(rx_ext *ext, rx_doc doc, int64_t version, const char *name, int from, int to,
+                const rx_decoration *ranges, int n);
+int rx_semantic_legend(rx_ext *ext, const char *name, const char *types, const char *modifiers);
+int rx_visible(const rx_event *ev, rx_doc *doc, int *first, int *last);
+const char *rx_tagged_severity(rx_ext *ext, const char *severity, int unnecessary, int deprecated, char out[48]);
+/* what rhun asks providers about: lines first..last (inlay-hints, code-lens, colors); semantic
+ * tokens (prev the last result's id, "" for none; range 1 with first..last for a huge document); a
+ * color's new value (color-edit, rgba 0xRRGGBBAA) */
+typedef struct { int64_t id; rx_doc doc; int64_t version; int first, last; } rx_lines_ask;
+typedef struct { int64_t id; rx_doc doc; int64_t version; const char *prev; int range, first, last; } rx_tokens_ask;
+typedef struct { int64_t id; rx_doc doc; int64_t version; rx_range r; uint32_t rgba; } rx_color_ask;
+/* an answer's records, built with the functions below; rx_pres_finish appends "N" LF and them */
+typedef struct { rx_buf recs; int n, full; } rx_pres;
+void rx_folding_range(rx_pres *l, int start, int end, const char *kind, const char *text);
+typedef struct {
+    const char *label, *tip;            /* label one line (a hint's parts: 120 bytes in all); tip NULL */
+    const char *command;                /* a click runs it (NAME and args), or NULL */
+    const void *args;
+    size_t args_len;
+    int has_goto;                       /* or a click opens goto_path ("" for this document) at goto_at */
+    const char *goto_path;
+    rx_pos goto_at;
+} rx_hint_part;
+void rx_inlay_hint(rx_pres *l, rx_pos at, int before, const rx_hint_part *parts, int nparts,
+                   const rx_range *edit_ranges, const char *const *edit_texts, int nedits);
+void rx_code_lens(rx_pres *l, int line, const char *title, const char *tip, const char *command, const void *args,
+                  size_t args_len);
+void rx_highlight(rx_pres *l, rx_range r, const char *kind);   /* kind text, read or write */
+void rx_document_color(rx_pres *l, rx_range r, uint32_t rgba);
+void rx_inline_item(rx_pres *l, rx_range r, const char *text, const char *command, const void *args,
+                    size_t args_len);
+void rx_pres_finish(rx_pres *l, rx_buf *out);
+/* semantic tokens: the whole answer into out: data n ints (five per token, LSP's layout with byte
+ * columns), or a delta of nedits edits, each then appended with rx_semantic_edit */
+void rx_semantic_full(rx_buf *out, const char *result, const char *legend, const uint32_t *data, size_t n, int range);
+void rx_semantic_delta(rx_buf *out, const char *result, const char *legend, int nedits);
+void rx_semantic_edit(rx_buf *out, uint32_t start, uint32_t del, const uint32_t *data, size_t n);
 /* the answers, built with rx_selection_group, rx_hierarchy_add, rx_call_add, rx_workspace_symbol
  * and rx_document_link (below); the fields are the builders' own (at and npos, the request's positions, and
  * roots are set for you in the handlers) */
@@ -500,6 +556,21 @@ typedef struct {
     const char *(*editor_save)(rx_ext *ext, rx_doc cdoc, const char *kind, int64_t part, rx_buf *out, int *more, void *user);
     const char *(*editor_cmd)(rx_ext *ext, rx_doc cdoc, const char *what, void *user);
     void (*editor_event)(rx_ext *ext, rx_doc cdoc, const char *what, const char *path, void *user);
+    /* Editor presentation (protocol 1.1), each asked only with its feature agreed and returning 1
+     * to answer, 0 for "unknown": folding_ranges (folding-ranges) adds rx_folding_range records;
+     * semantic_tokens (semantic-tokens) writes the answer with rx_semantic_full or rx_semantic_delta
+     * (nothing to say nothing); inlay_hints (inlay-hints), code_lenses (code-lens), highlights
+     * (document-highlights: req->at is the caret), colors (document-colors: rx_document_color) and inline_complete
+     * (inline-complete: req->kind typed or invoked) add their records; color_edit (document-colors)
+     * builds the workspace edit that writes req's color. */
+    int (*folding_ranges)(rx_ext *ext, const rx_doc_ask *req, rx_pres *out, void *user);
+    int (*semantic_tokens)(rx_ext *ext, const rx_tokens_ask *req, rx_buf *out, void *user);
+    int (*inlay_hints)(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *user);
+    int (*code_lenses)(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *user);
+    int (*highlights)(rx_ext *ext, const rx_ask *req, rx_pres *out, void *user);
+    int (*colors)(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *user);
+    int (*color_edit)(rx_ext *ext, const rx_color_ask *req, rx_wedit *out, void *user);
+    int (*inline_complete)(rx_ext *ext, const rx_ask *req, rx_pres *out, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -5809,6 +5880,212 @@ void rx_workspace_symbols_finish(rx_workspace_symbols *l, rx_buf *out) {
 }
 void rx_links_finish(rx_links *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
 
+/* ---- editor presentation (protocol 1.1) ---- */
+
+static int rx_deco_name_ok(const char *s) {
+    size_t n = s ? strlen(s) : 0;
+    if (!n || n > 40) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_' || s[i] == '-')) return 0;
+    return 1;
+}
+
+int rx_decoration_type(rx_ext *ext, const char *name, const char *body) {
+    if (!rx_deco_name_ok(name)) return rx_fail(ext, "syntax a decoration type name is 1 to 40 of a-z 0-9 _ -");
+    if (!body) body = "";
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "decoration-type %s %zu", name, strlen(body));
+    int r = rx_request(ext, line.data, body, strlen(body), NULL, NULL);
+    rx_buf_free(&line);
+    return r;
+}
+
+int rx_decorate(rx_ext *ext, rx_doc doc, int64_t version, const char *name, int from, int to,
+                const rx_decoration *ranges, int n) {
+    if (!rx_deco_name_ok(name)) return rx_fail(ext, "syntax a decoration type name is 1 to 40 of a-z 0-9 _ -");
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    int count = 0;
+    for (int i = 0; i < n && count < 20000; i++) {
+        const rx_decoration *d = &ranges[i];
+        if (!rx_well_formed(d->r)) continue;
+        const char *b = d->before ? d->before : "", *a = d->after ? d->after : "", *t = d->tip ? d->tip : "";
+        size_t bl = rx_cut(b, strlen(b), 200), al = rx_cut(a, strlen(a), 200), tl = rx_cut(t, strlen(t), 1000);
+        rx_buf extra = {NULL, 0, 0};
+        if (d->command && rx_command_ref(&extra, d->command, d->args, d->args_len) < 0) extra.len = 0;
+        rx_add_range(&body, d->r);
+        rx_buf_fmt(&body, " %zu %zu %zu %zu\n", bl, al, tl, extra.len);
+        rx_add_line(&body, b, bl);
+        rx_add_line(&body, a, al);
+        rx_buf_add(&body, t, tl);
+        rx_buf_add(&body, extra.data, extra.len);
+        rx_buf_free(&extra);
+        count++;
+    }
+    rx_buf_fmt(&line, "decorate %lld %lld %s %d %d %d %zu", (long long)doc, (long long)version, name, from, to, count,
+               body.len);
+    int r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    rx_buf_free(&line);
+    rx_buf_free(&body);
+    return r;
+}
+
+int rx_semantic_legend(rx_ext *ext, const char *name, const char *types, const char *modifiers) {
+    rx_buf body = {NULL, 0, 0}, line = {NULL, 0, 0};
+    rx_buf_fmt(&body, "%s\n%s", types ? types : "", modifiers ? modifiers : "");
+    rx_buf_fmt(&line, "semantic-legend %s %zu", name ? name : "", body.len);
+    int r = rx_request(ext, line.data, body.data, body.len, NULL, NULL);
+    rx_buf_free(&line);
+    rx_buf_free(&body);
+    return r;
+}
+
+int rx_visible(const rx_event *ev, rx_doc *doc, int *first, int *last) {
+    if (!ev || strcmp(ev->name, "visible") != 0 || ev->argc != 3) return 0;
+    *doc = atoll(ev->argv[0]);
+    *first = atoi(ev->argv[1]);
+    *last = atoi(ev->argv[2]);
+    return 1;
+}
+
+const char *rx_tagged_severity(rx_ext *ext, const char *severity, int unnecessary, int deprecated, char out[48]) {
+    snprintf(out, 48, "%s%s%s", severity ? severity : "error",
+             rx_has(ext, "diagnostic-tags") && unnecessary ? "+unnecessary" : "",
+             rx_has(ext, "diagnostic-tags") && deprecated ? "+deprecated" : "");
+    return out;
+}
+
+static int rx_pres_room(rx_pres *l, int max) {
+    if (l->n >= max) l->full = 1;
+    return !l->full;
+}
+
+void rx_folding_range(rx_pres *l, int start, int end, const char *kind, const char *text) {
+    if (!rx_pres_room(l, 50000) || start < 1 || end <= start) return;
+    if (!kind || (strcmp(kind, "region") && strcmp(kind, "comment") && strcmp(kind, "imports"))) kind = "-";
+    if (!text) text = "";
+    size_t tl = rx_cut(text, strlen(text), 80), mark = l->recs.len;
+    rx_buf_fmt(&l->recs, "%d %d %s %zu\n", start, end, kind, tl);
+    rx_add_line(&l->recs, text, tl);
+    rx_keep(&l->recs, mark, &l->n, &l->full, 4u << 20);
+}
+
+void rx_inlay_hint(rx_pres *l, rx_pos at, int before, const rx_hint_part *parts, int nparts,
+                   const rx_range *edit_ranges, const char *const *edit_texts, int nedits) {
+    if (!rx_pres_room(l, 5000) || at.line < 1 || at.col < 1) return;
+    rx_buf ps = {NULL, 0, 0}, ex = {NULL, 0, 0};
+    size_t total = 0;
+    int np = 0;
+    for (int i = 0; i < nparts && np < 8; i++) {
+        const char *label = parts[i].label ? parts[i].label : "";
+        size_t ll = rx_cut(label, strlen(label), 120 - total);
+        if (!ll) continue;
+        total += ll;
+        const char *tip = parts[i].tip ? parts[i].tip : "";
+        size_t tl = rx_cut(tip, strlen(tip), 4000);
+        rx_buf pe = {NULL, 0, 0};
+        if (parts[i].command && rx_command_ref(&pe, parts[i].command, parts[i].args, parts[i].args_len) < 0) pe.len = 0;
+        if (parts[i].has_goto) {
+            const char *p = parts[i].goto_path ? parts[i].goto_path : "";
+            rx_buf_fmt(&pe, "goto %d %d %zu\n", parts[i].goto_at.line, parts[i].goto_at.col, strlen(p));
+            rx_add_line(&pe, p, strlen(p));
+        }
+        rx_buf_fmt(&ps, "%zu %zu %zu\n", ll, tl, pe.len);
+        rx_add_line(&ps, label, ll);
+        rx_buf_add(&ps, tip, tl);
+        rx_buf_add(&ps, pe.data, pe.len);
+        rx_buf_free(&pe);
+        np++;
+    }
+    for (int i = 0; i < nedits && i < 16 && np; i++) {
+        if (!rx_well_formed(edit_ranges[i])) break;
+        const char *t = edit_texts[i] ? edit_texts[i] : "";
+        rx_buf_add(&ex, "edit ", 5);
+        rx_add_range(&ex, edit_ranges[i]);
+        rx_buf_fmt(&ex, " %zu\n", strlen(t));
+        rx_buf_add(&ex, t, strlen(t));
+    }
+    if (np) {
+        size_t mark = l->recs.len;
+        rx_buf_fmt(&l->recs, "%d %d %s %d %zu\n", at.line, at.col, before ? "before" : "after", np, ex.len);
+        rx_buf_add(&l->recs, ps.data, ps.len);
+        rx_buf_add(&l->recs, ex.data, ex.len);
+        rx_keep(&l->recs, mark, &l->n, &l->full, 4u << 20);
+    }
+    rx_buf_free(&ps);
+    rx_buf_free(&ex);
+}
+
+void rx_code_lens(rx_pres *l, int line, const char *title, const char *tip, const char *command, const void *args,
+                  size_t args_len) {
+    if (!rx_pres_room(l, 10000) || line < 1) return;
+    if (!title) title = "";
+    size_t tl = rx_cut(title, strlen(title), 200), mark = l->recs.len;
+    rx_buf ex = {NULL, 0, 0};
+    if (command && rx_command_ref(&ex, command, args, args_len) < 0) ex.len = 0;
+    if (tip && *tip) {
+        size_t pl = rx_cut(tip, strlen(tip), 1000);
+        rx_buf_fmt(&ex, "tip %zu\n", pl);
+        rx_buf_add(&ex, tip, pl);
+    }
+    rx_buf_fmt(&l->recs, "%d %zu %zu\n", line, tl, ex.len);
+    rx_add_line(&l->recs, title, tl);
+    rx_buf_add(&l->recs, ex.data, ex.len);
+    rx_buf_free(&ex);
+    rx_keep(&l->recs, mark, &l->n, &l->full, 4u << 20);
+}
+
+void rx_highlight(rx_pres *l, rx_range r, const char *kind) {
+    if (!rx_pres_room(l, 5000) || !rx_well_formed(r) || r.start.line < 1 || r.start.col < 1) return;
+    if (!kind || (strcmp(kind, "read") && strcmp(kind, "write"))) kind = "text";
+    size_t mark = l->recs.len;
+    rx_add_range(&l->recs, r);
+    rx_buf_fmt(&l->recs, " %s\n", kind);
+    rx_keep(&l->recs, mark, &l->n, &l->full, 1u << 20);
+}
+
+void rx_document_color(rx_pres *l, rx_range r, uint32_t rgba) {
+    if (!rx_pres_room(l, 10000) || !rx_well_formed(r) || r.start.line < 1 || r.start.col < 1) return;
+    size_t mark = l->recs.len;
+    rx_add_range(&l->recs, r);
+    rx_buf_fmt(&l->recs, " %08x\n", (unsigned)rgba);
+    rx_keep(&l->recs, mark, &l->n, &l->full, 1u << 20);
+}
+
+void rx_inline_item(rx_pres *l, rx_range r, const char *text, const char *command, const void *args,
+                    size_t args_len) {
+    if (!rx_pres_room(l, 8) || !rx_well_formed(r) || r.start.line < 1 || !text || !*text) return;
+    size_t tl = strlen(text);
+    if (tl > (64u << 10)) return;
+    rx_buf ex = {NULL, 0, 0};
+    if (command && rx_command_ref(&ex, command, args, args_len) < 0) ex.len = 0;
+    size_t mark = l->recs.len;
+    rx_add_range(&l->recs, r);
+    rx_buf_fmt(&l->recs, " %zu %zu\n", tl, ex.len);
+    rx_buf_add(&l->recs, text, tl);
+    rx_buf_add(&l->recs, ex.data, ex.len);
+    rx_buf_free(&ex);
+    rx_keep(&l->recs, mark, &l->n, &l->full, 4u << 20);
+}
+
+void rx_pres_finish(rx_pres *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
+
+void rx_semantic_full(rx_buf *out, const char *result, const char *legend, const uint32_t *data, size_t n, int range) {
+    if (n % 5 || n / 5 > 200000) return;
+    rx_buf_fmt(out, "%s %s %s %zu\n", result && *result ? result : "-", legend ? legend : "", range ? "range" : "full",
+               n / 5);
+    for (size_t i = 0; i < n; i++) rx_buf_fmt(out, i ? " %u" : "%u", (unsigned)data[i]);
+}
+
+void rx_semantic_delta(rx_buf *out, const char *result, const char *legend, int nedits) {
+    rx_buf_fmt(out, "%s %s delta %d\n", result && *result ? result : "-", legend ? legend : "", nedits);
+}
+
+void rx_semantic_edit(rx_buf *out, uint32_t start, uint32_t del, const uint32_t *data, size_t n) {
+    rx_buf_fmt(out, "%u %u %zu\n", (unsigned)start, (unsigned)del, n);
+    for (size_t i = 0; i < n; i++) rx_buf_fmt(out, i ? " %u" : "%u", (unsigned)data[i]);
+    if (n) rx_buf_add(out, "\n", 1);
+}
+
 static int rx_stream_records(rx_stream *s, rx_buf *recs, int *n, int *full) {
     rx_buf b = {NULL, 0, 0};
     rx_records_finish(recs, n, full, &b);
@@ -6341,6 +6618,73 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         memset(&l, 0, sizeof l);
         if ((ok = h->document_links(ext, &req, &l, user)) != 0) rx_links_finish(&l, &body);
         rx_buf_free(&l.recs);
+    } else if ((strcmp(verb, "folding-ranges") == 0 && n == 4 && rx_nums(f, 2, 4) && h->folding_ranges &&
+                rx_has(ext, "folding-ranges")) ||
+               ((strcmp(verb, "inlay-hints") == 0 || strcmp(verb, "code-lens") == 0 || strcmp(verb, "colors") == 0) &&
+                n == 6 && rx_nums(f, 2, 6))) {
+        rx_pres l;
+        memset(&l, 0, sizeof l);
+        if (verb[0] == 'f') {
+            rx_doc_ask req;
+            req.id = stream.id;
+            req.doc = atoll(f[2]);
+            req.version = atoll(f[3]);
+            ok = h->folding_ranges(ext, &req, &l, user);
+        } else {
+            rx_lines_ask req;
+            req.id = stream.id;
+            req.doc = atoll(f[2]);
+            req.version = atoll(f[3]);
+            req.first = atoi(f[4]);
+            req.last = atoi(f[5]);
+            if (verb[0] == 'i' && h->inlay_hints && rx_has(ext, "inlay-hints")) ok = h->inlay_hints(ext, &req, &l, user);
+            else if (verb[1] == 'o' && verb[2] == 'd' && h->code_lenses && rx_has(ext, "code-lens"))
+                ok = h->code_lenses(ext, &req, &l, user);
+            else if (verb[1] == 'o' && verb[2] == 'l' && h->colors && rx_has(ext, "document-colors"))
+                ok = h->colors(ext, &req, &l, user);
+        }
+        if (ok) rx_pres_finish(&l, &body);
+        rx_buf_free(&l.recs);
+    } else if ((strcmp(verb, "semantic-tokens") == 0 && n == 5 && rx_nums(f, 2, 4)) ||
+               (strcmp(verb, "semantic-tokens-range") == 0 && n == 6 && rx_nums(f, 2, 6))) {
+        rx_tokens_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.range = verb[15] == '-';
+        req.prev = req.range || strcmp(f[4], "-") == 0 ? "" : f[4];
+        req.first = req.range ? atoi(f[4]) : 0;
+        req.last = req.range ? atoi(f[5]) : 0;
+        if (h->semantic_tokens && rx_has(ext, "semantic-tokens")) ok = h->semantic_tokens(ext, &req, &body, user);
+    } else if ((strcmp(verb, "highlights") == 0 && n == 6 && rx_nums(f, 2, 6) && h->highlights &&
+                rx_has(ext, "document-highlights")) ||
+               (strcmp(verb, "inline-complete") == 0 && n == 7 && rx_nums(f, 2, 6) && h->inline_complete &&
+                rx_has(ext, "inline-complete"))) {
+        rx_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.at.line = atoi(f[4]);
+        req.at.col = atoi(f[5]);
+        req.kind = n > 6 ? f[6] : "invoked";
+        req.ch = "";
+        rx_pres l;
+        memset(&l, 0, sizeof l);
+        ok = verb[0] == 'h' ? h->highlights(ext, &req, &l, user) : h->inline_complete(ext, &req, &l, user);
+        if (ok) rx_pres_finish(&l, &body);
+        rx_buf_free(&l.recs);
+    } else if (strcmp(verb, "color-edit") == 0 && n == 9 && rx_nums(f, 2, 8) && h->color_edit &&
+               rx_has(ext, "document-colors") && strlen(f[8]) == 8) {
+        rx_color_ask req;
+        req.id = stream.id;
+        req.doc = atoll(f[2]);
+        req.version = atoll(f[3]);
+        req.r.start.line = atoi(f[4]);
+        req.r.start.col = atoi(f[5]);
+        req.r.end.line = atoi(f[6]);
+        req.r.end.col = atoi(f[7]);
+        req.rgba = (uint32_t)strtoul(f[8], NULL, 16);
+        if ((ok = h->color_edit(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, caps & 1, (caps & 2) != 0);
     } else {
         rx_answer_ai(ext, h, user, f, n, data, data_len, &ok, &body);
     }

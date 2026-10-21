@@ -1475,6 +1475,45 @@ plain('tests.requests', ['conf/tests'], ops=TESTS_OPS, env={'CONF_HELLO': 'hello
       script=['cmd testing', 'wait-ext tests running', 'wait 1200', 'cmd test_run_all', 'wait 2500'] + pe('e') + ['quit'],
       check=chk_tests_requests)
 
+# ================================================================ 1.1: editor presentation
+
+PRES_STEPS = [
+    ('type', ["req", "decoration-type", "blame {LEN}", "after muted -\ngrow none\n"], ('ok',)),
+    ('type-unknown-key', ["req", "decoration-type", "bad {LEN}", "faded\nwobble 3\n"], ('errx', 'error %(id)d syntax line 2')),
+    ('type-bad-name', ["req", "decoration-type", "Bad! {LEN}", "faded\n"], ('err', 'syntax')),
+    ('decorate', ["req", "decorate", "{DOC:a.txt} 0 blame 0 0 1 {LEN}", "1 1 1 3 0 3 0 0\nyou"], ('ok',)),
+    ('decorate-unknown-type', ["req", "decorate", "{DOC:a.txt} 0 nosuch 0 0 0 {LEN}", ""], ('err', 'syntax')),
+    ('decorate-outside-the-text', ["req", "decorate", "{DOC:a.txt} 0 blame 0 0 1 {LEN}", "99 1 99 2 0 0 0 0\n"], ('err', 'badpos')),
+    ('decorate-fewer-records', ["req", "decorate", "{DOC:a.txt} 0 blame 0 0 2 {LEN}", "1 1 1 3 0 0 0 0\n"], ('err', 'syntax')),
+    ('decorate-no-such-document', ["req", "decorate", "424242 0 blame 0 0 0 {LEN}", ""], ('err', 'nodoc')),
+    ('legend', ["req", "semantic-legend", "ra {LEN}", "function variable=builtin\nmutable=underline"], ('ok',)),
+    ('legend-unknown-effect', ["req", "semantic-legend", "rb {LEN}", "function=sparkle\n"], ('err', 'syntax')),
+    DONE,
+]
+PRES_OPS, PRES_CASES = split_steps(PRES_STEPS)
+
+
+def chk_presentation(r):
+    r.finished()
+    check_steps(r, PRES_STEPS)
+    e = r.ext('e', 'conf/full')
+    r.ok('still-running', e is not None and e['state'] == 'running', 'got %r' % (e and e['raw']))
+
+
+plain('pres.decorations-and-legends', ['conf/full'], ops=PRES_OPS,
+      env={'CONF_HELLO': 'hello 1 decorations semantic-tokens\\n'},
+      script=std(pre=[OPEN_A], wait=1200, post=pe('e')), check=chk_presentation)
+
+
+def chk_presentation_unagreed(r):
+    r.finished()
+    check_cases(r, [('decoration-type-unknown', ('err', 'unknown')), ('semantic-legend-unknown', ('err', 'unknown'))])
+
+
+plain('pres.without-the-features-unknown', ['conf/full'],
+      ops=[["req", "decoration-type", "t {LEN}", "faded\n"], ["req", "semantic-legend", "ra {LEN}", "function\n"], DONE],
+      script=std(pre=[OPEN_A], wait=900), check=chk_presentation_unagreed)
+
 # ================================================================ section 7: status and toast
 
 
