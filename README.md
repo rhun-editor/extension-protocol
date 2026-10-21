@@ -100,8 +100,9 @@ refuses what the phases cannot express with the index of the change at fault (fo
 resolve answers) follow the features rhun agreed: without `workspace-edits` an edit goes as 12g's
 grammar, and one with a hash, a label or `confirm` (or file operations, which also need
 `file-operations`) fails as `unknown` without being sent, an action with such an edit left out of
-its list. Format and save-action answers, save-apply and proposals always keep 12g's grammar, so
-those fail there whatever was agreed. `Ext::encode_edit`, `EncodeEdit` and `rx_wedit_finish_for`
+its list. Format and save-action answers and save-apply always keep 12g's grammar, so those fail
+there whatever was agreed; a proposal is sent in 12g's grammar too, its hashes as `-` and without
+its label and `confirm` (file operations fail as `unknown`). `Ext::encode_edit`, `EncodeEdit` and `rx_wedit_finish_for`
 give the body for the features agreed; `encode`, `Encode` and `rx_wedit_finish` the whole
 grammar. A create path ending in `/` makes a folder: Go's `filepath.Join` and Rust's `Path::join`
 drop that slash, so append it after joining. The checker serves all of it: it makes transactions
@@ -125,6 +126,24 @@ instead of the released SDK or `@latest`. For Go, use a `go.work` containing the
 repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this repository.
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
+
+## Resources, workspaces and sign-in (1.1)
+
+Protocol 1.1 adds these, specified in [v1.1](v1.1/v1.1.md#lifecycle-idle--stop-and-feature-idle):
+
+| Feature | Rust | Go | C |
+| --- | --- | --- | --- |
+| `idle` (with `idle = stop`): stay running while busy | `Ext::busy` | `BusyContext` | `rx_busy` |
+| `secrets` (`[needs] secrets = yes`): the system keychain | `Ext::secret_get`, `secret_set`, `secret_delete`, `secret_keys` | `SecretGetContext` … | `rx_secret_get` … |
+| `uris`: virtual documents for `[provides] schemes` | `Handler::content`, `Ext::open_uri`, `Ext::content_changed` | `ContentProvider`, `OpenURIContext`, `ContentChangedContext` | `rx_handlers.content`, `rx_content_changed` |
+| `urls`: open a web page, links back to the extension | `Ext::open_url`, `external_uri`, `link`, `parse_link`; `auth::{Pkce, Loopback}` | `OpenURLContext`, `ExternalURIContext`, `LinkContext`, `ParseLink`; `NewPKCE`, `ListenLoopback` | `rx_open_url`, `rx_external_uri`, `rx_link`; `RHUNEXT_AUTH`: `rx_pkce_new`, `rx_loopback_*` |
+| `files` (`project = read`): find files by glob, search text, in batches | `Ext::find_files`, `Ext::search_text` | `FindFilesContext`, `SearchTextContext`, `CompileSearchRegex` | `rx_find_files`, `rx_search_text` |
+| `scoped-settings`: settings per workspace, folder and language | `Ext::setting_get` | `SettingGetContext`, `ParseSettingChanged` | `rx_setting_get` |
+| `workspace-folders`: several folders in a window | `parse_folders`, `Ext::folder_of` | `ParseFolders`, `FolderOfContext` | `rx_parse_folders`, `rx_folder_of` |
+
+Sign in with OAuth's authorization code flow and PKCE: listen on a loopback port, pass its
+redirect URI through `external-uri`, open the provider's page with `open-url` (rhun asks the
+user), take the code from the redirect, exchange it, and keep the token with `secret-set`.
 
 ## Language features (1.1)
 

@@ -414,8 +414,8 @@ func ParseTaskList(body []byte) ([]Definition, error) {
 	}
 	index := map[string]int{}
 	for i, d := range list {
-		if _, dup := index[d.ID]; dup {
-			return nil, &Error{Code: "syntax", Text: fmt.Sprintf("task %d: id listed twice", i+1)}
+		if first, dup := index[d.ID]; dup { // rhun names the first of the two
+			return nil, &Error{Code: "syntax", Text: fmt.Sprintf("task %d: id listed twice", first+1)}
 		}
 		index[d.ID] = i
 	}

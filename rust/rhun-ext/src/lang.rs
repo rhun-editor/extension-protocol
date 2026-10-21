@@ -593,7 +593,8 @@ pub const MAX_LABEL: usize = 200;
 /// [`crate::Ext::apply`] and the answers that carry an edit follow the features rhun agreed: an
 /// edit with file operations, a hashed file, a label or `confirm` is refused (`unknown`) when they
 /// were not, and in the bodies that keep 12g's grammar (format and save-actions answers,
-/// [`crate::Ext::save_apply`], [`crate::Ext::propose`]).
+/// [`crate::Ext::save_apply`]). [`crate::Ext::propose`] sends 12g's grammar too, a hash as `-` and
+/// without the label and `confirm`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceEdit {
     pub files: Vec<FileEdit>,
@@ -813,7 +814,9 @@ impl WorkspaceEdit {
             if !caps.ws {
                 return Err((
                     "unknown",
-                    format!("the edit's {part} needs the workspace-edits feature, which was not agreed"),
+                    format!(
+                        "the edit's {part} needs the workspace-edits feature, which was not agreed"
+                    ),
                 ));
             }
         }
@@ -1178,7 +1181,9 @@ mod tests {
                 e.encode_with(EditCaps::agreed(false, false)),
                 Err((
                     "unknown",
-                    format!("the edit's {part} needs the workspace-edits feature, which was not agreed")
+                    format!(
+                        "the edit's {part} needs the workspace-edits feature, which was not agreed"
+                    )
                 ))
             );
             assert_eq!(

@@ -331,19 +331,34 @@ func ParseProposal(ev Event) (ProposalEvent, bool) {
 }
 
 // Propose sends an edit for the user to review: the proposal's id, at once (FeatureEditReview).
-// The edit is in 12g's grammar whatever was agreed: file operations, a hashed file, a label or
-// confirm are an *Error with code unknown, and nothing is sent.
+// The edit goes in 12g's grammar whatever was agreed: a hash as "-", without its Label and
+// Confirm; file operations are refused (an *Error with code unknown).
 func (e *Ext) Propose(label, sid string, edit WorkspaceEdit) (int64, error) {
-	eb, bad := edit.encodeWith(editCaps{fixed: "propose"})
+	body, bad := proposalBody(label, sid, edit)
 	if bad != nil {
-		return 0, bad // toobig, or unknown
+		return 0, bad
 	}
-	body := append([]byte(fmt.Sprintf("%d %d\n%s%s", len(label), len(sid), label, sid)), eb...)
 	r, err := e.Request("propose", body, strconv.Itoa(len(body)))
 	if err != nil {
 		return 0, err
 	}
 	return argInt(r, 0), nil
+}
+
+// proposalBody is a proposal's head and its edit in 12g's grammar (the Review tab reads 12g): the
+// hashes, label and confirm are left out (a hashed file goes as "-"), and what is left is encoded
+// as 12g's, so file operations are refused (unknown), as is what does not fit (toobig).
+func proposalBody(label, sid string, edit WorkspaceEdit) ([]byte, *Error) {
+	plain := WorkspaceEdit{Files: make([]FileEdit, len(edit.Files)), Ops: edit.Ops}
+	for i, f := range edit.Files {
+		f.Hashed, f.Hash = false, 0
+		plain.Files[i] = f
+	}
+	eb, bad := plain.encodeWith(editCaps{fixed: "propose"})
+	if bad != nil {
+		return nil, bad
+	}
+	return append([]byte(fmt.Sprintf("%d %d\n%s%s", len(label), len(sid), label, sid)), eb...), nil
 }
 
 // Unpropose withdraws a proposal.

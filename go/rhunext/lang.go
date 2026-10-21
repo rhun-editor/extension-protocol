@@ -309,7 +309,7 @@ type FileEdit struct {
 // error's ENTRY back. Apply and the answers that carry an edit follow the features rhun agreed:
 // an edit with Ops, a hashed file, Label or Confirm is refused (an *Error with code unknown) when
 // they were not, and in the bodies that keep 12g's grammar (format and save-actions answers,
-// SaveApply, Propose).
+// SaveApply). Propose sends 12g's grammar too, a hash as "-" and without Label and Confirm.
 type WorkspaceEdit struct {
 	Files   []FileEdit
 	Ops     []FileOp
