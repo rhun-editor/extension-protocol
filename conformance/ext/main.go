@@ -1704,6 +1704,7 @@ func main() {
 	if schemaFails == 0 {
 		h.ok("manifest follows v1.json")
 	}
+	h.checkContributions()
 	if m.pack != "" && programless {
 		h.ok("a pack without a program: nothing to start")
 		report(h)

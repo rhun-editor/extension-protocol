@@ -257,7 +257,10 @@ callable commands with `RunCommand`, and answer calls with `Callee` (`CallReques
 `context-keys` sets the extension's keys for when clauses (`SetContext` / `set_context` /
 `rx_set_context`), and `status-items` adds status bar items (`SetStatusItem` with `StatusItem` /
 `set_status_item` / `rx_set_status_item`). Without `command-args` the old `Run` / `command`
-handlers keep receiving every run.
+handlers keep receiving every run. `WhenCheck` / `when::check` / `rx_when_check` compile a when
+clause as rhun does (the byte offset of an error included; `v1.1/when-vectors.txt` holds the
+shared vectors), and `rhun-ext-check` checks `[keys]`, `[menu.*]`, `[status]`, `[context]`,
+`[icons]`, `[language.*]`, the language keys of `syntax/*.syn` and `icon-themes/*.icons`.
 
 ## Test controllers
 

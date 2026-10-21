@@ -78,6 +78,7 @@ pub mod tasks;
 pub mod testing;
 pub mod views;
 pub mod watch;
+pub mod when;
 pub use resources::{parse_folders, parse_link, Content, Folder, UrlOpened};
 
 use std::collections::{HashMap, VecDeque};
