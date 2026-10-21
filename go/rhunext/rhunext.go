@@ -819,7 +819,7 @@ func (e *Ext) Diagnostics(doc Doc, version int64, ds []Diagnostic) error {
 	var body bytes.Buffer
 	for _, d := range ds {
 		msg := strings.ReplaceAll(strings.ReplaceAll(d.Message, "\n", " "), "\r", " ")
-		fmt.Fprintf(&body, "%s %s %s %s\n", pos(d.Range.Start), pos(d.Range.End), d.Severity, msg)
+		fmt.Fprintf(&body, "%s %s %s %s\n", pos(d.Range.Start), pos(d.Range.End), e.diagnosticSeverity(d), msg)
 	}
 	_, err := e.Request("diagnostics", body.Bytes(), itoa(int64(doc)), itoa(version), itoa(int64(len(ds))), itoa(int64(body.Len())))
 	return err

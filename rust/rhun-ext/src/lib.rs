@@ -66,6 +66,7 @@ pub mod notebook;
 pub mod notify;
 pub mod langfeat;
 pub mod picture;
+pub mod present;
 pub mod resources;
 pub mod scm;
 pub mod query;
@@ -111,6 +112,12 @@ pub use langfeat::{
     WorkspaceSymbolsRequest,
 };
 pub use picture::{Color, Picture};
+pub use present::{
+    encode_code_lenses, encode_decorations, encode_folding_ranges, encode_inlay_hints,
+    parse_visible, valid_decoration_name, valid_semantic_name, CodeLens, CommandLink,
+    DecorationRange, FoldingRange, InlayHint, InlayHintPart, LinesRequest, SemanticEdit,
+    SemanticTokens, SemanticTokensRequest, Visible,
+};
 pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
     LogEntry, LogOf, QuickDiffRequest,
@@ -354,6 +361,19 @@ pub enum Feature {
     Urls,
     /// Finding files and searching their text: [`Ext::find_files`], [`Ext::search_text`].
     Files,
+    /// Styled ranges of open documents: [`Ext::decoration_type`], [`Ext::decorate`],
+    /// [`parse_visible`] (protocol 1.1).
+    Decorations,
+    /// Tags in [`Ext::diagnostics`]: faded unnecessary code, struck deprecated code.
+    DiagnosticTags,
+    /// Folding ranges rhun asks for: [`Handler::folding_ranges`].
+    FoldingRanges,
+    /// Semantic tokens: [`Ext::semantic_legend`], [`Handler::semantic_tokens`].
+    SemanticTokens,
+    /// Inlay hints rhun asks for: [`Handler::inlay_hints`].
+    InlayHints,
+    /// Code lens rhun asks for: [`Handler::code_lenses`].
+    CodeLens,
     /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
     /// its requests go through [`Ext::request`].
     Named(&'static str),
@@ -422,6 +442,12 @@ impl Feature {
             Feature::StatusItems => "status-items",
             Feature::Urls => "urls",
             Feature::Files => "files",
+            Feature::Decorations => "decorations",
+            Feature::DiagnosticTags => "diagnostic-tags",
+            Feature::FoldingRanges => "folding-ranges",
+            Feature::SemanticTokens => "semantic-tokens",
+            Feature::InlayHints => "inlay-hints",
+            Feature::CodeLens => "code-lens",
             Feature::Named(n) => n,
         }
     }
@@ -1236,6 +1262,30 @@ pub trait Handler: Send {
     fn document_links(&mut self, _ext: &Ext, _req: &DocRequest) -> Vec<DocumentLink> {
         Vec::new()
     }
+    /// rhun asks for the folding ranges of the active document (folding-ranges): they replace
+    /// rhun's indentation ranges there.
+    fn folding_ranges(&mut self, _ext: &Ext, _req: &DocRequest) -> Vec<FoldingRange> {
+        Vec::new()
+    }
+    /// rhun asks for the active document's semantic tokens (semantic-tokens); `None` says
+    /// nothing.
+    fn semantic_tokens(
+        &mut self,
+        _ext: &Ext,
+        _req: &SemanticTokensRequest,
+    ) -> Option<SemanticTokens> {
+        None
+    }
+    /// rhun asks for the inlay hints of lines around the view (inlay-hints): they replace this
+    /// extension's on those lines.
+    fn inlay_hints(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<InlayHint> {
+        Vec::new()
+    }
+    /// rhun asks for every code lens of the document, titles at least for the lines asked about
+    /// (code-lens).
+    fn code_lenses(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<CodeLens> {
+        Vec::new()
+    }
 }
 
 enum Msg {
@@ -1675,13 +1725,25 @@ impl Ext {
             } else {
                 d.source.replace(' ', "_")
             };
+            // with diagnostic-tags agreed, SEVERITY carries the tags (hint+unnecessary)
+            let mut sev = d.severity.word().to_string();
+            if self.has(Feature::DiagnosticTags) {
+                for (tag, word) in [
+                    (DiagnosticTag::Unnecessary, "+unnecessary"),
+                    (DiagnosticTag::Deprecated, "+deprecated"),
+                ] {
+                    if d.tags.contains(&tag) {
+                        sev.push_str(word);
+                    }
+                }
+            }
             body.push_str(&format!(
                 "{} {} {} {} {} {} {}\n",
                 d.range.start.line,
                 d.range.start.col,
                 d.range.end.line,
                 d.range.end.col,
-                d.severity.word(),
+                sev,
                 src,
                 msg
             ));
@@ -2618,6 +2680,26 @@ impl Ext {
                                 Ok(langfeat::encode_document_links(&h.document_links(self, &r)))
                             })
                         }
+                        "folding-ranges" if self.has(Feature::FoldingRanges) => {
+                            DocRequest::parse(id, &fields).map(|r| {
+                                Ok(present::encode_folding_ranges(&h.folding_ranges(self, &r)))
+                            })
+                        }
+                        "semantic-tokens" | "semantic-tokens-range"
+                            if self.has(Feature::SemanticTokens) =>
+                        {
+                            SemanticTokensRequest::parse(&verb, id, &fields).map(|r| {
+                                Ok(h.semantic_tokens(self, &r)
+                                    .map(|t| t.encode(r.range.is_some()))
+                                    .unwrap_or_default())
+                            })
+                        }
+                        "inlay-hints" if self.has(Feature::InlayHints) => {
+                            LinesRequest::parse(id, &fields)
+                                .map(|r| Ok(present::encode_inlay_hints(&h.inlay_hints(self, &r))))
+                        }
+                        "code-lens" if self.has(Feature::CodeLens) => LinesRequest::parse(id, &fields)
+                            .map(|r| Ok(present::encode_code_lenses(&h.code_lenses(self, &r)))),
                         "symbols" => PosRequest::parse(&fields)
                             .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
                         "actions" => ActionsRequest::parse(&fields).map(|r| {

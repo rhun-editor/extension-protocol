@@ -555,7 +555,7 @@ func (e *Ext) answerMore(h Handler, id int64, verb string, f []string, body []by
 			return EncodeDocumentLinks(l.DocumentLinks(e, DocRequest{doc, version, e.langStream(id).Context})), nil, true
 		}
 	}
-	return nil, nil, false
+	return e.answerPresent(h, id, verb, f)
 }
 
 // countField is a count of 1 to max.
