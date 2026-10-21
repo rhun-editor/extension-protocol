@@ -106,6 +106,43 @@ func TestPresentation(t *testing.T) {
 	s.expect("error 11 unknown no such request")
 }
 
+func (p *presentProbe) Highlights(ext *Ext, req PosRequest) []Highlight {
+	return []Highlight{{Range: rg(2, 9, 2, 10), Write: true}, {Range: rg(3, 13, 3, 14), Read: true}, {Range: rg(4, 2, 4, 1)}}
+}
+
+func (p *presentProbe) Colors(ext *Ext, req LinesRequest) []DocumentColor {
+	return []DocumentColor{{Range: rg(1, 9, 1, 17), R: 255, A: 255}}
+}
+
+func (p *presentProbe) ColorEdit(ext *Ext, req ColorEditRequest) (WorkspaceEdit, error) {
+	return WorkspaceEdit{Files: []FileEdit{{Target: Target{Doc: req.Doc}, Version: req.Version,
+		Edits: []TextEdit{{Range: req.Range, Text: fmt.Sprintf("0x%02x%02x%02x", req.R, req.G, req.B)}}}}}, nil
+}
+
+func (p *presentProbe) InlineComplete(ext *Ext, req InlineRequest) []InlineItem {
+	return []InlineItem{{Range: Range{req.At, req.At}, Text: " // one", Command: &CommandRef{Name: "a"}}, {Range: rg(1, 1, 1, 1)}}
+}
+
+func TestPresentationMore(t *testing.T) {
+	p := &presentProbe{events: make(chan Event, 8)}
+	s := startHost(t, []string{FeatureHighlights, FeatureColors, FeatureInlineComplete}, &morePresent{p})
+	s.expect("hello 1 document-highlights document-colors inline-complete")
+	s.send("0 features document-highlights document-colors inline-complete\n0 ready -\n")
+	s.send("5 highlights 4 7 2 9\n")
+	s.answer(5, "2\n2 9 2 10 write\n3 13 3 14 read\n")
+	s.send("6 colors 4 7 1 40\n")
+	s.answer(6, "1\n1 9 1 17 ff0000ff\n")
+	s.send("7 color-edit 4 7 1 9 1 17 0000ffff\n")
+	s.answer(7, "1\n2 7 1\n#41 9 1 17 8\n0x0000ff")
+	s.send("8 inline-complete 4 7 2 15 invoked\n")
+	s.answer(8, "1\n2 15 2 15 7 12\n // onecommand a 0\n")
+}
+
+// morePresent is presentProbe without its Ready requests
+type morePresent struct{ *presentProbe }
+
+func (m *morePresent) Ready(ext *Ext, project string) {}
+
 func TestPresentationEncoders(t *testing.T) {
 	if b := (&SemanticTokens{Legend: "bad name"}).Encode(false); b != nil {
 		t.Fatalf("bad legend %q", b)

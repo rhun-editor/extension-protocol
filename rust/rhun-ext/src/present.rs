@@ -532,6 +532,195 @@ pub fn encode_code_lenses(lenses: &[CodeLens]) -> Vec<u8> {
     out
 }
 
+// ---- document highlights, colors, inline completion
+
+/// The most ranges a highlights answer holds.
+pub const MAX_HIGHLIGHTS: usize = 5000;
+
+/// A place of the symbol under the caret: `kind` "text", "read" or "write".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Highlight {
+    pub range: Range,
+    pub kind: &'static str,
+}
+
+/// The highlights answer: backwards ranges are left out, as those past [`MAX_HIGHLIGHTS`].
+pub fn encode_highlights(hs: &[Highlight]) -> Vec<u8> {
+    let mut recs = Vec::new();
+    let mut n = 0;
+    for h in hs {
+        if !well_formed(&h.range)
+            || h.range.start.line < 1
+            || h.range.start.col < 1
+            || n == MAX_HIGHLIGHTS
+        {
+            continue;
+        }
+        let kind = match h.kind {
+            "read" | "write" => h.kind,
+            _ => "text",
+        };
+        recs.extend_from_slice(format!("{} {kind}\n", range_fields(&h.range)).as_bytes());
+        n += 1;
+    }
+    let mut out = format!("{n}\n").into_bytes();
+    out.extend_from_slice(&recs);
+    out
+}
+
+/// The most colors an answer holds.
+pub const MAX_COLORS: usize = 10000;
+
+/// A color in a document, `rgba` as 0xRRGGBBAA.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DocumentColor {
+    pub range: Range,
+    pub rgba: u32,
+}
+
+/// The colors answer: backwards ranges are left out, as those past [`MAX_COLORS`].
+pub fn encode_colors(cs: &[DocumentColor]) -> Vec<u8> {
+    let mut recs = Vec::new();
+    let mut n = 0;
+    for c in cs {
+        if !well_formed(&c.range)
+            || c.range.start.line < 1
+            || c.range.start.col < 1
+            || n == MAX_COLORS
+        {
+            continue;
+        }
+        recs.extend_from_slice(format!("{} {:08x}\n", range_fields(&c.range), c.rgba).as_bytes());
+        n += 1;
+    }
+    let mut out = format!("{n}\n").into_bytes();
+    out.extend_from_slice(&recs);
+    out
+}
+
+/// `color-edit DOC VERSION L1 C1 L2 C2 RRGGBBAA`: the user chose a new color for the one at
+/// `range`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColorEditRequest {
+    pub id: u64,
+    pub doc: Doc,
+    pub version: i64,
+    pub range: Range,
+    pub rgba: u32,
+}
+
+impl ColorEditRequest {
+    pub fn parse(id: u64, fields: &[String]) -> Option<ColorEditRequest> {
+        if fields.len() != 7 || fields[6].len() != 8 {
+            return None;
+        }
+        let p = |i| num::<u32>(fields, i).filter(|v| *v >= 1);
+        Some(ColorEditRequest {
+            id,
+            doc: num(fields, 0)?,
+            version: num(fields, 1)?,
+            range: Range {
+                start: Pos {
+                    line: p(2)?,
+                    col: p(3)?,
+                },
+                end: Pos {
+                    line: p(4)?,
+                    col: p(5)?,
+                },
+            },
+            rgba: u32::from_str_radix(&fields[6], 16).ok()?,
+        })
+    }
+}
+
+/// `inline-complete DOC VERSION LINE COL KIND`, `kind` "typed" or "invoked".
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineRequest {
+    pub id: u64,
+    pub doc: Doc,
+    pub version: i64,
+    pub at: Pos,
+    pub kind: String,
+}
+
+impl InlineRequest {
+    pub fn parse(id: u64, fields: &[String]) -> Option<InlineRequest> {
+        if fields.len() != 5 {
+            return None;
+        }
+        Some(InlineRequest {
+            id,
+            doc: num(fields, 0)?,
+            version: num(fields, 1)?,
+            at: Pos {
+                line: num(fields, 2)?,
+                col: num(fields, 3)?,
+            },
+            kind: fields[4].clone(),
+        })
+    }
+}
+
+/// Inline completion limits.
+pub const MAX_INLINE_ITEMS: usize = 8;
+pub const MAX_INLINE_TEXT: usize = 64 << 10;
+
+/// An item: `text` replaces `range` when taken (it shows when the range holds the caret and its
+/// text agrees with `text` around the caret); `command` runs after, `edits` are made with it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineItem {
+    pub range: Range,
+    pub text: String,
+    pub command: Option<CommandLink>,
+    pub edits: Vec<(Range, String)>,
+}
+
+/// The inline-complete answer: items with a backwards range, or an empty text or one over
+/// [`MAX_INLINE_TEXT`], are left out, as those past [`MAX_INLINE_ITEMS`].
+pub fn encode_inline_items(items: &[InlineItem]) -> Vec<u8> {
+    let mut recs = Vec::new();
+    let mut n = 0;
+    for it in items {
+        if !well_formed(&it.range)
+            || it.range.start.line < 1
+            || it.text.is_empty()
+            || it.text.len() > MAX_INLINE_TEXT
+            || n == MAX_INLINE_ITEMS
+        {
+            continue;
+        }
+        let mut extra = it
+            .command
+            .as_ref()
+            .map(CommandLink::encode)
+            .unwrap_or_default();
+        for (r, text) in it.edits.iter().take(MAX_INLAY_EDITS) {
+            if !well_formed(r) {
+                break;
+            }
+            extra.extend_from_slice(
+                format!("edit {} {}\n{text}", range_fields(r), text.len()).as_bytes(),
+            );
+        }
+        recs.extend_from_slice(
+            format!(
+                "{} {} {}\n{}",
+                range_fields(&it.range),
+                it.text.len(),
+                extra.len(),
+                it.text
+            )
+            .as_bytes(),
+        );
+        recs.extend_from_slice(&extra);
+        n += 1;
+    }
+    let mut out = format!("{n}\n").into_bytes();
+    out.extend_from_slice(&recs);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

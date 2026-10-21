@@ -113,10 +113,12 @@ pub use langfeat::{
 };
 pub use picture::{Color, Picture};
 pub use present::{
-    encode_code_lenses, encode_decorations, encode_folding_ranges, encode_inlay_hints,
-    parse_visible, valid_decoration_name, valid_semantic_name, CodeLens, CommandLink,
-    DecorationRange, FoldingRange, InlayHint, InlayHintPart, LinesRequest, SemanticEdit,
-    SemanticTokens, SemanticTokensRequest, Visible,
+    encode_code_lenses, encode_colors, encode_decorations, encode_folding_ranges,
+    encode_highlights, encode_inlay_hints, encode_inline_items, parse_visible,
+    valid_decoration_name, valid_semantic_name, CodeLens, ColorEditRequest, CommandLink,
+    DecorationRange, DocumentColor, FoldingRange, Highlight, InlayHint, InlayHintPart,
+    InlineItem, InlineRequest, LinesRequest, SemanticEdit, SemanticTokens, SemanticTokensRequest,
+    Visible,
 };
 pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
@@ -374,6 +376,12 @@ pub enum Feature {
     InlayHints,
     /// Code lens rhun asks for: [`Handler::code_lenses`].
     CodeLens,
+    /// The caret's symbol's places: [`Handler::highlights`].
+    DocumentHighlights,
+    /// Colors and their edits: [`Handler::colors`], [`Handler::color_edit`].
+    DocumentColors,
+    /// Ghost text after the caret: [`Handler::inline_complete`].
+    InlineComplete,
     /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
     /// its requests go through [`Ext::request`].
     Named(&'static str),
@@ -448,6 +456,9 @@ impl Feature {
             Feature::SemanticTokens => "semantic-tokens",
             Feature::InlayHints => "inlay-hints",
             Feature::CodeLens => "code-lens",
+            Feature::DocumentHighlights => "document-highlights",
+            Feature::DocumentColors => "document-colors",
+            Feature::InlineComplete => "inline-complete",
             Feature::Named(n) => n,
         }
     }
@@ -1284,6 +1295,22 @@ pub trait Handler: Send {
     /// rhun asks for every code lens of the document, titles at least for the lines asked about
     /// (code-lens).
     fn code_lenses(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<CodeLens> {
+        Vec::new()
+    }
+    /// rhun asks for the places of the symbol at the caret (highlights).
+    fn highlights(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Highlight> {
+        Vec::new()
+    }
+    /// rhun asks for the colors of lines around the view (colors).
+    fn colors(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<DocumentColor> {
+        Vec::new()
+    }
+    /// The user chose a new color (color-edit): the edit that writes it, or why not.
+    fn color_edit(&mut self, _ext: &Ext, _req: &ColorEditRequest) -> Result<WorkspaceEdit, String> {
+        Err("cannot change this color".to_string())
+    }
+    /// rhun asks for text to follow the caret (inline-complete).
+    fn inline_complete(&mut self, _ext: &Ext, _req: &InlineRequest) -> Vec<InlineItem> {
         Vec::new()
     }
 }
@@ -2700,6 +2727,23 @@ impl Ext {
                         }
                         "code-lens" if self.has(Feature::CodeLens) => LinesRequest::parse(id, &fields)
                             .map(|r| Ok(present::encode_code_lenses(&h.code_lenses(self, &r)))),
+                        "highlights" if self.has(Feature::DocumentHighlights) && fields.len() == 4 => {
+                            PosRequest::parse(&fields)
+                                .map(|r| Ok(present::encode_highlights(&h.highlights(self, &r))))
+                        }
+                        "colors" if self.has(Feature::DocumentColors) => LinesRequest::parse(id, &fields)
+                            .map(|r| Ok(present::encode_colors(&h.colors(self, &r)))),
+                        "color-edit" if self.has(Feature::DocumentColors) => {
+                            ColorEditRequest::parse(id, &fields).map(|r| match h.color_edit(self, &r) {
+                                Ok(e) => e.encode_with(self.edit_caps()),
+                                Err(why) => Err(("refused", why)),
+                            })
+                        }
+                        "inline-complete" if self.has(Feature::InlineComplete) => {
+                            InlineRequest::parse(id, &fields).map(|r| {
+                                Ok(present::encode_inline_items(&h.inline_complete(self, &r)))
+                            })
+                        }
                         "symbols" => PosRequest::parse(&fields)
                             .map(|r| Ok(lang::encode_symbols(&h.symbols(self, &r)))),
                         "actions" => ActionsRequest::parse(&fields).map(|r| {

@@ -22,6 +22,9 @@ const (
 	FeatureSemanticTokens = "semantic-tokens"
 	FeatureInlayHints     = "inlay-hints"
 	FeatureCodeLens       = "code-lens"
+	FeatureHighlights     = "document-highlights"
+	FeatureColors         = "document-colors"
+	FeatureInlineComplete = "inline-complete"
 )
 
 // ---- decorations
@@ -456,6 +459,168 @@ func EncodeCodeLenses(lenses []CodeLens) []byte {
 	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
 }
 
+// ---- document highlights
+
+// Highlight is a place of the symbol under the caret: Write for a place that writes it.
+type Highlight struct {
+	Range Range
+	Write bool
+	Read  bool
+}
+
+// HighlightProvider answers highlights requests (feature document-highlights, [provides]
+// highlights): the places of what is at req.At (a PosRequest's position).
+type HighlightProvider interface {
+	Highlights(ext *Ext, req PosRequest) []Highlight
+}
+
+// MaxHighlights is the most ranges a highlights answer holds.
+const MaxHighlights = 5000
+
+// EncodeHighlights is the highlights answer. Ranges that run backwards are left out, as those past
+// MaxHighlights.
+func EncodeHighlights(hs []Highlight) []byte {
+	var recs bytes.Buffer
+	n := 0
+	for _, h := range hs {
+		if !wellFormed(h.Range) || h.Range.Start.Line < 1 || h.Range.Start.Col < 1 || n == MaxHighlights {
+			continue
+		}
+		kind := "text"
+		switch {
+		case h.Write:
+			kind = "write"
+		case h.Read:
+			kind = "read"
+		}
+		fmt.Fprintf(&recs, "%s %s\n", rangeFields(h.Range), kind)
+		n++
+	}
+	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
+}
+
+// ---- document colors
+
+// DocumentColor is a color in a document: R, G, B, A 0 to 255.
+type DocumentColor struct {
+	Range      Range
+	R, G, B, A uint8
+}
+
+// ColorEditRequest is "color-edit DOC VERSION L1 C1 L2 C2 RRGGBBAA": the user chose a new color
+// for the color at Range.
+type ColorEditRequest struct {
+	Doc        Doc
+	Version    int64
+	Range      Range
+	R, G, B, A uint8
+	Context    context.Context
+}
+
+// ColorProvider answers colors requests (feature document-colors, [provides] colors) for lines
+// First..Last, and color-edit with the edit that writes the new color in the code's notation.
+type ColorProvider interface {
+	Colors(ext *Ext, req LinesRequest) []DocumentColor
+	ColorEdit(ext *Ext, req ColorEditRequest) (WorkspaceEdit, error)
+}
+
+// MaxColors is the most colors an answer holds.
+const MaxColors = 10000
+
+// EncodeColors is the colors answer. Ranges that run backwards are left out, as those past
+// MaxColors.
+func EncodeColors(cs []DocumentColor) []byte {
+	var recs bytes.Buffer
+	n := 0
+	for _, c := range cs {
+		if !wellFormed(c.Range) || c.Range.Start.Line < 1 || c.Range.Start.Col < 1 || n == MaxColors {
+			continue
+		}
+		fmt.Fprintf(&recs, "%s %02x%02x%02x%02x\n", rangeFields(c.Range), c.R, c.G, c.B, c.A)
+		n++
+	}
+	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
+}
+
+func parseColorEdit(f []string) (ColorEditRequest, bool) {
+	d, v, ok := parseDocVersion(f)
+	if !ok || len(f) != 7 || len(f[6]) != 8 {
+		return ColorEditRequest{}, false
+	}
+	var n [4]int
+	for i := range n {
+		x, err := strconv.Atoi(f[2+i])
+		if err != nil || x < 1 {
+			return ColorEditRequest{}, false
+		}
+		n[i] = x
+	}
+	rgba, err := strconv.ParseUint(f[6], 16, 32)
+	if err != nil {
+		return ColorEditRequest{}, false
+	}
+	return ColorEditRequest{Doc: d, Version: v, Range: Range{Pos{n[0], n[1]}, Pos{n[2], n[3]}},
+		R: uint8(rgba >> 24), G: uint8(rgba >> 16), B: uint8(rgba >> 8), A: uint8(rgba)}, true
+}
+
+// ---- inline completion
+
+// InlineRequest is "inline-complete DOC VERSION LINE COL KIND": Kind typed (a typing pause) or
+// invoked (alt+\).
+type InlineRequest struct {
+	Doc     Doc
+	Version int64
+	At      Pos
+	Kind    string
+	Context context.Context
+}
+
+// InlineItem replaces Range with Text when taken; it shows when Range holds the caret and its
+// text agrees with Text's start and end around the caret. Command runs after it is taken; Edits
+// are made with it.
+type InlineItem struct {
+	Range   Range
+	Text    string
+	Command *CommandRef
+	Edits   []InlayEdit
+}
+
+// InlineCompleter answers inline-complete requests (feature inline-complete, [provides]
+// inline_complete).
+type InlineCompleter interface {
+	InlineComplete(ext *Ext, req InlineRequest) []InlineItem
+}
+
+// Inline completion limits.
+const (
+	MaxInlineItems = 8
+	MaxInlineText  = 64 << 10
+)
+
+// EncodeInlineItems is the inline-complete answer: items whose range runs backwards, or whose
+// text is empty or over MaxInlineText, are left out, as those past MaxInlineItems.
+func EncodeInlineItems(items []InlineItem) []byte {
+	var recs bytes.Buffer
+	n := 0
+	for _, it := range items {
+		if !wellFormed(it.Range) || it.Range.Start.Line < 1 || it.Text == "" || len(it.Text) > MaxInlineText || n == MaxInlineItems {
+			continue
+		}
+		var extra []byte
+		extra = append(extra, it.Command.Encode()...)
+		for i, ed := range it.Edits {
+			if i == MaxInlayEdits || !wellFormed(ed.Range) {
+				break
+			}
+			extra = append(extra, fmt.Sprintf("edit %s %d\n%s", rangeFields(ed.Range), len(ed.Text), ed.Text)...)
+		}
+		fmt.Fprintf(&recs, "%s %d %d\n%s", rangeFields(it.Range), len(it.Text), len(extra), it.Text)
+		recs.Write(extra)
+		n++
+	}
+	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
+}
+
 // ---- answering
 
 func parseLinesRequest(f []string) (LinesRequest, bool) {
@@ -513,6 +678,33 @@ func (e *Ext) answerPresent(h Handler, id int64, verb string, f []string) (out [
 		if req, ok := parseLinesRequest(f); is && ok && e.Has(FeatureCodeLens) {
 			req.Context = e.langStream(id).Context
 			return EncodeCodeLenses(p.CodeLenses(e, req)), nil, true
+		}
+	case "highlights":
+		p, is := h.(HighlightProvider)
+		if req, ok := parsePosRequest(f); is && ok && len(f) == 4 && e.Has(FeatureHighlights) {
+			return EncodeHighlights(p.Highlights(e, req)), nil, true
+		}
+	case "colors":
+		p, is := h.(ColorProvider)
+		if req, ok := parseLinesRequest(f); is && ok && e.Has(FeatureColors) {
+			req.Context = e.langStream(id).Context
+			return EncodeColors(p.Colors(e, req)), nil, true
+		}
+	case "color-edit":
+		p, is := h.(ColorProvider)
+		if req, ok := parseColorEdit(f); is && ok && e.Has(FeatureColors) {
+			req.Context = e.langStream(id).Context
+			w, err := p.ColorEdit(e, req)
+			if err != nil {
+				return nil, &Error{Code: "refused", Text: err.Error()}, true
+			}
+			return e.encodeEdit(w)
+		}
+	case "inline-complete":
+		p, is := h.(InlineCompleter)
+		if pr, ok := parsePosRequest(f); is && ok && len(f) == 5 && e.Has(FeatureInlineComplete) {
+			req := InlineRequest{Doc: pr.Doc, Version: pr.Version, At: pr.At, Kind: f[4], Context: e.langStream(id).Context}
+			return EncodeInlineItems(p.InlineComplete(e, req)), nil, true
 		}
 	}
 	return nil, nil, false
