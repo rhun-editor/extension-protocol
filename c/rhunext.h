@@ -348,6 +348,10 @@ void rx_highlight(rx_pres *l, rx_range r, const char *kind);   /* kind text, rea
 void rx_document_color(rx_pres *l, rx_range r, uint32_t rgba);
 void rx_inline_item(rx_pres *l, rx_range r, const char *text, const char *command, const void *args,
                     size_t args_len);
+/* rx_inline_item with edits made when the item is taken (as Go's InlineItem.Edits and Rust's
+ * InlineItem::edits): nedits ranges and texts (at most 16; a backwards range ends the list) */
+void rx_inline_item_edits(rx_pres *l, rx_range r, const char *text, const char *command, const void *args,
+                          size_t args_len, const rx_range *edit_ranges, const char *const *edit_texts, int nedits);
 void rx_pres_finish(rx_pres *l, rx_buf *out);
 /* semantic tokens: the whole answer into out: data n ints (five per token, LSP's layout with byte
  * columns; MODS 64 bits, bit i the legend's modifier i), or a delta of nedits edits, each then
@@ -560,7 +564,9 @@ typedef struct {
     int (*view_copy)(rx_ext *ext, int64_t view, int cut, rx_buf *out, void *user);
     /* Custom editors (feature "custom-editors", v1.1): editor_open (model "text" or "owned",
      * view the 12a view rhun opened: draw it) returns NULL when ready, else why (the file opens
-     * as text); editor_save appends part `part` of an owned model's bytes to out (at most 4 MB;
+     * as text); rx_editor_source(ext) says, during it, whether rhun opens the file ("file") or
+     * unsaved changes it kept ("backup": read them with rx_editor_read, and the editor starts
+     * dirty); editor_save (kind "save", "saveas" or "backup") appends part `part` of an owned model's bytes to out (at most 4 MB;
      * snapshot at part 0), sets *more when another follows, returns NULL or why; editor_cmd hears
      * "undo", "redo", "revert" (NULL or why); editor_event "changed", "closed", and "path" with
      * the new path. */
@@ -670,7 +676,8 @@ int64_t rx_vshow(rx_ext *ext, const char *name, int focus);
  * "warn", "error" or "-", texts[i] one line each (SGR colors kept); clear removes them all. */
 void rx_patch_log(rx_patch *p, int n, const char *const *sevs, const char *const *texts);
 void rx_patch_clear(rx_patch *p);
-/* a retained view (kind "tree", or "log" with view-log) in an editor tab of its own, shown at once;
+/* a retained view (kind "tree"; "log", "form", "table" or "doc" with view-log, view-form, view-table
+ * or view-doc) in an editor tab of its own, shown at once;
  * its view number, or -1. rx_unview closes it. */
 int64_t rx_vtab(rx_ext *ext, const char *kind, const char *title);
 /* Images (feature "view-images"): a PNG, JPEG or GIF decoded once; its handle, or -1 */
@@ -761,7 +768,9 @@ int rx_tools(rx_ext *ext, rx_tool **tools, int *n);
 int rx_tools_parse(const unsigned char *body, size_t len, rx_tool **tools, int *n);
 void rx_tools_free(rx_tool *tools, int n);
 int rx_tool_call(rx_ext *ext, const char *tool, const void *input, size_t len, rx_buf *out);
-/* Feature agent-prompts: a card in a session; the option picked, from 0, or -1 (cancelled). */
+/* Feature agent-prompts: a card in a session, a prompt line and the options as buttons. Returns
+ * the index into options of the one the user picked, from 0 (the wire's answer counts from 1, so
+ * this is that number minus 1), or -1 (cancelled, or another error: rx_error says which). */
 int rx_agent_ask(rx_ext *ext, const char *sid, const char *prompt, const char *const *options, int n);
 
 /* The features of protocol 1.1's editor model, for rx_run and rx_has. */
@@ -1068,10 +1077,13 @@ int rx_cmd(rx_ext *ext, const char *name);
 int64_t rx_view(rx_ext *ext, const char *title);        /* feature views: a tab; its id */
 int rx_draw(rx_ext *ext, int64_t view, const rx_buf *picture);
 int rx_unview(rx_ext *ext, int64_t view);
-/* a workspace edit (12g; documents write) across documents and files: checked whole, then each
- * document changed as one undo step, files that are not open opened in tabs, unsaved; on an error
- * nothing changes. The edit is used up; one that cannot be sent (past the limits) fails as toobig
- * without being sent. For a language server's workspace/applyEdit. */
+/* a workspace edit (12g; documents write) across documents and files: checked whole; on an error
+ * nothing changes. Without "workspace-edits" each document changes as one undo step and files
+ * that are not open open in tabs, unsaved; with it the edit is one transaction (files that are not
+ * open are edited on disk, it undoes as one step, rx_apply_error says which entry failed), and with
+ * "file-operations" it creates, renames and deletes files. The edit is used up; one that cannot be
+ * sent (past the limits, or using what was not agreed) fails without being sent. For a language
+ * server's workspace/applyEdit. */
 int rx_apply(rx_ext *ext, rx_wedit *edit);
 /* Negotiated save-actions: an intermediate edit for this active save invocation. The edit is
  * used up on every path. Returns the credited native version, or -1 on failure. */
@@ -1523,6 +1535,9 @@ int rx_nb_exec_signal(rx_ext *ext, int64_t exec, const char *signal);
  * it; *len 0 at its end), or NULL; whether an owned model differs from its file. */
 unsigned char *rx_editor_read(rx_ext *ext, rx_doc cdoc, int64_t offset, size_t max, size_t *len);
 int rx_editor_dirty(rx_ext *ext, rx_doc cdoc, int dirty);
+/* editor-open's SOURCE while the editor_open handler runs: "file", or "backup" when rhun opens
+ * unsaved changes it kept (rx_editor_read then reads the backup); "file" outside it. */
+const char *rx_editor_source(const rx_ext *ext);
 /* The command body of rx_nb_exec (and test-exec), onto out. */
 void rx_command_body(rx_buf *out, const char *program, const char *dir, const char *const *args, int argc,
                      const char *const *env, int envc);
@@ -1692,6 +1707,7 @@ struct rx_ext {
     rx_apply_error apply_error;     /* the last rx_apply's refusal */
     int64_t query_id;               /* the request of rhun's being answered, and whether rhun */
     int query_cancelled;            /* withdrew it (query-stream) */
+    const char *editor_source;      /* editor-open's SOURCE while editor_open runs */
 };
 
 void rx_buf_add(rx_buf *b, const void *data, size_t len) {
@@ -7289,11 +7305,24 @@ void rx_document_color(rx_pres *l, rx_range r, uint32_t rgba) {
 
 void rx_inline_item(rx_pres *l, rx_range r, const char *text, const char *command, const void *args,
                     size_t args_len) {
+    rx_inline_item_edits(l, r, text, command, args, args_len, NULL, NULL, 0);
+}
+
+void rx_inline_item_edits(rx_pres *l, rx_range r, const char *text, const char *command, const void *args,
+                          size_t args_len, const rx_range *edit_ranges, const char *const *edit_texts, int nedits) {
     if (!rx_pres_room(l, 8) || !rx_well_formed(r) || r.start.line < 1 || !text || !*text) return;
     size_t tl = strlen(text);
     if (tl > (64u << 10)) return;
     rx_buf ex = {NULL, 0, 0};
     if (command && rx_command_ref(&ex, command, args, args_len) < 0) ex.len = 0;
+    for (int i = 0; i < nedits && i < 16; i++) {
+        if (!rx_well_formed(edit_ranges[i])) break;
+        const char *t = edit_texts[i] ? edit_texts[i] : "";
+        rx_buf_add(&ex, "edit ", 5);
+        rx_add_range(&ex, edit_ranges[i]);
+        rx_buf_fmt(&ex, " %zu\n", strlen(t));
+        rx_buf_add(&ex, t, strlen(t));
+    }
     size_t mark = l->recs.len;
     rx_add_range(&l->recs, r);
     rx_buf_fmt(&l->recs, " %zu %zu\n", tl, ex.len);
@@ -8652,6 +8681,8 @@ unsigned char *rx_editor_read(rx_ext *ext, rx_doc cdoc, int64_t offset, size_t m
     return out;
 }
 
+const char *rx_editor_source(const rx_ext *ext) { return ext->editor_source ? ext->editor_source : "file"; }
+
 int rx_editor_dirty(rx_ext *ext, rx_doc cdoc, int dirty) {
     char line[96];
     snprintf(line, sizeof line, "editor-dirty %lld %d", (long long)cdoc, dirty ? 1 : 0);
@@ -8669,7 +8700,9 @@ static void rx_editor_answer(rx_ext *ext, const rx_handlers *h, void *user, char
         if (!path) abort();
         if (len) memcpy(path, body, len);
         path[len] = 0;
+        ext->editor_source = f[5];
         why = h->editor_open(ext, atoll(f[2]), atoll(f[3]), f[4], path, user);
+        ext->editor_source = NULL;
         free(path);
     } else if (known && strcmp(f[1], "editor-save") == 0 && n == 5) {
         rx_buf part = {NULL, 0, 0};

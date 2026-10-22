@@ -37,7 +37,8 @@ pub struct EditorOpen {
     /// The view rhun opened for the tab: draw it with [`Ext::draw`].
     pub view: View,
     pub model: Model,
-    /// `file` (`backup` when a later revision restores unsaved changes).
+    /// `file`, or `backup` when rhun opens unsaved changes it kept ([`Ext::editor_read`] reads
+    /// them; the editor starts dirty).
     pub source: String,
     pub path: String,
 }

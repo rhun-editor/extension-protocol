@@ -2949,7 +2949,61 @@ static int on_colors(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *u
 static int on_inline(rx_ext *ext, const rx_ask *req, rx_pres *out, void *user) {
     (void)ext, (void)user;
     rx_inline_item(out, (rx_range){req->at, req->at}, " // one", "a", NULL, 0);
+    rx_range er[2] = {R(1, 1, 1, 1), R(3, 5, 3, 1)}; /* the backwards one ends the list */
+    const char *et[2] = {"use x;\n", "y"};
+    rx_inline_item_edits(out, (rx_range){req->at, req->at}, "x", NULL, NULL, 0, er, et, 2);
     return 1;
+}
+
+/* custom editors: editor_open sees editor-open's SOURCE through rx_editor_source */
+static char editor_seen[64];
+static const char *on_editor_open(rx_ext *ext, rx_doc cdoc, int64_t view, const char *model, const char *path,
+                                  void *user) {
+    (void)user;
+    size_t n = strlen(editor_seen);
+    snprintf(editor_seen + n, sizeof editor_seen - n, "%lld %lld %s %s %s;", (long long)cdoc, (long long)view, model,
+             rx_editor_source(ext), path);
+    return NULL;
+}
+static const char *on_editor_save(rx_ext *ext, rx_doc cdoc, const char *kind, int64_t part, rx_buf *out, int *more,
+                                  void *user) {
+    (void)ext, (void)cdoc, (void)part, (void)user;
+    rx_buf_str(out, kind);
+    *more = 0;
+    return NULL;
+}
+static void custom_editor_source(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.editor_open = on_editor_open;
+    h.editor_save = on_editor_save;
+    rx_buf got = {NULL, 0, 0};
+    run("custom-editors", &h,
+        "0 features custom-editors\n0 ready -\n5 editor-open 3 7 owned backup 6\n/a.bin"
+        "6 editor-open 4 8 owned file 6\n/b.bin7 editor-save 3 backup 0\n0 bye\n",
+        &got);
+    same(&got, "hello 1 custom-editors\nok 5 0\nok 6 0\nok 7 8\n0\nbackup");
+    assert(strcmp(editor_seen, "3 7 owned backup /a.bin;4 8 owned file /b.bin;") == 0);
+    rx_buf_free(&got);
+}
+
+/* agent-ask: the wire's answer counts from 1, rx_agent_ask from 0 */
+static int asked[2];
+static void on_ask_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    const char *opts[] = {"Yes", "No"};
+    asked[0] = rx_agent_ask(ext, "s1", "Run the tests?", opts, 2);
+    asked[1] = rx_agent_ask(ext, "s1", "Again?", opts, 2);
+}
+static void agent_ask_index(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_ask_ready;
+    rx_buf got = {NULL, 0, 0};
+    run("agent-prompts", &h, "0 features agent-prompts\n0 ready -\nok 1 2\nerror 2 cancelled closed\n0 bye\n", &got);
+    same(&got, "hello 1 agent-prompts\n1 agent-ask s1 21\nRun the tests?\nYes\nNo2 agent-ask s1 13\nAgain?\nYes\nNo");
+    assert(asked[0] == 1 && asked[1] == -1);
+    rx_buf_free(&got);
 }
 
 /* a modifier past bit 31 (a legend takes 64): in a full answer and in a delta's edit */
@@ -2998,7 +3052,7 @@ static void presentation_requests(void) {
     ok(&want, 10, "3\n1 3 14\nRuncommand run 0\n1 6 10\n2 refstip 4\nused3 0 0\n");
     ok(&want, 11, "2\n2 9 2 10 write\n3 13 3 14 read\n");
     ok(&want, 12, "1\n1 9 1 17 ff0000ff\n");
-    ok(&want, 13, "1\n2 15 2 15 7 12\n // onecommand a 0\n");
+    ok(&want, 13, "2\n2 15 2 15 7 12\n // onecommand a 0\n2 15 2 15 1 22\nxedit 1 1 1 1 7\nuse x;\n");
     same(&got, want.data);
     assert(on_present_ready_calls == 3);
     rx_buf_free(&in);
@@ -3007,6 +3061,8 @@ static void presentation_requests(void) {
 }
 
 int main(void) {
+    custom_editor_source();
+    agent_ask_index();
     retained_patches();
     tables_forms_docs_quick();
     ai_bodies();

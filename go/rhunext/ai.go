@@ -477,7 +477,9 @@ type Prompter interface {
 	AgentStop(ext *Ext, sid string)
 }
 
-// AgentAsk shows a card in a session's conversation: the option the user picked, from 0.
+// AgentAsk shows a card in a session's conversation: a prompt line and the options as buttons.
+// It returns the index into options of the one the user picked, from 0 (the wire's answer counts
+// from 1, so this is that number minus 1), or an *Error with Code "cancelled".
 func (e *Ext) AgentAsk(sid, prompt string, options []string) (int, error) {
 	body := oneLine(prompt)
 	for _, o := range options {

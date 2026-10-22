@@ -2599,3 +2599,53 @@ fn setting_get_reads_a_body() {
     done.join().unwrap().unwrap();
     assert_eq!(seen.lock().unwrap().events[0], "Ok(\"goimports\")");
 }
+
+// The wire's agent-ask answer counts options from 1; agent_ask returns an index from 0.
+#[test]
+fn agent_ask_returns_an_index_from_zero() {
+    struct Asker(Sender<Vec<String>>);
+    impl Handler for Asker {
+        fn ready(&mut self, ext: &Ext, _project: Option<&str>) {
+            let picked = ext.agent_ask("s1", "Run the tests?", &["Yes", "No"]);
+            let again = ext.agent_ask("s1", "Again?", &["Yes", "No"]);
+            self.0
+                .send(vec![format!("{picked:?}"), again.unwrap_err().code])
+                .unwrap();
+        }
+    }
+    let (to_ext, ext_in) = channel();
+    let (ext_out, from_ext) = channel();
+    let (seen, results) = channel();
+    let done = thread::spawn(move || {
+        run_on(
+            ChanReader {
+                rx: ext_in,
+                buf: Vec::new(),
+            },
+            ChanWriter(ext_out),
+            &[Feature::AgentPrompts],
+            Asker(seen),
+        )
+    });
+    let mut host = Host {
+        from_ext: BufReader::new(ChanReader {
+            rx: from_ext,
+            buf: Vec::new(),
+        }),
+        to_ext,
+    };
+    assert_eq!(host.line(), "hello 1 agent-prompts");
+    host.send("0 features agent-prompts\n0 ready -\n");
+    assert_eq!(host.line(), "1 agent-ask s1 21");
+    assert_eq!(host.body(21), "Run the tests?\nYes\nNo");
+    host.send("ok 1 2\n"); // the user picked No
+    assert_eq!(host.line(), "2 agent-ask s1 13");
+    host.body(13);
+    host.send("error 2 cancelled closed\n");
+    assert_eq!(
+        results.recv_timeout(Duration::from_secs(2)).unwrap(),
+        ["Ok(1)", "cancelled"]
+    );
+    host.send("0 bye\n");
+    done.join().unwrap().unwrap();
+}

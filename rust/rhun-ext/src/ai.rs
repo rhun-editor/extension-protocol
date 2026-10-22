@@ -612,7 +612,9 @@ impl Ext {
     }
 
     /// Shows a card in the session's conversation (feature agent-prompts): a prompt line and the
-    /// options as buttons; the option the user picked, from 0, or `cancelled`.
+    /// options as buttons. Returns the index into `options` of the one the user picked, from 0
+    /// (the wire's answer counts from 1, so this is that number minus 1), or the error
+    /// `cancelled`.
     pub fn agent_ask(&self, sid: &str, prompt: &str, options: &[&str]) -> Result<usize, Error> {
         let mut body = prompt.replace('\n', " ");
         for o in options {

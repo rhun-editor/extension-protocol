@@ -534,8 +534,9 @@ func (e *Ext) RevealView(v View, id []byte, how ...string) error {
 	return err
 }
 
-// TabView opens a retained view of kind ("tree", or "log" with view-log) in an editor tab of its
-// own, shown at once; ViewOpen follows with place "tab". Close it with CloseView.
+// TabView opens a retained view of kind ("tree"; "log", "form", "table" or "doc" with view-log,
+// view-form, view-table or view-doc) in an editor tab of its own, shown at once; ViewOpen follows
+// with place "tab". Close it with CloseView.
 func (e *Ext) TabView(kind, title string) (View, error) {
 	r, err := e.Request("vtab", nil, kind, viewLine(title, 80))
 	if err != nil {

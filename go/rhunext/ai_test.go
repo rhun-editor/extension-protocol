@@ -2,6 +2,7 @@ package rhunext
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -142,5 +143,67 @@ func TestProposalsAre12gWhateverWasAgreed(t *testing.T) {
 	ops.Create("/p/b.txt", CreateOptions{})
 	if _, bad := proposalBody("L", "", ops); bad == nil || bad.Code != "unknown" {
 		t.Fatalf("file operations: %v", bad)
+	}
+}
+
+type askProbe struct {
+	got chan string
+}
+
+func (p *askProbe) Ready(e *Ext, project string) {
+	go func() {
+		i, err := e.AgentAsk("s1", "Run the tests?", []string{"Yes", "No"})
+		p.got <- fmt.Sprint(i, err)
+		_, err = e.AgentAsk("s1", "Again?", []string{"Yes", "No"})
+		p.got <- fmt.Sprint(err)
+	}()
+}
+func (p *askProbe) Event(e *Ext, ev Event)                               {}
+func (p *askProbe) Run(e *Ext, command string, doc Doc)                  {}
+func (p *askProbe) AgentPrompt(e *Ext, sid, text string) (string, error) { return sid, nil }
+func (p *askProbe) AgentStop(e *Ext, sid string)                         {}
+
+// The wire's answer counts options from 1; AgentAsk returns an index into options, from 0.
+func TestAgentAskReturnsAnIndexFromZero(t *testing.T) {
+	toExt, hostW := io.Pipe()
+	hostR, fromExt := io.Pipe()
+	p := &askProbe{got: make(chan string, 2)}
+	done := make(chan error, 1)
+	go func() { done <- RunOnWith(toExt, fromExt, io.Discard, []string{FeatureAgentPrompts}, p) }()
+	r := bufio.NewReader(hostR)
+	line := func() string {
+		l, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	if l := line(); l != "hello 1 agent-prompts\n" {
+		t.Fatalf("%q", l)
+	}
+	io.WriteString(hostW, "0 features agent-prompts\n0 ready -\n")
+	if l := line(); l != "1 agent-ask s1 21\n" {
+		t.Fatalf("%q", l)
+	}
+	body := make([]byte, 21)
+	io.ReadFull(r, body)
+	if string(body) != "Run the tests?\nYes\nNo" {
+		t.Fatalf("%q", body)
+	}
+	io.WriteString(hostW, "ok 1 2\n") // the user picked No
+	if got := <-p.got; got != "1 <nil>" {
+		t.Fatalf("%q", got)
+	}
+	if l := line(); l != "2 agent-ask s1 13\n" {
+		t.Fatalf("%q", l)
+	}
+	io.ReadFull(r, make([]byte, 13))
+	io.WriteString(hostW, "error 2 cancelled closed\n")
+	if got := <-p.got; !strings.Contains(got, "cancelled") {
+		t.Fatalf("%q", got)
+	}
+	io.WriteString(hostW, "0 bye\n")
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -284,7 +284,8 @@ func EncodeSymbols(syms []Symbol) []byte {
 }
 
 // OnDisk is a FileEdit's Version for a file that is not open: the edits refer to its text on
-// disk, and rhun opens it.
+// disk. Without feature workspace-edits rhun opens the file in a tab and edits it there, unsaved;
+// with it rhun edits the file on disk (it stays closed).
 const OnDisk int64 = -1
 
 // FileEdit is the edits of one file, all made against one text: the open document at Version,
@@ -323,7 +324,8 @@ func (w *WorkspaceEdit) AddDoc(doc Doc, version int64, edits ...TextEdit) {
 }
 
 // AddFile adds edits for a file by its absolute path: the open document at version, or with
-// OnDisk the file as it is on disk (rhun opens it).
+// OnDisk the file as it is on disk (opened in a tab without workspace-edits, edited on disk with
+// it). AddFileHashed also makes rhun check the file's bytes first.
 func (w *WorkspaceEdit) AddFile(path string, version int64, edits ...TextEdit) {
 	w.Files = append(w.Files, FileEdit{Target: Target{Path: path}, Version: version, Edits: edits})
 }

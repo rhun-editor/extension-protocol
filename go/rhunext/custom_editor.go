@@ -24,7 +24,7 @@ type EditorOpen struct {
 	CDoc   Doc
 	View   View
 	Model  string // "text" or "owned"
-	Source string // "file"
+	Source string // "file", or "backup" when rhun opens unsaved changes it kept (EditorRead reads them; the editor starts dirty)
 	Path   string
 }
 
