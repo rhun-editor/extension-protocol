@@ -224,15 +224,16 @@ type SemanticTokensRequest struct {
 // SemanticEdit replaces Del ints at Start of the previous result's array with Data.
 type SemanticEdit struct {
 	Start, Del int
-	Data       []uint32
+	Data       []uint64
 }
 
 // SemanticTokens is an answer: Result its id ("" for none), Legend the legend its types index.
 // Data is LSP's five ints per token (DLINE DCOL LEN TYPE MODS, byte columns, the first DLINE from
-// line 1); with Edits set instead the answer is a delta against Prev.
+// line 1; MODS 64 bits, bit i the legend's modifier i); with Edits set instead the answer is a
+// delta against Prev.
 type SemanticTokens struct {
 	Result, Legend string
-	Data           []uint32
+	Data           []uint64
 	Edits          []SemanticEdit
 	Delta          bool
 }
@@ -243,12 +244,12 @@ type SemanticTokensProvider interface {
 	SemanticTokens(ext *Ext, req SemanticTokensRequest) *SemanticTokens
 }
 
-func appendInts(b *bytes.Buffer, data []uint32) {
+func appendInts(b *bytes.Buffer, data []uint64) {
 	for i, v := range data {
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		b.WriteString(strconv.FormatUint(uint64(v), 10))
+		b.WriteString(strconv.FormatUint(v, 10))
 	}
 }
 

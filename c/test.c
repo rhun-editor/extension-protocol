@@ -2897,7 +2897,7 @@ static int on_folding(rx_ext *ext, const rx_doc_ask *req, rx_pres *out, void *us
 
 static int on_tokens(rx_ext *ext, const rx_tokens_ask *req, rx_buf *out, void *user) {
     (void)ext, (void)user;
-    static const uint32_t data[] = {0, 3, 4, 0, 0, 1, 8, 1, 1, 1}, one[] = {1};
+    static const uint64_t data[] = {0, 3, 4, 0, 0, 1, 8, 1, 1, 1}, one[] = {1};
     if (strcmp(req->prev, "r1") == 0) {
         rx_semantic_delta(out, "r2", "ra", 1);
         rx_semantic_edit(out, 3, 1, one, 1);
@@ -2950,6 +2950,19 @@ static int on_inline(rx_ext *ext, const rx_ask *req, rx_pres *out, void *user) {
     (void)ext, (void)user;
     rx_inline_item(out, (rx_range){req->at, req->at}, " // one", "a", NULL, 0);
     return 1;
+}
+
+/* a modifier past bit 31 (a legend takes 64): in a full answer and in a delta's edit */
+static void semantic_mods_64(void) {
+    const uint64_t data[] = {0, 3, 4, 0, (uint64_t)1 << 40 | (uint64_t)1 << 63}, edit[] = {(uint64_t)1 << 32};
+    rx_buf b = {NULL, 0, 0};
+    rx_semantic_full(&b, NULL, "ra", data, 5, 0);
+    same(&b, "- ra full 1\n0 3 4 0 9223373136366403584");
+    b.len = 0;
+    rx_semantic_delta(&b, "r2", "ra", 1);
+    rx_semantic_edit(&b, 4, 1, edit, 1);
+    same(&b, "r2 ra delta 1\n4 1 1\n4294967296\n");
+    rx_buf_free(&b);
 }
 
 static void presentation_requests(void) {
@@ -3035,6 +3048,7 @@ int main(void) {
     tests_feature();
     langfeat_requests();
     presentation_requests();
+    semantic_mods_64();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");

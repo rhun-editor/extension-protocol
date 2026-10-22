@@ -30,12 +30,12 @@ func (p *presentProbe) FoldingRanges(ext *Ext, req DocRequest) []FoldingRange {
 
 func (p *presentProbe) SemanticTokens(ext *Ext, req SemanticTokensRequest) *SemanticTokens {
 	if req.Prev == "r1" {
-		return &SemanticTokens{Result: "r2", Legend: "ra", Delta: true, Edits: []SemanticEdit{{Start: 3, Del: 1, Data: []uint32{1}}}}
+		return &SemanticTokens{Result: "r2", Legend: "ra", Delta: true, Edits: []SemanticEdit{{Start: 3, Del: 1, Data: []uint64{1}}}}
 	}
 	if req.Range {
-		return &SemanticTokens{Legend: "ra", Data: []uint32{uint32(req.First - 1), 0, 2, 0, 0}}
+		return &SemanticTokens{Legend: "ra", Data: []uint64{uint64(req.First - 1), 0, 2, 0, 0}}
 	}
-	return &SemanticTokens{Result: "r1", Legend: "ra", Data: []uint32{0, 3, 4, 0, 0, 1, 8, 1, 1, 1}}
+	return &SemanticTokens{Result: "r1", Legend: "ra", Data: []uint64{0, 3, 4, 0, 0, 1, 8, 1, 1, 1}}
 }
 
 func (p *presentProbe) InlayHints(ext *Ext, req LinesRequest) []InlayHint {
@@ -147,8 +147,17 @@ func TestPresentationEncoders(t *testing.T) {
 	if b := (&SemanticTokens{Legend: "bad name"}).Encode(false); b != nil {
 		t.Fatalf("bad legend %q", b)
 	}
-	if b := (&SemanticTokens{Legend: "ra", Data: []uint32{1, 2, 3}}).Encode(false); b != nil {
+	if b := (&SemanticTokens{Legend: "ra", Data: []uint64{1, 2, 3}}).Encode(false); b != nil {
 		t.Fatalf("partial token %q", b)
+	}
+	// a modifier past bit 31 (the legend takes 64), in a full answer and in a delta's edit
+	high := uint64(1)<<40 | 1<<63
+	if b := string((&SemanticTokens{Legend: "ra", Data: []uint64{0, 3, 4, 0, high}}).Encode(false)); b != "- ra full 1\n0 3 4 0 9223373136366403584" {
+		t.Fatalf("64-bit MODS %q", b)
+	}
+	d := &SemanticTokens{Result: "r2", Legend: "ra", Delta: true, Edits: []SemanticEdit{{Start: 4, Del: 1, Data: []uint64{1 << 32}}}}
+	if b := string(d.Encode(false)); b != "r2 ra delta 1\n4 1 1\n4294967296\n" {
+		t.Fatalf("64-bit edit %q", b)
 	}
 	long := strings.Repeat("x", 200)
 	b := EncodeInlayHints([]InlayHint{{At: Pos{1, 1}, Parts: []InlayHintPart{{Label: long}, {Label: "y"}}}})

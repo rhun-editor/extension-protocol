@@ -287,17 +287,18 @@ impl SemanticTokensRequest {
 pub struct SemanticEdit {
     pub start: u32,
     pub del: u32,
-    pub data: Vec<u32>,
+    pub data: Vec<u64>,
 }
 
 /// An answer: `result` its id (empty for none), `legend` the legend its types index. `data` is
 /// LSP's five ints per token (DLINE DCOL LEN TYPE MODS, byte columns, the first DLINE from line
-/// 1); with `edits` set (`delta`) the answer is a delta against the request's `prev`.
+/// 1; MODS 64 bits, bit i the legend's modifier i); with `edits` set (`delta`) the answer is a
+/// delta against the request's `prev`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SemanticTokens {
     pub result: String,
     pub legend: String,
-    pub data: Vec<u32>,
+    pub data: Vec<u64>,
     pub delta: bool,
     pub edits: Vec<SemanticEdit>,
 }
@@ -310,7 +311,7 @@ pub fn valid_semantic_name(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-')
 }
 
-fn push_ints(b: &mut Vec<u8>, data: &[u32]) {
+fn push_ints(b: &mut Vec<u8>, data: &[u64]) {
     for (i, v) in data.iter().enumerate() {
         if i > 0 {
             b.push(b' ');
@@ -789,6 +790,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(d.encode(false), b"r2 ra delta 1\n3 1 1\n1\n");
+        // a modifier past bit 31 (a legend takes 64), in a full answer and in a delta's edit
+        let high = SemanticTokens {
+            legend: "ra".into(),
+            data: vec![0, 3, 4, 0, 1 << 40 | 1 << 63],
+            ..Default::default()
+        };
+        assert_eq!(
+            high.encode(false),
+            b"- ra full 1\n0 3 4 0 9223373136366403584"
+        );
+        let high = SemanticTokens {
+            result: "r2".into(),
+            legend: "ra".into(),
+            delta: true,
+            edits: vec![SemanticEdit {
+                start: 4,
+                del: 1,
+                data: vec![1 << 32],
+            }],
+            ..Default::default()
+        };
+        assert_eq!(high.encode(false), b"r2 ra delta 1\n4 1 1\n4294967296\n");
         assert!(SemanticTokens {
             legend: "bad name".into(),
             ..Default::default()

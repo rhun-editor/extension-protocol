@@ -350,10 +350,11 @@ void rx_inline_item(rx_pres *l, rx_range r, const char *text, const char *comman
                     size_t args_len);
 void rx_pres_finish(rx_pres *l, rx_buf *out);
 /* semantic tokens: the whole answer into out: data n ints (five per token, LSP's layout with byte
- * columns), or a delta of nedits edits, each then appended with rx_semantic_edit */
-void rx_semantic_full(rx_buf *out, const char *result, const char *legend, const uint32_t *data, size_t n, int range);
+ * columns; MODS 64 bits, bit i the legend's modifier i), or a delta of nedits edits, each then
+ * appended with rx_semantic_edit */
+void rx_semantic_full(rx_buf *out, const char *result, const char *legend, const uint64_t *data, size_t n, int range);
 void rx_semantic_delta(rx_buf *out, const char *result, const char *legend, int nedits);
-void rx_semantic_edit(rx_buf *out, uint32_t start, uint32_t del, const uint32_t *data, size_t n);
+void rx_semantic_edit(rx_buf *out, uint32_t start, uint32_t del, const uint64_t *data, size_t n);
 /* the answers, built with rx_selection_group, rx_hierarchy_add, rx_call_add, rx_workspace_symbol
  * and rx_document_link (below); the fields are the builders' own (at and npos, the request's positions, and
  * roots are set for you in the handlers) */
@@ -7304,20 +7305,20 @@ void rx_inline_item(rx_pres *l, rx_range r, const char *text, const char *comman
 
 void rx_pres_finish(rx_pres *l, rx_buf *out) { rx_records_finish(&l->recs, &l->n, &l->full, out); }
 
-void rx_semantic_full(rx_buf *out, const char *result, const char *legend, const uint32_t *data, size_t n, int range) {
+void rx_semantic_full(rx_buf *out, const char *result, const char *legend, const uint64_t *data, size_t n, int range) {
     if (n % 5 || n / 5 > 200000) return;
     rx_buf_fmt(out, "%s %s %s %zu\n", result && *result ? result : "-", legend ? legend : "", range ? "range" : "full",
                n / 5);
-    for (size_t i = 0; i < n; i++) rx_buf_fmt(out, i ? " %u" : "%u", (unsigned)data[i]);
+    for (size_t i = 0; i < n; i++) rx_buf_fmt(out, i ? " %llu" : "%llu", (unsigned long long)data[i]);
 }
 
 void rx_semantic_delta(rx_buf *out, const char *result, const char *legend, int nedits) {
     rx_buf_fmt(out, "%s %s delta %d\n", result && *result ? result : "-", legend ? legend : "", nedits);
 }
 
-void rx_semantic_edit(rx_buf *out, uint32_t start, uint32_t del, const uint32_t *data, size_t n) {
+void rx_semantic_edit(rx_buf *out, uint32_t start, uint32_t del, const uint64_t *data, size_t n) {
     rx_buf_fmt(out, "%u %u %zu\n", (unsigned)start, (unsigned)del, n);
-    for (size_t i = 0; i < n; i++) rx_buf_fmt(out, i ? " %u" : "%u", (unsigned)data[i]);
+    for (size_t i = 0; i < n; i++) rx_buf_fmt(out, i ? " %llu" : "%llu", (unsigned long long)data[i]);
     if (n) rx_buf_add(out, "\n", 1);
 }
 
