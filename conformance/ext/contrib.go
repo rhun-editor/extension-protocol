@@ -46,7 +46,7 @@ func readINI(data []byte) []iniLine {
 
 var menuLocations = map[string]bool{"editor": true, "explorer": true, "tab": true, "terminal": true, "extension": true,
 	"editor_title": true, "view_title": true, "view_item": true, "view_item_inline": true,
-	"history_commit": true, "history_file": true, "scm_resource": true, "scm_group": true}
+	"history_commit": true, "history_file": true, "scm_resource": true, "scm_group": true, "scm_title": true}
 
 var langKeys = map[string]bool{"brackets": true, "autoclose": true, "autoclose_code": true, "surround": true,
 	"indent_open": true, "indent_close": true, "indent_middle": true, "indent_dedent_after": true,

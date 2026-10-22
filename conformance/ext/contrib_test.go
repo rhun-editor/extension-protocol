@@ -30,6 +30,8 @@ a.when = resourceExtt == .rs
 b.order = soon
 [menu.nowhere]
 c.command = go
+[menu.scm_title]
+e.command = go
 [submenu.more]
 title = More
 d.submenu = deeper
@@ -88,7 +90,7 @@ go = nothing
 			t.Errorf("no failure %q in:\n%s", want, all)
 		}
 	}
-	for _, unwanted := range []string{"ctrl+k ctrl+g", "] y:", "[context] mode", "[icons] logo", "continue"} {
+	for _, unwanted := range []string{"ctrl+k ctrl+g", "] y:", "[context] mode", "[icons] logo", "continue", "scm_title"} {
 		if strings.Contains(all, unwanted) {
 			t.Errorf("a failure for %q:\n%s", unwanted, all)
 		}

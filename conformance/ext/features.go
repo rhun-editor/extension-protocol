@@ -21,19 +21,46 @@ import (
 	"github.com/rhun-editor/extension-protocol/go/rhunext"
 )
 
+// knownFeatures are the features rhun 0.18's hello agrees (src/rhun.inc FEATURE_LIST), in the order
+// it says them back
 var knownFeatures = []string{"views", "complete", "signature", "definition", "references", "symbols", "actions", "rename", "format", "commands", "save-actions", "snippets", "snippet-variants", "snippet-transforms",
+	"workspace_watch",                                // watch-workspace: present.go
 	"git-data", "commit-message", "quickdiff", "scm", // source control: scm.go, scmpanel.go
 	"view-tree", "view-log", "notify", "progress", "view-keys", "view-images", // retained views, notifications, progress: views.go, notify.go
+	"view-form", "view-table", "view-doc", "quick-input", "markdown", // views group: views.go, quick.go
 	"idle", "secrets", "uris", "urls", "files", "scoped-settings", "workspace-folders", // resources: resources.go
 	"agents", "edit-review", "tools", "agent-prompts", // ai: ai.go
 	"workspace-edits", "file-operations", "selections", "reveal", "diff", "linked-editing", // wsedit.go, editor.go
 	"notebooks", "custom-editors", // notebooks: notebook.go
 	"query-stream", "provider-scope", "complete-items", "signature-list", "navigation", "prepare-rename", "partial-format", "code-actions", // language features: query.go, actions.go
 	"hover-query", "selection-ranges", "hierarchy", "workspace-symbols", "document-links", "file-diagnostics", // langfeat.go
+	"decorations", "diagnostic-tags", // present.go
+	"folding-ranges", "semantic-tokens", "inlay-hints", "code-lens", "document-highlights", "document-colors", "inline-complete", // presentation providers: rhun asks them (present.go)
 	"command-args", "context-keys", "status-items", // commands.go
 	"tests",              // test controllers: tests.go
 	"terminals", "tasks", // terminals and tasks: terminals.go (tasks only with terminals)
 	"debug"} // debuggers: debug.go
+
+// featureNeeds are the features rhun agrees only together with another (extproto.s, wsedit.s
+// ws_features_agreed, viewpic.s views_features_agreed)
+var featureNeeds = map[string]string{"tasks": "terminals", "file-operations": "workspace-edits",
+	"view-log": "view-tree", "view-form": "view-tree", "view-table": "view-tree", "view-doc": "view-tree",
+	"view-keys": "views", "view-images": "views"}
+
+// agreedFeatures are the features rhun agrees of those hello asked for, in its order
+func agreedFeatures(asked map[string]bool) []string {
+	var said []string
+	for _, f := range knownFeatures {
+		if !asked[f] {
+			continue
+		}
+		if dep, ok := featureNeeds[f]; ok && !asked[dep] {
+			continue
+		}
+		said = append(said, f)
+	}
+	return said
+}
 
 // agree records the features hello named that rhun knows, and says them back before ready.
 func (h *host) agree(hello string) {
@@ -43,16 +70,9 @@ func (h *host) agree(hello string) {
 		asked[f] = true
 	}
 	h.asked = asked
-	var said []string
-	for _, f := range knownFeatures {
-		if f == "tasks" && !asked["terminals"] {
-			continue
-		}
-		// file-operations is agreed only together with workspace-edits
-		if asked[f] && (f != "file-operations" || asked["workspace-edits"]) {
-			h.features[f] = true
-			said = append(said, f)
-		}
+	said := agreedFeatures(asked)
+	for _, f := range said {
+		h.features[f] = true
 	}
 	if len(said) > 0 {
 		h.write("0 features " + strings.Join(said, " ") + "\n")

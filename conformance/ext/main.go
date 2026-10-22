@@ -292,6 +292,7 @@ type host struct {
 	withdrawn   map[int64]bool    // rhun's requests it gave up on: a late answer is dropped
 	lastAsk     int64             // the last request asked
 	scm         scmState          // version control panels: scmpanel.go
+	pres        presState         // workspace_watch, decorations, semantic legends: present.go
 	contextKeys map[string]bool   // context-keys: set-context keys (true: set, false: removed)
 	statusItems map[string]bool   // status-items: runtime items
 	tests       *testState        // feature tests (tests.go)
@@ -507,7 +508,8 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"run-command": true, "status-item": true, // commands.go
 	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true, // test controllers: tests.go
 	"terminal-open": true, "terminal-input": true, "tasks-set": true, "task-run": true, // terminals and tasks: terminals.go
-	"debug-start": true} // debuggers: debug.go
+	"debug-start":     true,                                            // debuggers: debug.go
+	"decoration-type": true, "decorate": true, "semantic-legend": true} // decorations, semantic tokens: present.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -690,6 +692,9 @@ func (h *host) handle(msg message) {
 		return msg.body, true
 	}
 	if h.resourcesRequest(verb, id, args, body, reply, rerr) {
+		return
+	}
+	if h.presentRequest(verb, id, args, body, need, getDoc, reply, rerr) {
 		return
 	}
 	switch verb {
@@ -995,10 +1000,8 @@ func (h *host) handle(msg message) {
 				rerr("badpos", why)
 				return
 			}
-			switch f[4] {
-			case "error", "warning", "info", "hint":
-			default:
-				h.fail("request grammar", fmt.Sprintf("diagnostics: severity %q", f[4]))
+			if !diagSeverity(f[4], h.features["diagnostic-tags"]) {
+				h.fail("request grammar", fmt.Sprintf("diagnostics: severity %q (SEVERITY+TAG only with diagnostic-tags)", f[4]))
 				rerr("syntax", "cannot parse a line of the body")
 				return
 			}
