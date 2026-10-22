@@ -26,6 +26,9 @@ var providesKeys = map[string]string{
 	"selection_ranges": "selection-ranges", "call_hierarchy": "hierarchy", "type_hierarchy": "hierarchy",
 	"workspace_symbols": "workspace-symbols", "range_format": "partial-format", "type_format": "partial-format",
 	"type_format.triggers": "partial-format", "document_links": "document-links",
+	"folding": "folding-ranges", "semantic_tokens": "semantic-tokens", "inlay_hints": "inlay-hints",
+	"code_lens": "code-lens", "highlights": "document-highlights", "colors": "document-colors",
+	"inline_complete": "inline-complete",
 }
 
 // providesKeyProblem says why a [provides] entry is not one rhun reads, or ""

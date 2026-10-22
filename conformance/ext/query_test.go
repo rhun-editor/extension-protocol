@@ -10,7 +10,8 @@ import (
 func TestProvidesKeys(t *testing.T) {
 	for _, k := range []string{"complete", "complete.triggers", "save_actions", "hover", "declaration", "type_definition",
 		"implementation", "selection_ranges", "call_hierarchy", "type_hierarchy", "workspace_symbols", "range_format",
-		"type_format", "document_links"} {
+		"type_format", "document_links", "folding", "semantic_tokens", "inlay_hints", "code_lens", "highlights",
+		"colors", "inline_complete"} {
 		want(t, k, providesKeyProblem(k, "*.go"), "")
 	}
 	want(t, "triggers", providesKeyProblem("type_format.triggers", "; } newline"), "")
