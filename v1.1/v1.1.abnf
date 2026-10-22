@@ -480,9 +480,9 @@ t-command    = len SP len SP num SP num LF
 
 ; Custom editors (v1.1.md, "Feature: custom-editors"). Answers carry "ok" SP id SP len (LEN 0 for none).
 feature      =/ "custom-editors"
-host-request =/ id SP "editor-open" SP doc SP num SP ( "text" / "owned" ) SP "file" SP len
+host-request =/ id SP "editor-open" SP doc SP num SP ( "text" / "owned" ) SP ( "file" / "backup" ) SP len
               ; CDOC VIEW MODEL SOURCE, then the path
-host-request =/ id SP "editor-save" SP doc SP ( "save" / "saveas" ) SP num
+host-request =/ id SP "editor-save" SP doc SP ( "save" / "saveas" / "backup" ) SP num
               ; answered with a body: ( "0" / "1" ) LF, then the part's bytes
 host-request =/ id SP ( "editor-undo" / "editor-redo" / "editor-revert" ) SP doc
 request      =/ id SP "editor-read" SP doc SP num SP num   ; CDOC OFFSET MAX
