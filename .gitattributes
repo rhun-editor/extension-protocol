@@ -1,0 +1,2 @@
+# the shared test vectors are compared byte for byte: LF on every system
+v1.1/*.txt text eol=lf

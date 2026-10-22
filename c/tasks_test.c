@@ -28,7 +28,7 @@ int main(void) {
     char row[2048], got[2048];
     int n = 0;
     while (fgets(row, sizeof row, f)) {
-        row[strcspn(row, "\n")] = 0;
+        row[strcspn(row, "\r\n")] = 0;   /* a Windows checkout may give CRLF line ends */
         if (row[0] == '#' || !row[0]) continue;
         char *t1 = strchr(row, '\t'), *t2 = strrchr(row, '\t');
         assert(t1 && t2 && t1 != t2);

@@ -49,7 +49,9 @@ func TestPatternVectors(t *testing.T) {
 		t.Fatal(err)
 	}
 	n := 0
-	for _, row := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+	// a Windows checkout may turn the file's line ends into CRLF
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	for _, row := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
 		if strings.HasPrefix(row, "#") {
 			continue
 		}
