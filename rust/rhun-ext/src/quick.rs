@@ -206,11 +206,7 @@ impl Step {
         let w = if flags.is_empty() {
             "-".to_string()
         } else {
-            flags
-                .iter()
-                .map(|f| f.word())
-                .collect::<Vec<_>>()
-                .join(" ")
+            flags.iter().map(|f| f.word()).collect::<Vec<_>>().join(" ")
         };
         record(&mut self.out, &format!("flags {w}"), b"");
         self

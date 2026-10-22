@@ -96,14 +96,24 @@ pub use actions::{
     encode_code_actions, Action, ActionResolveRequest, CodeActionsRequest, CommandRef,
     PreparedRename, RangeFormatRequest, ResolvedAction, TypeFormatRequest,
 };
+pub use ai::{
+    encode_sessions, encode_tools, parse_tools, sid_ok, Message, ProposalEvent, Refusal, Role,
+    Session, SessionState, ToolCall, ToolInfo, ToolInput, Transcript,
+};
+pub use auth::{Loopback, Pkce};
 pub use commands::{command_ref, CallRequest, Invocation, MenuTarget, StatusItem};
 pub use complete::{
     CompleteRequest, CompletionItem, CompletionList, Kind, Resolution, ResolveRequest,
     SignatureHelp, SignatureInfo, SignatureList, SignatureRequest,
 };
+pub use custom_editor::{part_of, save_part, CDoc, EditorOpen, EditorSave, Model, SaveKind};
 pub use debug::{DebugConfig, DebugEnded, DebugResolve, DebugValue, Resolved};
 pub use editor::{Linked, LinkedRequest, Reveal, Selection, Selections, Show};
 pub use edits::{Change, Located, OrderError};
+pub use files::{
+    parse_found_files, parse_found_paths, FileQuery, Finished, FoundFile, FoundPath, Pattern,
+    SearchMatch,
+};
 pub use lang::{
     fnv1a64, ActionsRequest, CodeAction, Create, Delete, Entry, FileEdit, FileOp, FormatRequest,
     Location, PosRequest, Rename, RenameRequest, SaveActionsRequest, Symbol, SymbolKind, Target,
@@ -115,6 +125,10 @@ pub use langfeat::{
     valid_diagnostic_id, Call, DiagnosticTag, DocRequest, DocumentLink, HierarchyItem, Hover,
     HoverRequest, LinkTarget, RelatedInfo, SelectionRangesRequest, WorkspaceSymbol,
     WorkspaceSymbolsRequest,
+};
+pub use notebook::{
+    Cell, CellId, CellKind, Command as NbCommand, ExecId, ExecSignal, Item, KernelState, NbId,
+    NbOpen, NbRun, NbSave, Notebook, Output, OutputKind, OutputOp, RunId, RunState,
 };
 pub use picture::{Color, Picture};
 pub use present::{
@@ -134,6 +148,14 @@ pub use snippet::{Field, PreparedSnippet, SnippetChoice, SnippetProgram};
 pub use snippet_context::SnippetSnapshot;
 pub use snippet_transform::{
     CompiledSnippetTransform, SnippetFieldTransform, SnippetTransformProgramError,
+};
+// tasks::Reveal and tasks::Command are TaskReveal and TaskCommand here: the root's Reveal is
+// editor::Reveal (feature reveal), and notebook's Command is NbCommand.
+pub use tasks::{
+    builtin_matcher, check_matcher, check_pattern, encode_task_list, match_pattern,
+    parse_definition, parse_screen, parse_task_list, parse_terminal_event, task_id_ok,
+    Command as TaskCommand, Definition, Matcher, Program, Reveal as TaskReveal, Screen, Task, Term,
+    TerminalEvent, TerminalSpec,
 };
 pub use testing::{
     expected_actual, unquote, CoverageRange, FileCoverage, TestCommand, TestItem, TestKind,
@@ -2244,8 +2266,9 @@ impl Ext {
         Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
-    /// A retained view (`tree`, or `log` with [`Feature::ViewLog`]) in an editor tab of its own,
-    /// shown at once; [`Handler::view_open`] follows with place `tab`. Close it with
+    /// A retained view (`tree`; `log`, `form`, `table` or `doc` with [`Feature::ViewLog`],
+    /// [`Feature::ViewForm`], [`Feature::ViewTable`] or [`Feature::ViewDoc`]) in an editor tab of
+    /// its own, shown at once; [`Handler::view_open`] follows with place `tab`. Close it with
     /// [`Ext::unview`].
     pub fn vtab(&self, kind: &str, title: &str) -> Result<View, Error> {
         let rep = self.request(&format!("vtab {kind} {}", views_title(title)), None)?;
