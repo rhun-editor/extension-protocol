@@ -326,7 +326,7 @@ fn back(p: Pos, oe: Pos, pe: Pos) -> Pos {
 /// touches text `base` put in, or spans text it removed, cannot be one of them.
 pub(crate) fn compose(base: &[TextEdit], next: &[TextEdit]) -> Result<Vec<TextEdit>, String> {
     let mut b: Vec<&TextEdit> = base.iter().collect();
-    b.sort_by(|x, y| (x.range.start, x.range.end).cmp(&(y.range.start, y.range.end)));
+    b.sort_by_key(|x| (x.range.start, x.range.end));
     for w in b.windows(2) {
         if w[0].range.end > w[1].range.start {
             return Err("two edits overlap".into());
@@ -400,7 +400,7 @@ pub(crate) fn compose(base: &[TextEdit], next: &[TextEdit]) -> Result<Vec<TextEd
             },
         ));
     }
-    all.sort_by(|x, y| (x.0, x.1, x.2, x.3, x.4).cmp(&(y.0, y.1, y.2, y.3, y.4)));
+    all.sort_by_key(|x| (x.0, x.1, x.2, x.3, x.4));
     Ok(all.into_iter().map(|x| x.5).collect())
 }
 
@@ -428,7 +428,7 @@ mod tests {
             o + p.col as usize - 1
         };
         let mut es: Vec<&TextEdit> = edits.iter().collect();
-        es.sort_by(|x, y| (x.range.start, x.range.end).cmp(&(y.range.start, y.range.end)));
+        es.sort_by_key(|x| (x.range.start, x.range.end));
         let mut out = text.to_string();
         for e in es.iter().rev() {
             out.replace_range(off(e.range.start)..off(e.range.end), &e.text);

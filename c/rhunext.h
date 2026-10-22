@@ -7078,8 +7078,8 @@ static int rx_url(const char *s, size_t max) {
     size_t n = strlen(s), p = 0;
     char low[9] = {0};
     for (size_t i = 0; i < 8 && i < n; i++) low[i] = (char)(s[i] >= 'A' && s[i] <= 'Z' ? s[i] + 32 : s[i]);
-    if (strncmp(low, "https://", 8) == 0) p = 8;
-    else if (strncmp(low, "http://", 7) == 0) p = 7;
+    if (memcmp(low, "https://", 8) == 0) p = 8;
+    else if (memcmp(low, "http://", 7) == 0) p = 7;
     if (!p || n == p || n > max) return 0;
     for (size_t i = 0; i < n; i++)
         if ((unsigned char)s[i] <= ' ' || s[i] == 0x7f) return 0;
