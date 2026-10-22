@@ -552,7 +552,8 @@ type wsGroup struct {
 
 // parseWorkspaceEdit reads a workspace edit (12g) as rhun does before it looks at any document or
 // file (ws_apply): the grammar and the caps. A refused edit has the code rhun answers an apply
-// request with (syntax or toobig) and the reason.
+// request with (syntax or toobig) and the reason; what only protocol 1.1's transaction grammar has
+// (an fnv1a64 PRE, a file operation, a label or confirm record) is named as such.
 func parseWorkspaceEdit(b []byte) ([]wsGroup, string, string) {
 	bad := func(code, format string, a ...any) ([]wsGroup, string, string) {
 		return nil, code, fmt.Sprintf(format, a...)
@@ -580,6 +581,9 @@ func parseWorkspaceEdit(b []byte) ([]wsGroup, string, string) {
 			return bad("syntax", "file %d has no header line (N says %d)", g, n)
 		}
 		w := c.fields(l)
+		if len(w) > 0 && opFlags[w[0]] != nil {
+			return bad("syntax", "file %d is a %s entry, a file operation of protocol 1.1 (features workspace-edits and file-operations): %s", g, w[0], twelveG)
+		}
 		if len(w) != 3 {
 			return bad("syntax", "file %d's header %q is not PATH_LEN VERSION M", g, l)
 		}
@@ -588,7 +592,9 @@ func parseWorkspaceEdit(b []byte) ([]wsGroup, string, string) {
 			return bad("syntax", "file %d: PATH_LEN %q is not 1 to 4096", g, w[0])
 		}
 		version := int64(-1)
-		if v := w[1]; v != "-" {
+		if v := w[1]; strings.HasPrefix(v, "fnv1a64:") {
+			return bad("syntax", "file %d: PRE %q is a hash precondition of protocol 1.1 (feature workspace-edits): %s", g, v, twelveG)
+		} else if v != "-" {
 			if len(v) > 18 || strings.Trim(v, "0123456789") != "" {
 				return bad("syntax", "file %d: VERSION %q is neither - nor a number of at most 18 digits", g, v)
 			}
@@ -627,10 +633,18 @@ func parseWorkspaceEdit(b []byte) ([]wsGroup, string, string) {
 		groups = append(groups, wsGroup{path: path, version: version, edits: edits})
 	}
 	if c.rest() > 0 {
-		return bad("syntax", "%d bytes after the %d files N says", c.rest(), n)
+		rest := c.rest()
+		if l, _ := c.line(); slices.Contains([]string{"label", "confirm"}, strings.SplitN(l, " ", 2)[0]) {
+			return bad("syntax", "%d bytes after the %d files N says: a %s record of protocol 1.1 (feature workspace-edits): %s",
+				rest, n, strings.SplitN(l, " ", 2)[0], twelveG)
+		}
+		return bad("syntax", "%d bytes after the %d files N says", rest, n)
 	}
 	return groups, "", ""
 }
+
+// twelveG says why an edit is read with 12g's grammar
+const twelveG = "this edit is read with 12g's grammar, as rhun reads it when the extension did not agree workspace-edits, and in format and save-actions answers"
 
 // editGrammar is what rhun refuses in a workspace edit whatever the documents say: its grammar and
 // caps, and each PATH's form

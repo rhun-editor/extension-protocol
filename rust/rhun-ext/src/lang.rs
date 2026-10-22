@@ -453,7 +453,7 @@ pub struct FileEdit {
     pub edits: Vec<TextEdit>,
     /// With feature `workspace-edits` and `version` `None`: the 64-bit FNV-1a hash of the file's
     /// bytes on disk ([`fnv1a64`]), which the file must still hash to (PRE `fnv1a64:HEX`).
-    /// Without the feature it is sent as `-`.
+    /// Without the feature such an edit is refused (`unknown`) and not sent.
     pub hash: Option<u64>,
 }
 
@@ -589,6 +589,12 @@ pub const MAX_LABEL: usize = 200;
 /// The body lists the entries in rhun's phases: the creates, then the text groups (`files`),
 /// then the renames, then the deletes, each in the order added. [`WorkspaceEdit::entry`] maps
 /// an error's ENTRY back to them.
+///
+/// [`crate::Ext::apply`] and the answers that carry an edit follow the features rhun agreed: an
+/// edit with file operations, a hashed file, a label or `confirm` is refused (`unknown`) when they
+/// were not, and in the bodies that keep 12g's grammar (format and save-actions answers,
+/// [`crate::Ext::save_apply`]). [`crate::Ext::propose`] sends 12g's grammar too, a hash as `-` and
+/// without the label and `confirm`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceEdit {
     pub files: Vec<FileEdit>,
@@ -609,23 +615,40 @@ pub enum Entry {
     Op(usize),
 }
 
-/// Which parts of the grammar the receiving rhun agreed to.
+/// Which parts of the grammar a body may use: `ws` and `ops` what the receiving rhun agreed
+/// (`workspace-edits`, `file-operations`); `fixed` names a body that keeps 12g's grammar whatever
+/// was agreed (a format or save-actions answer, save-apply, propose).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EditCaps {
     pub ws: bool,
     pub ops: bool,
+    pub fixed: Option<&'static str>,
 }
 
 impl EditCaps {
     pub(crate) const ALL: EditCaps = EditCaps {
         ws: true,
         ops: true,
+        fixed: None,
     };
-    /// 12g's grammar: format and save-actions answers keep it whatever was agreed.
-    pub(crate) const V1: EditCaps = EditCaps {
-        ws: false,
-        ops: false,
-    };
+
+    /// What a rhun reads that agreed `ws` and `ops`.
+    pub(crate) const fn agreed(ws: bool, ops: bool) -> EditCaps {
+        EditCaps {
+            ws,
+            ops,
+            fixed: None,
+        }
+    }
+
+    /// 12g's grammar whatever was agreed, for the body `what` names.
+    pub(crate) const fn fixed(what: &'static str) -> EditCaps {
+        EditCaps {
+            ws: false,
+            ops: false,
+            fixed: Some(what),
+        }
+    }
 }
 
 impl WorkspaceEdit {
@@ -744,20 +767,58 @@ impl WorkspaceEdit {
     /// be one (over [`MAX_EDIT_BODY`], [`MAX_EDIT_FILES`] entries or [`MAX_EDITS`], a path that is
     /// empty or over [`MAX_PATH`] bytes): an edit cut short would leave the files half changed,
     /// so none is sent. Without file operations, hashes, a label or `confirm` it is exactly the
-    /// 12g body.
+    /// 12g body. [`crate::Ext::encode_edit`] is the body for the features a rhun agreed.
     pub fn encode(&self) -> Result<Vec<u8>, String> {
         self.encode_with(EditCaps::ALL).map_err(|e| e.1)
     }
 
-    /// The body for a rhun that agreed `caps`: without `workspace-edits` hashes go as `-` and the
-    /// label and `confirm` are left out; file operations it did not agree are an error
-    /// (`unknown`). Errors carry the code to answer with.
+    /// The first part of the edit that only the transaction grammar of `workspace-edits` has:
+    /// file operations, a file's fnv1a64 precondition, the label, `confirm`.
+    fn tx_part(&self) -> Option<&'static str> {
+        if !self.ops.is_empty() {
+            Some("file operations")
+        } else if self
+            .files
+            .iter()
+            .any(|f| f.version.is_none() && f.hash.is_some())
+        {
+            Some("fnv1a64 precondition")
+        } else if self.label.is_some() {
+            Some("label")
+        } else if self.confirm {
+            Some("confirm record")
+        } else {
+            None
+        }
+    }
+
+    /// The body for a rhun that agreed `caps`: 12g's grammar without `workspace-edits`. An edit
+    /// that needs more than `caps` allow (file operations without both features; a hash, a label
+    /// or `confirm` without `workspace-edits` or in a fixed 12g body) is refused as `unknown`, one
+    /// that does not fit as `toobig`: nothing rhun would refuse is sent. Errors carry the code to
+    /// answer with.
     pub(crate) fn encode_with(&self, caps: EditCaps) -> Result<Vec<u8>, (&'static str, String)> {
-        if !(self.ops.is_empty() || caps.ws && caps.ops) {
-            return Err((
-                "unknown",
-                "file operations need the workspace-edits and file-operations features".into(),
-            ));
+        if let Some(part) = self.tx_part() {
+            if let Some(what) = caps.fixed {
+                return Err((
+                    "unknown",
+                    format!("{what} keeps 12g's grammar, which has no {part}"),
+                ));
+            }
+            if !(self.ops.is_empty() || caps.ws && caps.ops) {
+                return Err((
+                    "unknown",
+                    "file operations need the workspace-edits and file-operations features".into(),
+                ));
+            }
+            if !caps.ws {
+                return Err((
+                    "unknown",
+                    format!(
+                        "the edit's {part} needs the workspace-edits feature, which was not agreed"
+                    ),
+                ));
+            }
         }
         let entries = self.files.len() + self.ops.len();
         if entries > MAX_EDIT_FILES {
@@ -796,8 +857,9 @@ impl WorkspaceEdit {
                     }
                     let pre = match (f.version, f.hash) {
                         (Some(v), _) => v.to_string(),
-                        (None, Some(h)) if caps.ws => format!("fnv1a64:{h:016x}"),
-                        _ => "-".to_string(),
+                        // refused above without workspace-edits
+                        (None, Some(h)) => format!("fnv1a64:{h:016x}"),
+                        (None, None) => "-".to_string(),
                     };
                     out.extend_from_slice(
                         format!("{} {} {}\n", p.len(), pre, f.edits.len()).as_bytes(),
@@ -824,14 +886,13 @@ impl WorkspaceEdit {
                 return Err(("toobig", format!("over {} bytes", MAX_EDIT_BODY)));
             }
         }
-        if caps.ws {
-            if let Some(l) = &self.label {
-                let l = field(l, MAX_LABEL);
-                out.extend_from_slice(format!("label {}\n{l}", l.len()).as_bytes());
-            }
-            if self.confirm {
-                out.extend_from_slice(b"confirm 0\n");
-            }
+        // both refused above without workspace-edits
+        if let Some(l) = &self.label {
+            let l = field(l, MAX_LABEL);
+            out.extend_from_slice(format!("label {}\n{l}", l.len()).as_bytes());
+        }
+        if self.confirm {
+            out.extend_from_slice(b"confirm 0\n");
         }
         if out.len() > MAX_EDIT_BODY {
             return Err(("toobig", format!("over {} bytes", MAX_EDIT_BODY)));
@@ -872,14 +933,16 @@ impl CodeAction {
     }
 }
 
-/// The body for a list of code actions. Actions past [`MAX_ACTIONS`] or [`MAX_ACTIONS_BODY`],
-/// and those whose edit cannot be encoded, are left out.
+/// The body for a list of code actions, their edits in the grammar of a rhun that agreed
+/// `workspace-edits` and `file-operations` (a handler's answer follows what was agreed). Actions
+/// past [`MAX_ACTIONS`] or [`MAX_ACTIONS_BODY`], and those whose edit cannot be encoded, are left
+/// out.
 pub fn encode_actions(actions: &[CodeAction]) -> Vec<u8> {
     encode_actions_with(actions, EditCaps::ALL)
 }
 
 /// [`encode_actions`] for a rhun that agreed `caps`: an action whose edit needs a feature it did
-/// not agree is left out.
+/// not agree is left out (rhun would refuse the edit when it is chosen).
 pub(crate) fn encode_actions_with(actions: &[CodeAction], caps: EditCaps) -> Vec<u8> {
     let mut recs = Vec::new();
     let mut n = 0;
@@ -1070,26 +1133,14 @@ mod tests {
         assert_eq!(e.entry(6), Some(Entry::Op(0)));
         assert_eq!(e.entry(0), None);
         assert_eq!(e.entry(7), None);
-        // a rhun without file-operations gets no body; without workspace-edits the hash is "-"
-        // and the label and confirm are left out
-        let ws = EditCaps {
-            ws: true,
-            ops: false,
-        };
+        // a rhun without file-operations gets no body (transaction_parts_need_the_feature has
+        // the rest)
+        let ws = EditCaps::agreed(true, false);
         assert_eq!(e.encode_with(ws).unwrap_err().0, "unknown");
         let plain = WorkspaceEdit::new()
             .label("L")
             .file_hashed("/p/a", b"x", vec![])
             .confirm();
-        assert_eq!(
-            plain
-                .encode_with(EditCaps {
-                    ws: false,
-                    ops: false
-                })
-                .unwrap(),
-            b"1\n4 - 0\n/p/a".to_vec()
-        );
         assert_eq!(
             String::from_utf8(plain.encode_with(ws).unwrap()).unwrap(),
             format!(
@@ -1112,6 +1163,69 @@ mod tests {
         assert!(!WorkspaceEdit::new()
             .create("/p/x", Create::default())
             .is_empty());
+    }
+
+    #[test]
+    fn transaction_parts_need_the_feature() {
+        let x = || vec![TextEdit::new(r(1, 1, 1, 1), "x")];
+        let hashed = WorkspaceEdit::new().file_hashed("/p/a", b"x", x());
+        let labelled = WorkspaceEdit::new().label("L").doc(3, 9, x());
+        let confirmed = WorkspaceEdit::new().confirm().doc(3, 9, x());
+        let ops = WorkspaceEdit::new().create("/p/n", Create::default());
+        for (e, part) in [
+            (&hashed, "fnv1a64 precondition"),
+            (&labelled, "label"),
+            (&confirmed, "confirm record"),
+        ] {
+            assert_eq!(
+                e.encode_with(EditCaps::agreed(false, false)),
+                Err((
+                    "unknown",
+                    format!(
+                        "the edit's {part} needs the workspace-edits feature, which was not agreed"
+                    )
+                ))
+            );
+            assert_eq!(
+                e.encode_with(EditCaps::fixed("a format answer")),
+                Err((
+                    "unknown",
+                    format!("a format answer keeps 12g's grammar, which has no {part}")
+                ))
+            );
+            assert!(e.encode_with(EditCaps::agreed(true, false)).is_ok());
+        }
+        for caps in [
+            EditCaps::agreed(false, false),
+            EditCaps::agreed(true, false),
+            EditCaps::agreed(false, true),
+        ] {
+            assert_eq!(
+                ops.encode_with(caps).unwrap_err().1,
+                "file operations need the workspace-edits and file-operations features"
+            );
+        }
+        assert_eq!(
+            ops.encode_with(EditCaps::fixed("propose")).unwrap_err().1,
+            "propose keeps 12g's grammar, which has no file operations"
+        );
+        assert!(ops.encode().is_ok());
+        // plain text edits are 12g's body whatever was agreed; a hash beside a version is not sent
+        let mut plain = WorkspaceEdit::new().doc(3, 9, x()).file("/p/a", None, x());
+        plain.files.push(FileEdit {
+            target: Target::Doc(4),
+            version: Some(2),
+            edits: x(),
+            hash: Some(1),
+        });
+        let want = b"3\n2 9 1\n#31 1 1 1 1\nx4 - 1\n/p/a1 1 1 1 1\nx2 2 1\n#41 1 1 1 1\nx".to_vec();
+        for caps in [
+            EditCaps::agreed(false, false),
+            EditCaps::ALL,
+            EditCaps::fixed("a format answer"),
+        ] {
+            assert_eq!(plain.encode_with(caps), Ok(want.clone()));
+        }
     }
 
     #[test]

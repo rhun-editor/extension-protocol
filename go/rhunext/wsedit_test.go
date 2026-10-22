@@ -47,17 +47,13 @@ func TestTransactionsAreFramedAsTheSpecSays(t *testing.T) {
 	if _, ok := w.Entry(7); ok {
 		t.Fatal("entry 7")
 	}
-	// a rhun without file-operations gets no body; without workspace-edits a hash is "-" and the
-	// label and confirm are left out
+	// a rhun without file-operations gets no body (TestTransactionPartsNeedTheFeature has the rest)
 	if _, bad := w.encodeWith(editCaps{ws: true}); bad == nil || bad.Code != "unknown" {
 		t.Fatalf("ops without the feature: %v", bad)
 	}
 	var plain WorkspaceEdit
 	plain.Label, plain.Confirm = "L", true
 	plain.AddFileHashed("/p/a", []byte("x"))
-	if b, _ := plain.encodeWith(editCaps{}); string(b) != "1\n4 - 0\n/p/a" {
-		t.Fatalf("v1: %q", b)
-	}
 	if b, _ := plain.encodeWith(editCaps{ws: true}); string(b) != fmt.Sprintf("1\n4 fnv1a64:%016x 0\n/p/alabel 1\nLconfirm 0\n", Fnv1a64([]byte("x"))) {
 		t.Fatalf("ws: %q", b)
 	}
@@ -232,4 +228,202 @@ func TestLocatingTheTextAnEditRefersTo(t *testing.T) {
 	if _, err := Locate(before, "/p/a"); err == nil {
 		t.Fatal("located a file renamed away")
 	}
+}
+
+func TestTransactionPartsNeedTheFeature(t *testing.T) {
+	x := TextEdit{rg(1, 1, 1, 1), "x"}
+	var hashed, labelled, confirmed, ops WorkspaceEdit
+	hashed.AddFileHashed("/p/a", []byte("x"), x)
+	labelled.Label = "L"
+	labelled.AddDoc(3, 9, x)
+	confirmed.Confirm = true
+	confirmed.AddDoc(3, 9, x)
+	ops.Create("/p/n", CreateOptions{})
+	for _, c := range []struct {
+		w    WorkspaceEdit
+		part string
+	}{{hashed, "fnv1a64 precondition"}, {labelled, "label"}, {confirmed, "confirm record"}} {
+		if b, bad := c.w.encodeWith(editCaps{}); bad == nil || b != nil || bad.Code != "unknown" ||
+			bad.Text != "the edit's "+c.part+" needs the workspace-edits feature, which was not agreed" {
+			t.Fatalf("%s without workspace-edits: %q %v", c.part, b, bad)
+		}
+		if _, bad := c.w.encodeWith(editCaps{ws: true, ops: true, fixed: "a format answer"}); bad == nil ||
+			bad.Text != "a format answer keeps 12g's grammar, which has no "+c.part {
+			t.Fatalf("%s in a format answer: %v", c.part, bad)
+		}
+		if _, bad := c.w.encodeWith(editCaps{ws: true}); bad != nil {
+			t.Fatalf("%s with workspace-edits: %v", c.part, bad)
+		}
+	}
+	for _, caps := range []editCaps{{}, {ws: true}, {ops: true}} {
+		if _, bad := ops.encodeWith(caps); bad == nil || bad.Text != "file operations need the workspace-edits and file-operations features" {
+			t.Fatalf("ops with %+v: %v", caps, bad)
+		}
+	}
+	if _, bad := ops.encodeWith(editCaps{fixed: "propose"}); bad == nil || bad.Text != "propose keeps 12g's grammar, which has no file operations" {
+		t.Fatalf("ops in propose: %v", bad)
+	}
+	// plain text edits are 12g's body whatever was agreed; a hash beside a version is not sent
+	var plain WorkspaceEdit
+	plain.AddDoc(3, 9, x)
+	plain.AddFile("/p/a", OnDisk, x)
+	plain.Files = append(plain.Files, FileEdit{Target: Target{Doc: 4}, Version: 2, Edits: []TextEdit{x}, Hashed: true, Hash: 1})
+	want := workspace(group("#3", "9", editRec("1 1 1 1", "x")), group("/p/a", "-", editRec("1 1 1 1", "x")), group("#4", "2", editRec("1 1 1 1", "x")))
+	for _, caps := range []editCaps{{}, {ws: true, ops: true}, {fixed: "a format answer"}} {
+		if b, bad := plain.encodeWith(caps); bad != nil || string(b) != want {
+			t.Fatalf("plain with %+v: %q %v", caps, b, bad)
+		}
+	}
+	// the errors of the public encoders: an *Error with code unknown
+	var re *Error
+	if _, err := ops.Encode(); err != nil {
+		t.Fatalf("Encode is the whole grammar: %v", err)
+	}
+	if _, err := (ResolvedAction{Edit: &ops}).Encode(); err != nil {
+		t.Fatalf("a resolve answer's Encode is the whole grammar: %v", err)
+	}
+	if _, bad := (ResolvedAction{Edit: &hashed}).encodeWith(editCaps{}); bad == nil || bad.Code != "unknown" {
+		t.Fatalf("a resolve answer without workspace-edits: %v", bad)
+	}
+	if err := encodeErr(&Error{Code: "unknown", Text: "x"}); !errors.As(err, &re) || re.Code != "unknown" {
+		t.Fatalf("encodeErr: %v", err)
+	}
+}
+
+// txProbe answers with and makes edits that need the transaction grammar
+type txProbe struct{ got chan string }
+
+func (p *txProbe) Event(ext *Ext, ev Event)              {}
+func (p *txProbe) Run(ext *Ext, command string, doc Doc) {}
+func (p *txProbe) Action(ext *Ext, data []byte)          {}
+
+func errCode(err error) string {
+	var re *Error
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.As(err, &re):
+		return re.Code + ": " + re.Text
+	}
+	return err.Error()
+}
+
+var txHashed = func() WorkspaceEdit {
+	var w WorkspaceEdit
+	w.AddFileHashed("/p/a.go", []byte("x"), TextEdit{rg(1, 1, 1, 1), "y"})
+	return w
+}()
+
+var txMove = func() WorkspaceEdit {
+	w := WorkspaceEdit{Label: "Move"}
+	w.Rename("/p/a.go", "/p/b.go", RenameOptions{})
+	return w
+}()
+
+var txPlain = func() WorkspaceEdit {
+	var w WorkspaceEdit
+	w.AddDoc(4, 7, TextEdit{rg(1, 1, 1, 1), "y"})
+	return w
+}()
+
+func (p *txProbe) Ready(ext *Ext, project string) {
+	p.got <- errCode(ext.Apply(txHashed))
+	_, err := ext.Propose("Move", "", txMove)
+	p.got <- errCode(err)
+	b, err := ext.EncodeEdit(txMove)
+	p.got <- fmt.Sprintf("%q %s", b, errCode(err))
+}
+
+func (p *txProbe) Rename(ext *Ext, req RenameRequest) (WorkspaceEdit, error) { return txMove, nil }
+
+func (p *txProbe) Format(ext *Ext, req FormatRequest) WorkspaceEdit {
+	w := txPlain
+	w.Label = "Format"
+	return w
+}
+
+func (p *txProbe) Actions(ext *Ext, req ActionsRequest) []CodeAction {
+	return []CodeAction{{Title: "Plain", Edit: &txPlain}, {Title: "Hashed", Edit: &txHashed}}
+}
+
+func (p *txProbe) CodeActions(ext *Ext, req CodeActionsRequest) []Action {
+	return []Action{{Title: "Plain", Edit: &txPlain}, {Title: "Hashed", Edit: &txHashed}, {Title: "Move", Edit: &txMove}}
+}
+
+func (p *txProbe) ResolveCodeAction(ext *Ext, req CodeActionResolveRequest) (ResolvedAction, error) {
+	return ResolvedAction{Edit: &txHashed}, nil
+}
+
+func (p *txProbe) next(t *testing.T) string {
+	t.Helper()
+	m := &modelProbe{got: p.got}
+	return m.next(t)
+}
+
+// txSession sends the requests whose answers carry an edit: v1 actions, rename, format, code-actions
+// and code-action-resolve
+func txSession(s *host) {
+	s.send("2 actions 4 7 1 1 1 1\n3 rename 4 7 1 1 invoked b\n4 format 4 7 4 yes\n" +
+		"5 code-actions 4 7 1 1 1 1 invoked - -\n6 code-action-resolve 4 7 1\nR")
+}
+
+func TestEditsFollowTheAgreedFeatures(t *testing.T) {
+	plain := workspace(group("#4", "7", editRec("1 1 1 1", "y")))
+	hashed := workspace(group("/p/a.go", fmt.Sprintf("fnv1a64:%016x", Fnv1a64([]byte("x"))), editRec("1 1 1 1", "y")))
+	move := "1\nrename 7 7 -\n/p/a.go/p/b.golabel 4\nMove"
+	rec := func(title, edit string) string {
+		return fmt.Sprintf("quickfix %d %d 0\n%s%s", len(title), len(edit), title, edit)
+	}
+	propose := "unknown: propose keeps 12g's grammar, which has no file operations"
+	format := "error 4 unknown a format answer keeps 12g's grammar, which has no label"
+
+	// without workspace-edits: what needs it is refused, an action with such an edit left out
+	p := &txProbe{got: make(chan string, 8)}
+	v1 := []string{"actions", "rename", "format", FeatureCodeActions}
+	s := startHost(t, v1, p)
+	s.expect("hello 1 " + strings.Join(v1, " "))
+	s.send("0 features " + strings.Join(v1, " ") + "\n0 ready -\n")
+	for _, want := range []string{
+		"unknown: the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed",
+		propose,
+		`"" unknown: file operations need the workspace-edits and file-operations features`,
+	} {
+		if got := p.next(t); got != want {
+			t.Fatalf("got %q\nwant %q", got, want)
+		}
+	}
+	txSession(s)
+	s.answer(2, list(actionRec("quickfix", "Plain", plain, "")))
+	s.expect("error 3 unknown file operations need the workspace-edits and file-operations features")
+	s.expect(format)
+	s.answer(5, list(rec("Plain", plain)))
+	s.expect("error 6 unknown the edit's fnv1a64 precondition needs the workspace-edits feature, which was not agreed")
+	s.send("0 bye\n")
+	<-s.done
+
+	// with workspace-edits and file-operations: transactions, but format answers and proposals
+	// keep 12g's grammar
+	p = &txProbe{got: make(chan string, 8)}
+	ws := append([]string{FeatureWorkspaceEdits, FeatureFileOperations}, v1...)
+	s = startHost(t, ws, p)
+	s.expect("hello 1 " + strings.Join(ws, " "))
+	s.send("0 features " + strings.Join(ws, " ") + "\n0 ready -\n")
+	s.expect(fmt.Sprintf("1 apply %d", len(hashed)))
+	if b := s.body(len(hashed)); b != hashed {
+		t.Fatalf("apply body %q", b)
+	}
+	s.send("ok 1\n")
+	for _, want := range []string{"ok", propose, fmt.Sprintf("%q ok", move)} {
+		if got := p.next(t); got != want {
+			t.Fatalf("got %q\nwant %q", got, want)
+		}
+	}
+	txSession(s)
+	s.answer(2, list(actionRec("quickfix", "Plain", plain, ""), actionRec("quickfix", "Hashed", hashed, "")))
+	s.answer(3, move)
+	s.expect(format)
+	s.answer(5, list(rec("Plain", plain), rec("Hashed", hashed), rec("Move", move)))
+	s.answer(6, fmt.Sprintf("%d 0\n%s", len(hashed), hashed))
+	s.send("0 bye\n")
+	<-s.done
 }

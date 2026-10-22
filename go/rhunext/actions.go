@@ -257,10 +257,17 @@ func actionKind(s string) string {
 	return k
 }
 
-// EncodeCodeActions is the code-actions answer. Actions without a title, doing nothing (no edit,
-// resolve data or command, and not disabled), or whose edit cannot be encoded are left out, as
-// those past MaxActions or MaxActionsBody.
+// EncodeCodeActions is the code-actions answer, the edits in the grammar of a rhun that agreed
+// workspace-edits and file-operations (a CodeActionProvider2's answer follows what was agreed).
+// Actions without a title, doing nothing (no edit, resolve data or command, and not disabled), or
+// whose edit cannot be encoded are left out, as those past MaxActions or MaxActionsBody.
 func EncodeCodeActions(actions []Action) []byte {
+	return encodeCodeActionsWith(actions, editCaps{ws: true, ops: true})
+}
+
+// encodeCodeActionsWith is EncodeCodeActions for a rhun that agreed caps: an action whose edit
+// needs a feature it did not agree is left out (rhun would refuse the edit when it is chosen).
+func encodeCodeActionsWith(actions []Action, caps editCaps) []byte {
 	var recs bytes.Buffer
 	n := 0
 	for _, a := range actions {
@@ -270,7 +277,7 @@ func EncodeCodeActions(actions []Action) []byte {
 		}
 		var edit []byte
 		if a.Edit != nil {
-			b, err := a.Edit.Encode()
+			b, err := a.Edit.encodeWith(caps)
 			if err != nil {
 				continue
 			}
@@ -311,13 +318,25 @@ func EncodeCodeActions(actions []Action) []byte {
 	return append([]byte(fmt.Sprintf("%d\n", n)), recs.Bytes()...)
 }
 
-// Encode is the code-action-resolve answer: "EDIT_LEN EXTRA_LEN" LF + EDIT + EXTRA.
+// Encode is the code-action-resolve answer: "EDIT_LEN EXTRA_LEN" LF + EDIT + EXTRA, the edit in
+// the grammar of a rhun that agreed workspace-edits and file-operations (a CodeActionResolver's
+// answer follows what was agreed).
 func (r ResolvedAction) Encode() ([]byte, error) {
+	b, bad := r.encodeWith(editCaps{ws: true, ops: true})
+	if bad != nil {
+		return nil, encodeErr(bad)
+	}
+	return b, nil
+}
+
+// encodeWith is Encode for a rhun that agreed caps, or the error to answer with (toobig, or
+// unknown for an edit that needs a feature it did not agree).
+func (r ResolvedAction) encodeWith(caps editCaps) ([]byte, *Error) {
 	var edit []byte
 	if r.Edit != nil {
-		b, err := r.Edit.Encode()
-		if err != nil {
-			return nil, err
+		b, bad := r.Edit.encodeWith(caps)
+		if bad != nil {
+			return nil, bad
 		}
 		edit = b
 	}
@@ -383,13 +402,13 @@ func (e *Ext) answerActions(h Handler, id int64, verb string, f []string, body [
 	case "range-format":
 		if r, is := h.(RangeFormatter); is && e.Has(FeaturePartialFormat) {
 			if req, ok := parseRangeFormat(f); ok {
-				return encodeEditV1(r.RangeFormat(e, req))
+				return encodeEditV1(r.RangeFormat(e, req), "a range-format answer")
 			}
 		}
 	case "type-format":
 		if t, is := h.(TypeFormatter); is && e.Has(FeaturePartialFormat) {
 			if req, ok := parseTypeFormat(f); ok {
-				return encodeEditV1(t.TypeFormat(e, req))
+				return encodeEditV1(t.TypeFormat(e, req), "a type-format answer")
 			}
 		}
 	case "code-actions":
@@ -402,7 +421,7 @@ func (e *Ext) answerActions(h Handler, id int64, verb string, f []string, body [
 						keep = append(keep, act)
 					}
 				}
-				return EncodeCodeActions(keep), nil, true
+				return encodeCodeActionsWith(keep, e.editCaps()), nil, true
 			}
 		}
 	case "code-action-resolve":
@@ -413,9 +432,9 @@ func (e *Ext) answerActions(h Handler, id int64, verb string, f []string, body [
 				if err != nil {
 					return nil, &Error{Code: "refused", Text: err.Error()}, true
 				}
-				b, err := res.Encode()
-				if err != nil {
-					return nil, &Error{Code: "toobig", Text: err.Error()}, true
+				b, bad := res.encodeWith(e.editCaps())
+				if bad != nil {
+					return nil, bad, true
 				}
 				return b, nil, true
 			}

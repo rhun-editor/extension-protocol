@@ -626,15 +626,24 @@ impl Ext {
 }
 
 /// A proposal's body: the head and the edit in 12g's grammar whatever was agreed (the Review tab
-/// reads 12g: a hash goes as `-`, the edit's label and `confirm` are left out, and file operations
-/// are refused `unknown`).
+/// reads 12g: a hash goes as `-`, the edit's label and `confirm` are left out, and what is left is
+/// encoded as 12g's, so file operations are refused `unknown`).
 pub(crate) fn proposal_body(
     label: &str,
     sid: &str,
     edit: &WorkspaceEdit,
 ) -> Result<Vec<u8>, Error> {
-    let e = edit
-        .encode_with(crate::lang::EditCaps::V1)
+    let mut plain = WorkspaceEdit {
+        files: edit.files.clone(),
+        ops: edit.ops.clone(),
+        label: None,
+        confirm: false,
+    };
+    for f in &mut plain.files {
+        f.hash = None;
+    }
+    let e = plain
+        .encode_with(crate::lang::EditCaps::fixed("propose"))
         .map_err(|(code, text)| Error {
             code: code.into(),
             text,

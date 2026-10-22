@@ -345,10 +345,16 @@ func (e *Ext) Propose(label, sid string, edit WorkspaceEdit) (int64, error) {
 	return argInt(r, 0), nil
 }
 
-// proposalBody is a proposal's head and its edit in 12g's grammar (the Review tab reads 12g), or
-// the refusal to return (toobig, unknown for file operations).
+// proposalBody is a proposal's head and its edit in 12g's grammar (the Review tab reads 12g): the
+// hashes, label and confirm are left out (a hashed file goes as "-"), and what is left is encoded
+// as 12g's, so file operations are refused (unknown), as is what does not fit (toobig).
 func proposalBody(label, sid string, edit WorkspaceEdit) ([]byte, *Error) {
-	eb, bad := edit.encodeWith(editCaps{})
+	plain := WorkspaceEdit{Files: make([]FileEdit, len(edit.Files)), Ops: edit.Ops}
+	for i, f := range edit.Files {
+		f.Hashed, f.Hash = false, 0
+		plain.Files[i] = f
+	}
+	eb, bad := plain.encodeWith(editCaps{fixed: "propose"})
 	if bad != nil {
 		return nil, bad
 	}

@@ -3,7 +3,7 @@
 //! Declaration, type definition and implementation answer with locations
 //! ([`crate::lang::encode_locations`]); range and on-type formatting with a workspace edit.
 
-use crate::lang::{field, MAX_ACTIONS, MAX_ACTIONS_BODY, MAX_TEXT};
+use crate::lang::{field, EditCaps, MAX_ACTIONS, MAX_ACTIONS_BODY, MAX_TEXT};
 use crate::{Doc, Pos, Range, WorkspaceEdit};
 
 /// The most bytes of a prepare-rename placeholder, of a disabled action's reason, of an action's
@@ -314,16 +314,16 @@ impl Action {
         }
     }
 
-    /// Its record (header, title, edit, extra), or nothing when it is left out: no title, an edit
-    /// that cannot be encoded, or nothing to do (no edit, resolve data or command, and not
-    /// disabled).
-    fn encode(&self) -> Option<Vec<u8>> {
+    /// Its record (header, title, edit, extra) for a rhun that agreed `caps`, or nothing when it
+    /// is left out: no title, an edit that cannot be encoded (or needs a feature rhun did not
+    /// agree), or nothing to do (no edit, resolve data or command, and not disabled).
+    fn encode(&self, caps: EditCaps) -> Option<Vec<u8>> {
         let title = field(&self.title, MAX_TEXT);
         if title.is_empty() {
             return None;
         }
         let edit = match &self.edit {
-            Some(e) => e.encode().ok()?,
+            Some(e) => e.encode_with(caps).ok()?,
             None => Vec::new(),
         };
         let mut extra = Vec::new();
@@ -367,13 +367,20 @@ impl Action {
     }
 }
 
-/// The code-actions answer. Actions that are left out (see [`Action`]) are skipped, and those past
-/// [`MAX_ACTIONS`] or [`MAX_ACTIONS_BODY`] are left out.
+/// The code-actions answer, the edits in the grammar of a rhun that agreed `workspace-edits` and
+/// `file-operations` (a handler's answer follows what was agreed). Actions that are left out (see
+/// [`Action`]) are skipped, and those past [`MAX_ACTIONS`] or [`MAX_ACTIONS_BODY`] are left out.
 pub fn encode_code_actions(actions: &[Action]) -> Vec<u8> {
+    encode_code_actions_with(actions, EditCaps::ALL)
+}
+
+/// [`encode_code_actions`] for a rhun that agreed `caps`: an action whose edit needs a feature it
+/// did not agree is left out (rhun would refuse the edit when it is chosen).
+pub(crate) fn encode_code_actions_with(actions: &[Action], caps: EditCaps) -> Vec<u8> {
     let mut recs = Vec::new();
     let mut n = 0;
     for a in actions {
-        let Some(one) = a.encode() else { continue };
+        let Some(one) = a.encode(caps) else { continue };
         if n == MAX_ACTIONS || recs.len() + one.len() + 16 > MAX_ACTIONS_BODY {
             break;
         }
@@ -419,10 +426,17 @@ pub struct ResolvedAction {
 
 impl ResolvedAction {
     /// The answer: `EDIT_LEN EXTRA_LEN` LF, the edit, the command record; or why the edit cannot
-    /// be sent (past a workspace edit's limits).
+    /// be sent (past a workspace edit's limits). The edit is in the grammar of a rhun that agreed
+    /// `workspace-edits` and `file-operations` (a handler's answer follows what was agreed).
     pub fn encode(&self) -> Result<Vec<u8>, String> {
+        self.encode_with(EditCaps::ALL).map_err(|e| e.1)
+    }
+
+    /// [`ResolvedAction::encode`] for a rhun that agreed `caps`; errors carry the code to answer
+    /// with (`toobig`, or `unknown` for an edit that needs a feature it did not agree).
+    pub(crate) fn encode_with(&self, caps: EditCaps) -> Result<Vec<u8>, (&'static str, String)> {
         let edit = match &self.edit {
-            Some(e) => e.encode()?,
+            Some(e) => e.encode_with(caps)?,
             None => Vec::new(),
         };
         let cmd = self

@@ -170,8 +170,13 @@ func (w WorkspaceEdit) Entry(n int) (Entry, bool) {
 	return o[n-1], true
 }
 
-// editCaps are the parts of the workspace edit grammar a rhun agreed to.
-type editCaps struct{ ws, ops bool }
+// editCaps are the parts of the workspace edit grammar a body may use: ws and ops what rhun
+// agreed (workspace-edits, file-operations). fixed names a body that keeps 12g's grammar whatever
+// was agreed (a format or save-actions answer, save-apply, propose).
+type editCaps struct {
+	ws, ops bool
+	fixed   string
+}
 
 // encodeErr is a refusal of encodeWith as an error from Encode, Apply or SaveApply: its text
 // alone for a limit (as Encode always said), the *Error for a feature rhun did not agree.
@@ -186,12 +191,40 @@ func (e *Ext) editCaps() editCaps {
 	return editCaps{ws: e.Has(FeatureWorkspaceEdits), ops: e.Has(FeatureFileOperations)}
 }
 
-// encodeWith is the body for a rhun that agreed caps: without workspace-edits a hash goes as "-"
-// and the label and confirm are left out; file operations it did not agree are unknown. A refusal
-// is the code to answer with (toobig, unknown) and why.
+// txPart names the first part of the edit that only the transaction grammar of workspace-edits
+// has, or is "": file operations, a file's fnv1a64 precondition, the label, confirm.
+func (w WorkspaceEdit) txPart() string {
+	switch {
+	case len(w.Ops) > 0:
+		return "file operations"
+	case slices.ContainsFunc(w.Files, func(f FileEdit) bool { return f.Hashed && f.Version < 0 }):
+		return "fnv1a64 precondition"
+	case w.Label != "":
+		return "label"
+	case w.Confirm:
+		return "confirm record"
+	}
+	return ""
+}
+
+// encodeWith is the body for a rhun that agreed caps: 12g's grammar without workspace-edits. An
+// edit that needs more than the grammar caps allow (file operations without both features; a
+// hash, a label or confirm without workspace-edits or in a fixed 12g body) is refused as unknown,
+// as is what does not fit as toobig: nothing rhun would refuse is sent. A refusal is the code to
+// answer with (toobig, unknown) and why.
 func (w WorkspaceEdit) encodeWith(caps editCaps) ([]byte, *Error) {
-	if len(w.Ops) > 0 && !(caps.ws && caps.ops) {
-		return nil, &Error{Code: "unknown", Text: "file operations need the workspace-edits and file-operations features"}
+	if part := w.txPart(); part != "" {
+		unknown := func(format string, a ...any) ([]byte, *Error) {
+			return nil, &Error{Code: "unknown", Text: fmt.Sprintf(format, a...)}
+		}
+		switch {
+		case caps.fixed != "":
+			return unknown("%s keeps 12g's grammar, which has no %s", caps.fixed, part)
+		case len(w.Ops) > 0 && !(caps.ws && caps.ops):
+			return unknown("file operations need the workspace-edits and file-operations features")
+		case !caps.ws:
+			return unknown("the edit's %s needs the workspace-edits feature, which was not agreed", part)
+		}
 	}
 	toobig := func(format string, a ...any) ([]byte, *Error) {
 		return nil, &Error{Code: "toobig", Text: fmt.Sprintf(format, a...)}
@@ -230,7 +263,7 @@ func (w WorkspaceEdit) encodeWith(caps editCaps) ([]byte, *Error) {
 			switch {
 			case f.Version >= 0:
 				pre = itoa(f.Version)
-			case f.Hashed && caps.ws:
+			case f.Hashed: // refused above without workspace-edits
 				pre = fmt.Sprintf("fnv1a64:%016x", f.Hash)
 			}
 			fmt.Fprintf(&b, "%d %s %d\n", len(p), pre, len(f.Edits))
@@ -248,14 +281,13 @@ func (w WorkspaceEdit) encodeWith(caps editCaps) ([]byte, *Error) {
 			return toobig("over %d bytes", MaxEditBody)
 		}
 	}
-	if caps.ws {
-		if w.Label != "" {
-			l := cut(oneLine(w.Label), MaxLabel)
-			fmt.Fprintf(&b, "label %d\n%s", len(l), l)
-		}
-		if w.Confirm {
-			b.WriteString("confirm 0\n")
-		}
+	// both refused above without workspace-edits
+	if w.Label != "" {
+		l := cut(oneLine(w.Label), MaxLabel)
+		fmt.Fprintf(&b, "label %d\n%s", len(l), l)
+	}
+	if w.Confirm {
+		b.WriteString("confirm 0\n")
 	}
 	if b.Len() > MaxEditBody {
 		return toobig("over %d bytes", MaxEditBody)

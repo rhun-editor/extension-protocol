@@ -384,7 +384,7 @@ func (h *host) checkCodeActions(m message, kinds []string) ([]action, []string, 
 			c.warn("action %d: %s", i, why)
 		}
 		if len(edit) > 0 {
-			if _, code, why := editGrammar(edit); why != "" {
+			if code, why := h.editGrammarFor(edit); why != "" {
 				return nil, nil, fmt.Sprintf("action %d (%q): its edit cannot be made whatever the documents say (rhun would answer an apply %s): %s",
 					i, title, code, why)
 			}
@@ -476,7 +476,7 @@ func (h *host) checkActionResolve(m message) ([]byte, string) {
 		return nil, fmt.Sprintf("%d bytes after the edit and the extra records", c.rest())
 	}
 	if len(edit) > 0 {
-		if _, code, why := editGrammar(edit); why != "" {
+		if code, why := h.editGrammarFor(edit); why != "" {
 			return nil, fmt.Sprintf("its edit cannot be made whatever the documents say (rhun would answer an apply %s): %s", code, why)
 		}
 	}
@@ -538,12 +538,10 @@ func (h *host) askCodeActions(d *doc) {
 				return
 			}
 			if len(edit) > 0 {
-				gs, code, why := h.checkWorkspaceEdit(edit, nil)
-				if why != "" {
+				if _, code, _, why := h.takeEdit(edit, nil); why != "" {
 					h.fail(f, fmt.Sprintf("the resolved edit of %q is one rhun refuses (nothing changes): %s: %s", a.title, code, why))
 					return
 				}
-				h.apply(gs)
 			}
 			h.ok(fmt.Sprintf("answers code-action-resolve for %q with an edit and command rhun can use", a.title))
 		}
@@ -551,12 +549,10 @@ func (h *host) askCodeActions(d *doc) {
 	}
 	if i := slices.IndexFunc(all, func(a action) bool { return enabled(a) && len(a.edit) > 0 }); i >= 0 {
 		a := all[i]
-		gs, code, why := h.checkWorkspaceEdit(a.edit, nil)
-		if why != "" {
+		if _, code, _, why := h.takeEdit(a.edit, nil); why != "" {
 			h.fail(f, fmt.Sprintf("its action %q, chosen at once, has an edit rhun refuses (nothing changes): %s: %s", a.title, code, why))
 			return
 		}
-		h.apply(gs)
 		h.ok(fmt.Sprintf("its chosen action %q has an edit rhun can make", a.title))
 	}
 }
