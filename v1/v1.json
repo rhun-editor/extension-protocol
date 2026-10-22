@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://rhun.app/extensions/v1/v1.json",
   "title": "rhun extension manifest (extension.ini), protocol version 1",
-  "description": "The manifest is an INI file (UTF-8, key = value, # comments, unknown keys ignored). This schema describes it as the object it maps to: top-level keys are properties of the root; dotted keys such as run.linux-x86_64 become the 'run' object with the part after the dot as the key; each [section] is an object of the same name ([settings] keeps its dotted KEY.FIELD keys as property names). Two rules the schema cannot state: 'name' must equal the folder's name and 'owner' the parent folder's name, and a target needs either a 'run' entry for it or 'runtime' with 'run'. Section 2 of v1.md says what each key means.",
+  "description": "The manifest is an INI file (UTF-8, key = value, # comments, unknown keys ignored). This schema describes it as the object it maps to: top-level keys are properties of the root; dotted keys such as run.linux-x86_64 become the 'run' object with the part after the dot as the key; each [section] is an object of the same name ([settings] keeps its dotted KEY.FIELD keys as property names). Two rules the schema cannot state: 'name' must equal the folder's name and 'owner' the parent folder's name, and a target needs either a 'run' entry for it or 'runtime' with 'run', unless the manifest names no program at all (no 'run', 'run.*' or 'runtime') and no [commands] or [provides]: then it is a data extension (rhun 0.18.1), whose themes, grammars and icon themes load and which never starts. Section 2 of v1.md says what each key means.",
   "type": "object",
   "required": [
     "name",

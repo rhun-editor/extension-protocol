@@ -1569,8 +1569,10 @@ func main() {
 	if m.protocol != 1 {
 		h.fail("manifest", fmt.Sprintf("protocol = %d, this checker speaks 1", m.protocol))
 	}
-	// a pack without a program: its members are installed with it and it never starts
+	// a pack without a program: its members are installed with it and it never starts; a data
+	// extension (data.go) has nothing to start either
 	programless := len(m.run) == 0 && m.runtime == "" && m.script == ""
+	data := isData(m)
 	if m.pack != "" {
 		if why := packProblem(m); why != "" {
 			h.fail("manifest", why)
@@ -1584,7 +1586,7 @@ func main() {
 			provider = true
 		}
 	}
-	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) && len(m.debuggers) == 0 {
+	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) && !data && len(m.debuggers) == 0 {
 		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
@@ -1608,8 +1610,8 @@ func main() {
 			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64, wasm32-wasip1)", t))
 		}
 	}
-	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) && len(m.debuggers) == 0 {
-		bad("no run.TARGET entry and no runtime with run")
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) && !data && len(m.debuggers) == 0 {
+		bad("no run.TARGET entry and no runtime with run ([commands] and [provides] need a program)")
 	}
 	for _, why := range debuggerProblems(dir, m) {
 		bad(why)
@@ -1739,6 +1741,14 @@ func main() {
 	h.checkContributions()
 	if m.pack != "" && programless {
 		h.ok("a pack without a program: nothing to start")
+		report(h)
+	}
+	if data {
+		if n := dataEntries(dir); n > 0 {
+			h.ok(fmt.Sprintf("a data extension (no program; rhun 0.18.1 and later): %d data entries (themes, grammars, icon themes, [language.NAME], [keys]), nothing to start", n))
+		} else {
+			h.warn("data", "no program, no pack, and no themes/, syntax/, icon-themes/, [language.NAME] or [keys]: it adds nothing")
+		}
 		report(h)
 	}
 	work, _ := os.MkdirTemp("", "rhun-ext-check-")

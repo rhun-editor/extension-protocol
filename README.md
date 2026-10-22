@@ -43,6 +43,11 @@ where `DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` a
 headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
 
+An extension of themes, grammars or icon themes only needs no program: a manifest without `run`,
+`run.TARGET`, `runtime`, `[commands]` and `[provides]` is a data extension (rhun 0.18.1 and later;
+v1.1/v1.1.md, "Manifest: data extensions"). Its data files load and it never starts; the checker
+checks the manifest and the data files and stops there.
+
 ## Remote windows
 
 In a remote window (SSH, a container, WSL) an extension runs on the Linux x86-64 host by default,
