@@ -30,11 +30,11 @@ test and a release workflow that builds Linux, macOS and Windows binaries. In C 
 plugin from [rhun-editor/skills](https://github.com/rhun-editor/skills).
 
 ```toml
-rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.4.0" }
+rhun-ext = { git = "https://github.com/rhun-editor/extension-protocol", tag = "rust-v1.4.1" }
 ```
 
 ```sh
-go get github.com/rhun-editor/extension-protocol@v1.4.0
+go get github.com/rhun-editor/extension-protocol@v1.4.1
 ```
 
 Test with the checker, `rhun-ext-check DIR` (it asks every feature the extension agreed, checks
