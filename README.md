@@ -240,6 +240,31 @@ and `type-hierarchy` and then the calls or items about the first root with its d
 serves `file-diagnostics` (targets, versions, records and their ids) and
 `file-diagnostics-reset`.
 
+## Editor presentation (1.1)
+
+The [presentation features](v1.1/v1.1.md#presentation-providers) style open documents and answer
+rhun's own requests about the active one:
+
+- `decorations`: named styles and ranges with virtual text, tips and click commands. Go
+  `DecorationType`, `Decorate` (`DecorationRange`) and `ParseVisible`; Rust `Ext::decoration_type`,
+  `Ext::decorate` (`DecorationRange`) and `parse_visible`; C `rx_decoration_type`, `rx_decorate`
+  (`rx_decoration`) and `rx_visible`.
+- `diagnostic-tags`: the v1 diagnostics' severity carries the unnecessary and deprecated tags when
+  agreed (Go `Diagnostic.Tags`, Rust `Diagnostic::tags`, C `rx_tagged_severity`).
+- `folding-ranges`, `semantic-tokens`, `inlay-hints`, `code-lens`, `document-highlights`,
+  `document-colors` and `inline-complete`: rhun asks and the handler answers. Go:
+  `FoldingRangeProvider`, `SemanticTokensProvider` (with `SemanticLegend`), `InlayHintProvider`,
+  `CodeLensProvider`, `HighlightProvider`, `ColorProvider` (`Colors`, `ColorEdit`) and
+  `InlineCompleter`. Rust: `Handler::folding_ranges`, `semantic_tokens` (with
+  `Ext::semantic_legend`), `inlay_hints`, `code_lenses`, `highlights`, `colors`, `color_edit` and
+  `inline_complete`. C: `rx_handlers` gain `folding_ranges`, `semantic_tokens`, `inlay_hints`,
+  `code_lenses`, `highlights`, `colors`, `color_edit` and `inline_complete`, with the builders
+  `rx_folding_range`, `rx_semantic_full`/`rx_semantic_delta`/`rx_semantic_edit`, `rx_inlay_hint`,
+  `rx_code_lens`, `rx_highlight`, `rx_document_color` and `rx_inline_item`.
+
+Each also needs its `[provides]` key: `folding`, `semantic_tokens`, `inlay_hints`, `code_lens`,
+`highlights`, `colors`, `inline_complete`.
+
 ## Source control
 
 Protocol 1.1 adds Git data read through rhun (`git-data`, with `[needs] git = read`), commit-message

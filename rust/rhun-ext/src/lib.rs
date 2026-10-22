@@ -67,6 +67,7 @@ pub mod langfeat;
 pub mod notebook;
 pub mod notify;
 pub mod picture;
+pub mod present;
 pub mod query;
 pub mod resources;
 pub mod scm;
@@ -116,6 +117,13 @@ pub use langfeat::{
     WorkspaceSymbolsRequest,
 };
 pub use picture::{Color, Picture};
+pub use present::{
+    encode_code_lenses, encode_colors, encode_decorations, encode_folding_ranges,
+    encode_highlights, encode_inlay_hints, encode_inline_items, parse_visible,
+    valid_decoration_name, valid_semantic_name, CodeLens, ColorEditRequest, CommandLink,
+    DecorationRange, DocumentColor, FoldingRange, Highlight, InlayHint, InlayHintPart, InlineItem,
+    InlineRequest, LinesRequest, SemanticEdit, SemanticTokens, SemanticTokensRequest, Visible,
+};
 pub use query::Stream;
 pub use scm::{
     Blame, BlameCommit, BlameRun, CommitMessageRequest, GitHead, GitRepo, GitState, GitStatusEntry,
@@ -400,6 +408,25 @@ pub enum Feature {
     /// Published tasks: [`Ext::set_tasks`], [`Ext::start_task`], [`Ext::run_task`] (agreed only with
     /// [`Feature::Terminals`]).
     Tasks,
+    /// Styled ranges of open documents: [`Ext::decoration_type`], [`Ext::decorate`],
+    /// [`parse_visible`] (protocol 1.1).
+    Decorations,
+    /// Tags in [`Ext::diagnostics`]: faded unnecessary code, struck deprecated code.
+    DiagnosticTags,
+    /// Folding ranges rhun asks for: [`Handler::folding_ranges`].
+    FoldingRanges,
+    /// Semantic tokens: [`Ext::semantic_legend`], [`Handler::semantic_tokens`].
+    SemanticTokens,
+    /// Inlay hints rhun asks for: [`Handler::inlay_hints`].
+    InlayHints,
+    /// Code lens rhun asks for: [`Handler::code_lenses`].
+    CodeLens,
+    /// The caret's symbol's places: [`Handler::highlights`].
+    DocumentHighlights,
+    /// Colors and their edits: [`Handler::colors`], [`Handler::color_edit`].
+    DocumentColors,
+    /// Ghost text after the caret: [`Handler::inline_complete`].
+    InlineComplete,
     /// A feature this crate has no typed API for yet, by its name in `hello` (`"decorations"`);
     /// its requests go through [`Ext::request`].
     Named(&'static str),
@@ -478,6 +505,15 @@ impl Feature {
             Feature::WorkspaceFolders => "workspace-folders",
             Feature::Terminals => "terminals",
             Feature::Tasks => "tasks",
+            Feature::Decorations => "decorations",
+            Feature::DiagnosticTags => "diagnostic-tags",
+            Feature::FoldingRanges => "folding-ranges",
+            Feature::SemanticTokens => "semantic-tokens",
+            Feature::InlayHints => "inlay-hints",
+            Feature::CodeLens => "code-lens",
+            Feature::DocumentHighlights => "document-highlights",
+            Feature::DocumentColors => "document-colors",
+            Feature::InlineComplete => "inline-complete",
             Feature::Named(n) => n,
         }
     }
@@ -1333,6 +1369,46 @@ pub trait Handler: Send {
     fn document_links(&mut self, _ext: &Ext, _req: &DocRequest) -> Vec<DocumentLink> {
         Vec::new()
     }
+    /// rhun asks for the folding ranges of the active document (folding-ranges): they replace
+    /// rhun's indentation ranges there.
+    fn folding_ranges(&mut self, _ext: &Ext, _req: &DocRequest) -> Vec<FoldingRange> {
+        Vec::new()
+    }
+    /// rhun asks for the active document's semantic tokens (semantic-tokens); `None` says
+    /// nothing.
+    fn semantic_tokens(
+        &mut self,
+        _ext: &Ext,
+        _req: &SemanticTokensRequest,
+    ) -> Option<SemanticTokens> {
+        None
+    }
+    /// rhun asks for the inlay hints of lines around the view (inlay-hints): they replace this
+    /// extension's on those lines.
+    fn inlay_hints(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<InlayHint> {
+        Vec::new()
+    }
+    /// rhun asks for every code lens of the document, titles at least for the lines asked about
+    /// (code-lens).
+    fn code_lenses(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<CodeLens> {
+        Vec::new()
+    }
+    /// rhun asks for the places of the symbol at the caret (highlights).
+    fn highlights(&mut self, _ext: &Ext, _req: &PosRequest) -> Vec<Highlight> {
+        Vec::new()
+    }
+    /// rhun asks for the colors of lines around the view (colors).
+    fn colors(&mut self, _ext: &Ext, _req: &LinesRequest) -> Vec<DocumentColor> {
+        Vec::new()
+    }
+    /// The user chose a new color (color-edit): the edit that writes it, or why not.
+    fn color_edit(&mut self, _ext: &Ext, _req: &ColorEditRequest) -> Result<WorkspaceEdit, String> {
+        Err("cannot change this color".to_string())
+    }
+    /// rhun asks for text to follow the caret (inline-complete).
+    fn inline_complete(&mut self, _ext: &Ext, _req: &InlineRequest) -> Vec<InlineItem> {
+        Vec::new()
+    }
 }
 
 enum Msg {
@@ -1839,13 +1915,25 @@ impl Ext {
             } else {
                 d.source.replace(' ', "_")
             };
+            // with diagnostic-tags agreed, SEVERITY carries the tags (hint+unnecessary)
+            let mut sev = d.severity.word().to_string();
+            if self.has(Feature::DiagnosticTags) {
+                for (tag, word) in [
+                    (DiagnosticTag::Unnecessary, "+unnecessary"),
+                    (DiagnosticTag::Deprecated, "+deprecated"),
+                ] {
+                    if d.tags.contains(&tag) {
+                        sev.push_str(word);
+                    }
+                }
+            }
             body.push_str(&format!(
                 "{} {} {} {} {} {} {}\n",
                 d.range.start.line,
                 d.range.start.col,
                 d.range.end.line,
                 d.range.end.col,
-                d.severity.word(),
+                sev,
                 src,
                 msg
             ));
@@ -2867,6 +2955,51 @@ impl Ext {
                         "document-links" if self.has(Feature::DocumentLinks) => {
                             DocRequest::parse(id, &fields).map(|r| {
                                 Ok(langfeat::encode_document_links(&h.document_links(self, &r)))
+                            })
+                        }
+                        "folding-ranges" if self.has(Feature::FoldingRanges) => {
+                            DocRequest::parse(id, &fields).map(|r| {
+                                Ok(present::encode_folding_ranges(&h.folding_ranges(self, &r)))
+                            })
+                        }
+                        "semantic-tokens" | "semantic-tokens-range"
+                            if self.has(Feature::SemanticTokens) =>
+                        {
+                            SemanticTokensRequest::parse(&verb, id, &fields).map(|r| {
+                                Ok(h.semantic_tokens(self, &r)
+                                    .map(|t| t.encode(r.range.is_some()))
+                                    .unwrap_or_default())
+                            })
+                        }
+                        "inlay-hints" if self.has(Feature::InlayHints) => {
+                            LinesRequest::parse(id, &fields)
+                                .map(|r| Ok(present::encode_inlay_hints(&h.inlay_hints(self, &r))))
+                        }
+                        "code-lens" if self.has(Feature::CodeLens) => {
+                            LinesRequest::parse(id, &fields)
+                                .map(|r| Ok(present::encode_code_lenses(&h.code_lenses(self, &r))))
+                        }
+                        "highlights"
+                            if self.has(Feature::DocumentHighlights) && fields.len() == 4 =>
+                        {
+                            PosRequest::parse(&fields)
+                                .map(|r| Ok(present::encode_highlights(&h.highlights(self, &r))))
+                        }
+                        "colors" if self.has(Feature::DocumentColors) => {
+                            LinesRequest::parse(id, &fields)
+                                .map(|r| Ok(present::encode_colors(&h.colors(self, &r))))
+                        }
+                        "color-edit" if self.has(Feature::DocumentColors) => {
+                            ColorEditRequest::parse(id, &fields).map(|r| {
+                                match h.color_edit(self, &r) {
+                                    Ok(e) => e.encode_with(self.edit_caps()),
+                                    Err(why) => Err(("refused", why)),
+                                }
+                            })
+                        }
+                        "inline-complete" if self.has(Feature::InlineComplete) => {
+                            InlineRequest::parse(id, &fields).map(|r| {
+                                Ok(present::encode_inline_items(&h.inline_complete(self, &r)))
                             })
                         }
                         "symbols" => PosRequest::parse(&fields)

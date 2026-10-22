@@ -2647,6 +2647,134 @@ static void langfeat_requests(void) {
     rx_buf_free(&got);
     rx_buf_free(&want);
 }
+
+/* ---- editor presentation ---- */
+
+static int on_present_ready_calls;
+static void on_present_ready(rx_ext *ext, const char *project, void *user) {
+    (void)project, (void)user;
+    rx_decoration d[2];
+    memset(d, 0, sizeof d);
+    d[0].r = R(2, 1, 2, 1);
+    d[0].after = "you,\n2h";
+    d[0].tip = "who";
+    d[0].command = "show";
+    d[0].args = "x";
+    d[0].args_len = 1;
+    d[1].r = R(3, 5, 3, 1);         /* backwards: left out */
+    on_present_ready_calls += rx_decoration_type(ext, "blame", "after muted -\ngrow none\n") == 0;
+    on_present_ready_calls += rx_decorate(ext, 4, 7, "blame", 0, 0, d, 2) == 0;
+    on_present_ready_calls += rx_semantic_legend(ext, "ra", "function variable", "mutable=underline") == 0;
+    char sev[48];
+    assert(strcmp(rx_tagged_severity(ext, "hint", 1, 1, sev), "hint+unnecessary+deprecated") == 0);
+}
+
+static int on_folding(rx_ext *ext, const rx_doc_ask *req, rx_pres *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_folding_range(out, 1, 9, NULL, NULL);
+    rx_folding_range(out, 3, 5, "region", "consts\nmore");
+    rx_folding_range(out, 4, 4, NULL, NULL);
+    return 1;
+}
+
+static int on_tokens(rx_ext *ext, const rx_tokens_ask *req, rx_buf *out, void *user) {
+    (void)ext, (void)user;
+    static const uint32_t data[] = {0, 3, 4, 0, 0, 1, 8, 1, 1, 1}, one[] = {1};
+    if (strcmp(req->prev, "r1") == 0) {
+        rx_semantic_delta(out, "r2", "ra", 1);
+        rx_semantic_edit(out, 3, 1, one, 1);
+    } else rx_semantic_full(out, req->range ? NULL : "r1", "ra", data, req->range ? 5 : 10, req->range);
+    return 1;
+}
+
+static int on_hints(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_hint_part p[2];
+    memset(p, 0, sizeof p);
+    p[0].label = ": i32";
+    p[0].tip = "the type";
+    rx_range er = R(2, 10, 2, 10);
+    const char *et = ": i32";
+    rx_inlay_hint(out, (rx_pos){2, 10}, 0, p, 1, &er, &et, 1);
+    memset(p, 0, sizeof p);
+    p[0].label = "fmt:";
+    p[0].command = "a";
+    p[1].label = "x";
+    p[1].has_goto = 1;
+    p[1].goto_at = (rx_pos){1, 4};
+    rx_inlay_hint(out, (rx_pos){4, 14}, 1, p, 2, NULL, NULL, 0);
+    return 1;
+}
+
+static int on_lenses(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_code_lens(out, 1, "Run", NULL, "run", NULL, 0);
+    rx_code_lens(out, 1, "2 refs", "used", NULL, NULL, 0);
+    rx_code_lens(out, 3, NULL, NULL, NULL, NULL, 0);
+    rx_code_lens(out, 0, "nowhere", NULL, NULL, NULL, 0);
+    return 1;
+}
+
+static int on_highlights(rx_ext *ext, const rx_ask *req, rx_pres *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_highlight(out, R(2, 9, 2, 10), "write");
+    rx_highlight(out, R(3, 13, 3, 14), "read");
+    return 1;
+}
+
+static int on_colors(rx_ext *ext, const rx_lines_ask *req, rx_pres *out, void *user) {
+    (void)ext, (void)req, (void)user;
+    rx_document_color(out, R(1, 9, 1, 17), 0xff0000ffu);
+    return 1;
+}
+
+static int on_inline(rx_ext *ext, const rx_ask *req, rx_pres *out, void *user) {
+    (void)ext, (void)user;
+    rx_inline_item(out, (rx_range){req->at, req->at}, " // one", "a", NULL, 0);
+    return 1;
+}
+
+static void presentation_requests(void) {
+    rx_handlers h;
+    memset(&h, 0, sizeof h);
+    h.ready = on_present_ready;
+    h.folding_ranges = on_folding;
+    h.semantic_tokens = on_tokens;
+    h.inlay_hints = on_hints;
+    h.code_lenses = on_lenses;
+    h.highlights = on_highlights;
+    h.colors = on_colors;
+    h.inline_complete = on_inline;
+    const char *feats = "decorations diagnostic-tags folding-ranges semantic-tokens inlay-hints code-lens "
+                        "document-highlights document-colors inline-complete";
+    rx_buf in = {NULL, 0, 0}, got = {NULL, 0, 0}, want = {NULL, 0, 0};
+    rx_buf_fmt(&in, "0 features %s\n0 ready -\nok 1\nok 2\nok 3\n", feats);
+    rx_buf_str(&in, "5 folding-ranges 4 7\n6 semantic-tokens 4 7 -\n7 semantic-tokens 4 8 r1\n"
+                    "8 semantic-tokens-range 4 8 10 20\n9 inlay-hints 4 8 1 40\n10 code-lens 4 8 1 40\n"
+                    "11 highlights 4 8 2 9\n12 colors 4 8 1 40\n13 inline-complete 4 8 2 15 invoked\n0 bye\n");
+    run(feats, &h, in.data, &got);
+    rx_buf_fmt(&want, "hello 1 %s\n", feats);
+    rx_buf_str(&want, "1 decoration-type blame 24\nafter muted -\ngrow none\n");
+    const char *deco = "2 1 2 1 0 7 3 16\nyou, 2hwhocommand show 1\nx";
+    rx_buf_fmt(&want, "2 decorate 4 7 blame 0 0 1 %zu\n%s", strlen(deco), deco);
+    rx_buf_str(&want, "3 semantic-legend ra 35\nfunction variable\nmutable=underline");
+    ok(&want, 5, "2\n1 9 - 0\n3 5 region 11\nconsts more");
+    ok(&want, 6, "r1 ra full 2\n0 3 4 0 0 1 8 1 1 1");
+    ok(&want, 7, "r2 ra delta 1\n3 1 1\n1\n");
+    ok(&want, 8, "- ra range 1\n0 3 4 0 0");
+    ok(&want, 9, "2\n2 10 after 1 22\n5 8 0\n: i32the typeedit 2 10 2 10 5\n: i32"
+                 "4 14 before 2 0\n4 0 12\nfmt:command a 0\n1 0 11\nxgoto 1 4 0\n");
+    ok(&want, 10, "3\n1 3 14\nRuncommand run 0\n1 6 10\n2 refstip 4\nused3 0 0\n");
+    ok(&want, 11, "2\n2 9 2 10 write\n3 13 3 14 read\n");
+    ok(&want, 12, "1\n1 9 1 17 ff0000ff\n");
+    ok(&want, 13, "1\n2 15 2 15 7 12\n // onecommand a 0\n");
+    same(&got, want.data);
+    assert(on_present_ready_calls == 3);
+    rx_buf_free(&in);
+    rx_buf_free(&got);
+    rx_buf_free(&want);
+}
+
 int main(void) {
     retained_patches();
     tables_forms_docs_quick();
@@ -2686,6 +2814,7 @@ int main(void) {
     actions_requests();
     tests_feature();
     langfeat_requests();
+    presentation_requests();
     fclose(stdout);
     remove("rhunext-test.in");
     remove("rhunext-test.out");
