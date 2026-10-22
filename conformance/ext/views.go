@@ -19,6 +19,10 @@ import (
 
 var viewKeyRe = regexp.MustCompile(`^[a-z0-9_]{1,40}$`)
 var viewPlaces = map[string]bool{"sidebar": true, "panel": true, "side": true}
+
+// kindFeature is the feature each kind beyond tree needs (with view-tree).
+var kindFeature = map[string]string{"log": "view-log", "table": "view-table", "form": "view-form", "doc": "view-doc"}
+
 var viewKinds = map[string]bool{"tree": true, "table": true, "log": true, "form": true, "doc": true, "picture": true}
 var viewFields = map[string]bool{"title": true, "place": true, "kind": true, "icon": true, "when": true, "open": true}
 var viewColors = map[string]bool{"fg": true, "muted": true, "accent": true, "error": true, "warning": true,
@@ -151,7 +155,11 @@ func (h *host) openRetained() {
 			h.warn("views", fmt.Sprintf("[views] %s is a picture but views was not said after hello 1: rhun shows it as unsupported", key))
 			continue
 		}
-		if kind != "tree" && kind != "log" && kind != "picture" {
+		if feat, ok := kindFeature[kind]; ok && !h.features[feat] {
+			h.warn(feat, fmt.Sprintf("[views] %s is a %s but %s was not said after hello 1: rhun shows it as unsupported", key, kind, feat))
+			continue
+		}
+		if kind != "tree" && kind != "log" && kind != "picture" && kind != "table" && kind != "form" && kind != "doc" {
 			continue
 		}
 		h.nextView++
@@ -213,8 +221,8 @@ func (h *host) retainedRequest(id int64, verb string, args []string, body []byte
 			return
 		}
 		kind := args[0]
-		if kind != "tree" && !(kind == "log" && h.features["view-log"]) {
-			h.fail("view-tree", fmt.Sprintf("vtab %s: a kind it did not agree (tree, or log with view-log)", kind))
+		if feat, ok := kindFeature[kind]; kind != "tree" && !(ok && h.features[feat]) {
+			h.fail("view-tree", fmt.Sprintf("vtab %s: a kind it did not agree (tree; log, table, form, doc with their features)", kind))
 			rerr("unknown", "no such request")
 			return
 		}
@@ -490,11 +498,23 @@ func applyPatch(v *rview, body []byte) (string, string) {
 		bad := func(w string) (string, string) { return "syntax", fmt.Sprintf("op %d (%s)", op, w) }
 		switch f[0] {
 		case "kids", "add", "set", "del", "expand", "collapse", "select-mode":
-			if v.vkind == "log" {
+			if v.vkind != "tree" && v.vkind != "table" {
 				return "noview", "an op for another kind of view"
 			}
 		case "log", "clear":
 			if v.vkind != "log" {
+				return "noview", "an op for another kind of view"
+			}
+		case "columns", "sorted":
+			if v.vkind != "table" {
+				return "noview", "an op for another kind of view"
+			}
+		case "form", "field":
+			if v.vkind != "form" {
+				return "noview", "an op for another kind of view"
+			}
+		case "doc", "base", "follow":
+			if v.vkind != "doc" {
 				return "noview", "an op for another kind of view"
 			}
 		}
@@ -529,6 +549,37 @@ func applyPatch(v *rview, body []byte) (string, string) {
 				return bad("clear 0")
 			}
 			v.lines = 0
+		case "columns":
+			if why := checkColumns(f, data); why != "" {
+				return bad(why)
+			}
+		case "sorted":
+			if len(f) != 4 || len(data) != 0 || (f[2] != "asc" && f[2] != "desc" && f[2] != "-") {
+				return bad("sorted COL asc|desc|- 0")
+			}
+			if c, err := strconv.Atoi(f[1]); f[1] != "-" && (err != nil || c < 1 || c > 16) {
+				return bad("sorted: COL from 1 to 16, or -")
+			}
+		case "form", "field":
+			if why := checkFormOp(f, data); why != "" {
+				return bad(why)
+			}
+		case "doc":
+			if len(f) != 2 {
+				return bad("doc LEN")
+			}
+			if len(data) > 1<<20 {
+				return "toobig", "doc"
+			}
+		case "base":
+			if len(f) != 2 || len(data) == 0 || len(data) > 4096 || bytes.ContainsAny(data, "\n\x00") ||
+				!(data[0] == '/' || (len(data) > 2 && data[1] == ':' && (data[2] == '/' || data[2] == '\\'))) {
+				return bad("base LEN + an absolute folder on one line")
+			}
+		case "follow":
+			if n, err := strconv.ParseInt(f[1], 10, 64); len(f) != 3 || len(data) != 0 || err != nil || n < 0 {
+				return bad("follow DOC 0")
+			}
 		case "title":
 			if len(data) > 80 || bytes.ContainsAny(data, "\n") {
 				return bad("title: one line of at most 80 bytes")
@@ -769,4 +820,88 @@ func (h *host) answerOf(rid int64, v *rview, verb, node string) {
 	delete(h.hostReqs, rid)
 	h.write(fmt.Sprintf("0 cancel %d\n", rid))
 	h.fail("view-tree", fmt.Sprintf("no answer to %s for %q within 15 s: rhun shows an error row", verb, node))
+}
+
+// checkColumns reads "columns N LEN" + N records "ALIGN WIDTH SORT TITLE_LEN" LF TITLE: "" or why not
+func checkColumns(f []string, data []byte) string {
+	if len(f) != 3 {
+		return "columns N LEN"
+	}
+	n, err := strconv.Atoi(f[1])
+	if err != nil || n < 1 || n > 16 {
+		return "columns: N from 1 to 16"
+	}
+	for i := 0; i < n; i++ {
+		cf, title, rest, why := readRecord(data)
+		if why != "" || len(cf) != 4 {
+			return "a column record is ALIGN WIDTH SORT TITLE_LEN, LF, the title"
+		}
+		w, err := strconv.Atoi(cf[1])
+		if (cf[0] != "left" && cf[0] != "right") || err != nil || w < 0 || w > 200 || (cf[2] != "sort" && cf[2] != "-") {
+			return fmt.Sprintf("column %q: ALIGN left|right, WIDTH 0-200, SORT sort|-", strings.Join(cf, " "))
+		}
+		if len(title) > 200 || bytes.ContainsAny(title, "\n") {
+			return "a column's title is one line of at most 200 bytes"
+		}
+		data = rest
+	}
+	if len(data) != 0 {
+		return "columns: bytes after the N records"
+	}
+	return ""
+}
+
+var formTypes = map[string]bool{"text": true, "area": true, "number": true, "check": true, "select": true, "button": true, "label": true}
+var formKeyRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+// checkFormOp reads "form N LEN" + N field records, or "field LEN" + one: "" or why not
+func checkFormOp(f []string, data []byte) string {
+	n := 1
+	if f[0] == "form" {
+		if len(f) != 3 {
+			return "form N LEN"
+		}
+		c, err := strconv.Atoi(f[1])
+		if err != nil || c < 0 || c > 200 {
+			return "form: N from 0 to 200"
+		}
+		n = c
+	} else if len(f) != 2 {
+		return "field LEN"
+	}
+	for i := 0; i < n; i++ {
+		nl := bytes.IndexByte(data, '\n')
+		if nl < 0 {
+			return "a field record is KEY TYPE ROW WEIGHT LABEL_LEN EXTRA_LEN, LF, the label and the records"
+		}
+		h := strings.Split(string(data[:nl]), " ")
+		if len(h) != 6 || !formKeyRe.MatchString(h[0]) || !formTypes[h[1]] {
+			return fmt.Sprintf("field %q: KEY TYPE ROW WEIGHT LABEL_LEN EXTRA_LEN", string(data[:nl]))
+		}
+		row, e1 := strconv.Atoi(h[2])
+		weight, e2 := strconv.Atoi(h[3])
+		ll, e3 := strconv.Atoi(h[4])
+		xl, e4 := strconv.Atoi(h[5])
+		rest := data[nl+1:]
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || row < 1 || row > 200 || weight < 1 || weight > 12 ||
+			ll < 0 || ll > 200 || xl < 0 || ll+xl > len(rest) {
+			return fmt.Sprintf("field %q: ROW 1-200, WEIGHT 1-12, a label of at most 200 bytes, lengths that fit", h[0])
+		}
+		x := rest[ll : ll+xl]
+		for len(x) > 0 {
+			rf, _, r, why := readRecord(x)
+			if why != "" {
+				return fmt.Sprintf("field %s: a record: %s", h[0], why)
+			}
+			if rf[0] == "value" && len(rf) != 3 {
+				return fmt.Sprintf("field %s: value SEQ LEN", h[0])
+			}
+			x = r
+		}
+		data = rest[ll+xl:]
+	}
+	if len(data) != 0 {
+		return f[0] + ": bytes after its records"
+	}
+	return ""
 }

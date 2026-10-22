@@ -1152,6 +1152,50 @@ static void notes_and_logs(void) {
     assert(!rx_has_body("0 view 4 key ctrl a"));
 }
 
+static void tables_forms_docs_quick(void) {
+    rx_patch p;
+    memset(&p, 0, sizeof p);
+    rx_column cols[2] = {{"Name", 0, 0, 1}, {"Size", 1, 6, 0}};
+    rx_patch_columns(&p, 2, cols);
+    rx_patch_sorted(&p, 2, 1);
+    rx_buf x = {NULL, 0, 0}, recs = {NULL, 0, 0};
+    rx_x_cell(&x, "12");
+    rx_node_rec(&recs, "a", 1, "a.rs", "leaf", &x);
+    rx_patch_kids(&p, "", 0, &recs, 1, 0);
+    same(&p.body, "columns 2 34\nleft 0 sort 4\nNameright 6 - 4\nSizesorted 2 desc 0\nkids 0 1 0 25\n1 4 9 leaf\naa.rscell 2\n12");
+    rx_patch_free(&p);
+    rx_buf_free(&x);
+    rx_buf_free(&recs);
+    memset(&p, 0, sizeof p);
+    rx_buf fx = {NULL, 0, 0}, frec = {NULL, 0, 0};
+    rx_fx_value(&fx, -1, "8080");
+    rx_field_rec(&frec, "port", "number", 1, 1, "Port", &fx);
+    rx_patch_field(&p, &frec);
+    rx_patch_doc(&p, "# Hi\n", 5);
+    rx_patch_base(&p, "/p");
+    rx_patch_follow(&p, 3);
+    same(&p.body, "field 39\nport number 1 1 4 14\nPortvalue - 4\n8080doc 5\n# Hi\nbase 2\n/pfollow 3 0\n");
+    assert(p.n == 4);
+    rx_patch_free(&p);
+    rx_buf_free(&fx);
+    rx_buf_free(&frec);
+    rx_buf step = {NULL, 0, 0}, ix = {NULL, 0, 0}, items = {NULL, 0, 0};
+    rx_qs_title(&step, "Branch");
+    rx_qs_mode(&step, "pick");
+    rx_qs_step(&step, 1, 2);
+    rx_rec(&ix, "desc", "current", 7);
+    rx_qi_rec(&items, "main", "main", 0, &ix);
+    rx_qs_items(&step, &items, 1);
+    same(&step, "title 6\nBranchmode pick 0\nstep 1 2 0\nitems 1 34\n4 4 14 item\nmainmaindesc 7\ncurrent");
+    rx_buf_free(&step);
+    rx_buf_free(&ix);
+    rx_buf_free(&items);
+    assert(rx_has_body("0 quick 3 accept 5 2 9"));
+    assert(rx_has_body("0 quick 3 button 0 refresh 0"));
+    assert(!rx_has_body("0 quick 3 hide"));
+    assert(rx_has_body("0 view 4 change 2 port 7 4"));
+}
+
 static void retained_patches(void) {
     rx_patch p;
     memset(&p, 0, sizeof p);
@@ -2605,6 +2649,7 @@ static void langfeat_requests(void) {
 }
 int main(void) {
     retained_patches();
+    tables_forms_docs_quick();
     ai_bodies();
     notes_and_logs();
     snippet_transform_wire();

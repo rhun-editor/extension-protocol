@@ -70,6 +70,7 @@ pub mod picture;
 pub mod query;
 pub mod resources;
 pub mod scm;
+pub mod quick;
 pub mod scmpanel;
 pub mod snippet;
 pub mod snippet_context;
@@ -358,6 +359,18 @@ pub enum Feature {
     ViewKeys,
     /// Decoded images by handle: [`Ext::image`], [`picture::Picture::image`].
     ViewImages,
+    /// Form views (`kind = form`, with [`Feature::ViewTree`]): [`views::Patch::form`],
+    /// [`views::RetainedEvent::Change`].
+    ViewForm,
+    /// Table views (`kind = table`): [`views::Patch::columns`], [`views::Node::cell`],
+    /// [`views::RetainedEvent::Sort`].
+    ViewTable,
+    /// Doc views (`kind = doc`): [`views::Patch::doc`], [`views::RetainedEvent::Link`].
+    ViewDoc,
+    /// Quick input: [`Ext::quick`], [`Handler::quick_event`] ([`quick`]).
+    QuickInput,
+    /// Node tooltips and notification messages drawn as Markdown.
+    Markdown,
     /// Notification cards with buttons: [`Ext::notify`], [`Handler::note_event`] ([`notify`]).
     Notify,
     /// Progress in the status bar, a card or a view: [`Ext::progress`], [`Handler::progress_cancel`].
@@ -448,6 +461,11 @@ impl Feature {
             Feature::ViewLog => "view-log",
             Feature::ViewKeys => "view-keys",
             Feature::ViewImages => "view-images",
+            Feature::ViewForm => "view-form",
+            Feature::ViewTable => "view-table",
+            Feature::ViewDoc => "view-doc",
+            Feature::QuickInput => "quick-input",
+            Feature::Markdown => "markdown",
             Feature::Notify => "notify",
             Feature::Progress => "progress",
             Feature::Scm => "scm",
@@ -939,6 +957,8 @@ pub trait Handler: Send {
     /// The user pressed Cancel on one of its progress entries (feature `progress`); rhun removes it
     /// 10 s later unless [`Ext::progress_end`] comes first.
     fn progress_cancel(&mut self, _ext: &Ext, _progress: u64) {}
+    /// What the user did in a quick input (feature `quick-input`): Q and the event.
+    fn quick_event(&mut self, _ext: &Ext, _q: u64, _ev: quick::QuickEvent) {}
     /// rhun asks for a node's children (feature `view-tree`): a patch with a `kids` op for it.
     fn view_children(
         &mut self,
@@ -2156,6 +2176,24 @@ impl Ext {
             .map(|_| ())
     }
 
+    /// Opens a quick input (feature `quick-input`; `busy` while one, the palette or a prompt
+    /// shows). Its Q.
+    pub fn quick(&self, step: &quick::Step) -> Result<u64, Error> {
+        let rep = self.request("quick", Some(&step.encode()))?;
+        Ok(rep.fields.first().and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// Changes what the step's records name, atomically (`noview` when it is gone).
+    pub fn quick_set(&self, q: u64, step: &quick::Step) -> Result<(), Error> {
+        self.request(&format!("quick-set {q}"), Some(&step.encode()))
+            .map(|_| ())
+    }
+
+    /// Closes it without a hide event.
+    pub fn quick_close(&self, q: u64) -> Result<(), Error> {
+        self.request(&format!("quick-close {q}"), None).map(|_| ())
+    }
+
     /// Closes a card without an event.
     pub fn unnotify(&self, note: u64) -> Result<(), Error> {
         self.request(&format!("unnotify {note}"), None).map(|_| ())
@@ -2387,8 +2425,10 @@ impl Ext {
                         }
                         return Msg::Delivered;
                     }
-                    let view_body =
-                        ev.name == "view" && ev.fields.get(1).is_some_and(|w| views::has_body(w));
+                    let view_body = (ev.name == "view"
+                        && ev.fields.get(1).is_some_and(|w| views::has_body(w)))
+                        || (ev.name == "quick"
+                            && ev.fields.get(1).is_some_and(|w| quick::has_body(w)));
                     // with command-args, run is NAME DOC FROM LEN and a body
                     let run_body = ev.name == "run" && ev.fields.len() == 4;
                     if ev.name == "edits"
@@ -2651,6 +2691,11 @@ impl Ext {
                         "progress" => {
                             if let Some(p) = notify::parse_progress_cancel(&ev) {
                                 h.progress_cancel(self, p);
+                            }
+                        }
+                        "quick" => {
+                            if let Some((q, qev)) = quick::parse_quick_event(&ev) {
+                                h.quick_event(self, q, qev);
                             }
                         }
                         "bye" => {

@@ -20,6 +20,17 @@ const FeatureViewTree = "view-tree"
 // FeatureViewLog is log views (kind = log, with view-tree): Patch.Log and Patch.Clear.
 const FeatureViewLog = "view-log"
 
+// Protocol 1.1 views features: form views (Patch.Form, Field, change/press/submit events), table
+// views (Patch.Columns, Node.Cell, the sort event), doc views (Patch.Doc, the link event), quick
+// input (Ext.Quick, QuickListener), and Markdown in node tooltips and notification messages.
+const (
+	FeatureViewForm   = "view-form"
+	FeatureViewTable  = "view-table"
+	FeatureViewDoc    = "view-doc"
+	FeatureQuickInput = "quick-input"
+	FeatureMarkdown   = "markdown"
+)
+
 // Log line severities (feature view-log).
 const (
 	LogNone  = "-"
@@ -197,6 +208,9 @@ func (n *Node) Menu(keys ...string) *Node {
 	return n.rec("menu", []byte(strings.Join(keys, " ")))
 }
 
+// Cell adds a table's next column (feature view-table): column 2, then 3, and so on.
+func (n *Node) Cell(text string) *Node { return n.rec("cell", []byte(viewLine(text, 1<<20))) }
+
 // Record adds a record this package has no method for: "NAME ARGS..." and its data.
 func (n *Node) Record(head string, data []byte) *Node { return n.rec(head, data) }
 
@@ -337,6 +351,126 @@ func (p *Patch) SelectMode(multi bool) *Patch {
 	return p.op("select-mode single", nil)
 }
 
+// Column is a table's column (Patch.Columns): Align "left" or "right", Min a width in characters
+// (0 takes a share of the rest), Sort a header that sorts.
+type Column struct {
+	Title string
+	Align string
+	Min   int
+	Sort  bool
+}
+
+// Columns sets a table's columns (1 to 16).
+func (p *Patch) Columns(cols ...Column) *Patch {
+	var data []byte
+	if len(cols) > 16 {
+		cols = cols[:16]
+	}
+	for _, c := range cols {
+		align, sort := "left", "-"
+		if c.Align == "right" {
+			align = "right"
+		}
+		if c.Sort {
+			sort = "sort"
+		}
+		t := viewLine(c.Title, 200)
+		data = append(data, fmt.Sprintf("%s %d %s %d\n", align, c.Min, sort, len(t))...)
+		data = append(data, t...)
+	}
+	return p.op(fmt.Sprintf("columns %d", len(cols)), data)
+}
+
+// Sorted shows the header's arrow when the extension sorted the rows: col from 1 (0: none).
+func (p *Patch) Sorted(col int, desc bool) *Patch {
+	if col <= 0 {
+		return p.op("sorted - -", nil)
+	}
+	dir := "asc"
+	if desc {
+		dir = "desc"
+	}
+	return p.op(fmt.Sprintf("sorted %d %s", col, dir), nil)
+}
+
+// FormField is a form field (Patch.Form, Patch.Field): Type text, area, number, check, select, button
+// or label; fields of the same Row share a line by Weight (1-12).
+type FormField struct {
+	Key, Type   string
+	Row, Weight int
+	Label       string
+	extra       []byte
+}
+
+// NewFormField is a field; add records with its methods.
+func NewFormField(key, typ string, row, weight int, label string) *FormField {
+	return &FormField{Key: key, Type: typ, Row: row, Weight: weight, Label: viewLine(label, 200)}
+}
+
+func (f *FormField) rec(head string, data []byte) *FormField {
+	f.extra = append(f.extra, fmt.Sprintf("%s %d\n", head, len(data))...)
+	f.extra = append(f.extra, data...)
+	return f
+}
+
+// Value sets the value; it applies when seq is the field's user sequence (-1: "-", 0) and when
+// the field is made.
+func (f *FormField) Value(seq int64, v string) *FormField {
+	s := "-"
+	if seq >= 0 {
+		s = strconv.FormatInt(seq, 10)
+	}
+	return f.rec("value "+s, []byte(v))
+}
+
+// Placeholder is shown in an empty input.
+func (f *FormField) Placeholder(s string) *FormField {
+	return f.rec("placeholder", []byte(viewLine(s, 200)))
+}
+
+// Options are a select's options.
+func (f *FormField) Options(opts ...string) *FormField {
+	return f.rec("options", []byte(strings.Join(opts, "\n")))
+}
+
+// Msg is a line under the field: info, warning or error.
+func (f *FormField) Msg(severity, text string) *FormField {
+	return f.rec("msg "+severity, []byte(viewLine(text, 1000)))
+}
+
+// Disabled greys it out.
+func (f *FormField) Disabled() *FormField { return f.rec("disabled", nil) }
+
+// Primary accents a button.
+func (f *FormField) Primary() *FormField { return f.rec("primary", nil) }
+
+func (f *FormField) bytes() []byte {
+	out := []byte(fmt.Sprintf("%s %s %d %d %d %d\n", f.Key, f.Type, f.Row, f.Weight, len(f.Label), len(f.extra)))
+	out = append(out, f.Label...)
+	return append(out, f.extra...)
+}
+
+// Form sets the whole form (feature view-form).
+func (p *Patch) Form(fields ...*FormField) *Patch {
+	var data []byte
+	for _, f := range fields {
+		data = append(data, f.bytes()...)
+	}
+	return p.op(fmt.Sprintf("form %d", len(fields)), data)
+}
+
+// Field adds or updates one field.
+func (p *Patch) Field(f *FormField) *Patch { return p.op("field", f.bytes()) }
+
+// Doc sets a doc view's Markdown (feature view-doc, at most 1 MB).
+func (p *Patch) Doc(markdown string) *Patch { return p.op("doc", []byte(markdown)) }
+
+// Base is the absolute folder a doc's relative links name.
+func (p *Patch) Base(folder string) *Patch { return p.op("base", []byte(viewLine(folder, 4096))) }
+
+// Follow keeps the doc view on the editor's top line while document doc is active (0 stops).
+func (p *Patch) Follow(doc int64) *Patch { return p.op(fmt.Sprintf("follow %d", doc), nil) }
+
 // Raw adds an op this package has no method for.
 func (p *Patch) Raw(head string, data []byte) *Patch { return p.op(head, data) }
 
@@ -472,14 +606,19 @@ type ViewOpen struct {
 }
 
 // RetainedEvent is what the user did in a retained view. Kind is visible, focus, select,
-// activate, expand, collapse, check, action, discarded, closed or clear (a log's Clear button); On for visible, focus and
-// check; Rev the content the user acted on; IDs the selected nodes (select) or the node.
+// activate, expand, collapse, check, action, discarded, closed or clear (a log's Clear button),
+// sort (a table: Col and Desc), change (a form: Key, Seq, Body the value), press, submit (Key),
+// link (a doc: Body the target); On for visible, focus and check; Rev the content the user acted
+// on; IDs the selected nodes (select) or the node.
 type RetainedEvent struct {
 	Kind string
 	On   bool
 	Rev  int64
 	IDs  [][]byte
-	Key  string // action: its key; discarded: what was dropped
+	Key  string // action: its key; discarded: what was dropped; change, press, submit: the field
+	Col  int    // sort: the column from 1
+	Desc bool   // sort: descending
+	Seq  int64  // change: the field's user sequence
 	Args []string
 	Body []byte
 }
@@ -555,6 +694,20 @@ func parseRetainedEvent(ev Event) (View, RetainedEvent, bool) {
 			r.Key = ev.Args[3]
 		}
 	case "closed":
+	case "sort":
+		r.Rev, r.Col, r.Desc = num(2), int(num(3)), len(ev.Args) > 4 && ev.Args[4] == "desc"
+	case "change":
+		r.Rev, r.Seq = num(2), num(4)
+		if len(ev.Args) > 3 {
+			r.Key = ev.Args[3]
+		}
+	case "press", "submit":
+		r.Rev = num(2)
+		if len(ev.Args) > 3 {
+			r.Key = ev.Args[3]
+		}
+	case "link":
+		r.Rev = num(2)
 	case "size", "metrics", "hover", "down", "drag", "up", "click", "leave", "wheel", "open",
 		"key", "text", "paste", "selectall", "dblclick":
 		return 0, RetainedEvent{}, false

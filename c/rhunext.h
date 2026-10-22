@@ -448,6 +448,12 @@ typedef struct {
     /* Progress (feature "progress"): the user pressed Cancel; rhun removes it 10 s later unless
      * rx_progress_end comes first. */
     void (*progress_cancel)(rx_ext *ext, int64_t progress, void *user);
+    /* Quick input (feature "quick-input"): "0 quick Q WHAT SEQ ...": what is value, active,
+     * accept, back, button or hide; argv the fields after WHAT (SEQ first; accept: SEQ N; button:
+     * SEQ KEY); body the text, the item id, or for accept the N ids each ending in LF, then the
+     * field's text. */
+    void (*quick_event)(rx_ext *ext, int64_t q, const char *what, int argc, char **argv,
+                        const unsigned char *body, size_t body_len, void *user);
     /* Protocol 1.1, feature "command-args": every invocation of one of its commands with where it
      * came from and its body; when set it is called instead of command. */
     void (*invoke)(rx_ext *ext, const struct rx_invocation_s *inv, void *user);
@@ -598,6 +604,48 @@ int64_t rx_image(rx_ext *ext, const void *data, size_t len);
 int rx_unimage(rx_ext *ext, int64_t image);
 /* the picture shape that draws an image scaled into the box */
 void rx_pic_image(rx_buf *picture, double x, double y, double w, double h, int64_t image);
+
+/* Tables (feature "view-table", kind = table): columns (1-16) and the arrow of a column the
+ * extension sorted (col from 1, 0 none); rx_x_cell adds a node's next column (2, 3, ...). A sort
+ * event (kind "sort", argv REV COL asc|desc) comes when the user sorts while rows are paged. */
+typedef struct rx_column { const char *title; int right; int min; int sort; } rx_column;
+void rx_patch_columns(rx_patch *p, int n, const rx_column *cols);
+void rx_patch_sorted(rx_patch *p, int col, int desc);
+void rx_x_cell(rx_buf *x, const char *text);
+/* Forms (feature "view-form", kind = form): field records built with rx_field_rec (type text,
+ * area, number, check, select, button, label; extra records rx_fx_* or rx_rec), then the whole
+ * form or one field. Events: change (argv REV KEY SEQ LEN, body the value), press, submit. */
+void rx_field_rec(rx_buf *out, const char *key, const char *type, int row, int weight, const char *label,
+                  const rx_buf *extra);
+void rx_fx_value(rx_buf *x, int64_t seq, const char *value);     /* seq -1: "-" */
+void rx_fx_placeholder(rx_buf *x, const char *text);
+void rx_fx_options(rx_buf *x, const char *lines);                /* one option a line */
+void rx_fx_msg(rx_buf *x, const char *severity, const char *text);
+void rx_patch_form(rx_patch *p, const rx_buf *records, int n);
+void rx_patch_field(rx_patch *p, const rx_buf *record);
+/* Doc views (feature "view-doc", kind = doc): Markdown (at most 1 MB), the folder its relative
+ * links name, the document the view follows (0 stops). A link event (kind "link", body the
+ * target) comes for links rhun does not follow. */
+void rx_patch_doc(rx_patch *p, const char *markdown, size_t len);
+void rx_patch_base(rx_patch *p, const char *folder);
+void rx_patch_follow(rx_patch *p, int64_t doc);
+/* Quick input (feature "quick-input"): a step body built with rx_qs_* (only the records given
+ * change on rx_quick_set); items with rx_qi_rec (sep 1: a separator) and rx_qs_items. rx_quick
+ * returns Q or -1 (busy while one, the palette or a prompt shows); events reach quick_event. */
+void rx_qs_title(rx_buf *b, const char *title);
+void rx_qs_mode(rx_buf *b, const char *mode);                   /* "pick" or "input" */
+void rx_qs_step(rx_buf *b, int n, int of);
+void rx_qs_placeholder(rx_buf *b, const char *text);
+void rx_qs_prompt(rx_buf *b, const char *text);
+void rx_qs_value(rx_buf *b, int64_t seq, const char *text);     /* seq -1: "-" */
+void rx_qs_flags(rx_buf *b, const char *flags);                 /* space separated, "" clears */
+void rx_qs_msg(rx_buf *b, int64_t seq, const char *severity, const char *text);
+void rx_qs_active(rx_buf *b, const char *id);
+void rx_qi_rec(rx_buf *out, const char *id, const char *label, int sep, const rx_buf *extra);
+void rx_qs_items(rx_buf *b, const rx_buf *records, int n);
+int64_t rx_quick(rx_ext *ext, const rx_buf *step);
+int rx_quick_set(rx_ext *ext, int64_t q, const rx_buf *step);
+int rx_quick_close(rx_ext *ext, int64_t q);
 
 /* Notifications (protocol 1.1, feature "notify"): a card built with rx_note_*, shown with
  * rx_notify(ext, "info"|"warning"|"error", &note); rx_note_free after. */
@@ -1714,6 +1762,16 @@ static int rx_has_body(const char *line) {
         if (strncmp(v + 1, "call ", 5) == 0) return rx_nfields(line) == 6;   /* ID call EXT.NAME DOC CALLER LEN */
         for (int i = 0; req[i]; i++)
             if (strncmp(v + 1, req[i], strlen(req[i])) == 0) return 1;
+        return 0;
+    }
+    if (strncmp(line, "0 quick ", 8) == 0) {
+        /* quick input: "0 quick Q WHAT ... LEN" for value, active, accept and button */
+        const char *w = strchr(line + 8, ' ');
+        if (!w) return 0;
+        w++;
+        static const char *qwith[] = {"value ", "active ", "accept ", "button ", NULL};
+        for (int i = 0; qwith[i]; i++)
+            if (strncmp(w, qwith[i], strlen(qwith[i])) == 0) return 1;
         return 0;
     }
     if (strncmp(line, "0 view ", 7) != 0) return 0;
@@ -7788,6 +7846,106 @@ void rx_note_button(rx_note *n, const char *title, const char *command, const vo
         rx_buf_free(&h);
     }
 }
+/* ---- tables, forms, doc views, quick input */
+
+void rx_patch_columns(rx_patch *p, int n, const rx_column *cols) {
+    rx_buf d = {NULL, 0, 0};
+    if (n > 16) n = 16;
+    for (int i = 0; i < n; i++) {
+        size_t tn = rx_line_len(cols[i].title, 200);
+        rx_buf_fmt(&d, "%s %d %s %zu\n", cols[i].right ? "right" : "left", cols[i].min, cols[i].sort ? "sort" : "-", tn);
+        rx_buf_add(&d, cols[i].title, tn);
+    }
+    char head[32];
+    snprintf(head, sizeof head, "columns %d", n);
+    rx_patch_op(p, head, d.data, d.len);
+    rx_buf_free(&d);
+}
+void rx_patch_sorted(rx_patch *p, int col, int desc) {
+    if (col <= 0) rx_buf_fmt(&p->body, "sorted - - 0\n");
+    else rx_buf_fmt(&p->body, "sorted %d %s 0\n", col, desc ? "desc" : "asc");
+    p->n++;
+}
+void rx_x_cell(rx_buf *x, const char *text) { rx_rec(x, "cell", text, rx_line_len(text, 1 << 20)); }
+void rx_field_rec(rx_buf *out, const char *key, const char *type, int row, int weight, const char *label,
+                  const rx_buf *extra) {
+    size_t ln = rx_line_len(label, 200), xn = extra ? extra->len : 0;
+    rx_buf_fmt(out, "%s %s %d %d %zu %zu\n", key, type, row, weight, ln, xn);
+    rx_buf_add(out, label, ln);
+    if (xn) rx_buf_add(out, extra->data, xn);
+}
+void rx_fx_value(rx_buf *x, int64_t seq, const char *value) {
+    char head[48];
+    if (seq < 0) snprintf(head, sizeof head, "value -");
+    else snprintf(head, sizeof head, "value %lld", (long long)seq);
+    rx_rec(x, head, value, strlen(value));
+}
+void rx_fx_placeholder(rx_buf *x, const char *text) { rx_rec(x, "placeholder", text, rx_line_len(text, 200)); }
+void rx_fx_options(rx_buf *x, const char *lines) { rx_rec(x, "options", lines, strlen(lines)); }
+void rx_fx_msg(rx_buf *x, const char *severity, const char *text) {
+    char head[48];
+    snprintf(head, sizeof head, "msg %s", severity);
+    rx_rec(x, head, text, rx_line_len(text, 1000));
+}
+void rx_patch_form(rx_patch *p, const rx_buf *records, int n) {
+    char head[32];
+    snprintf(head, sizeof head, "form %d", n);
+    rx_patch_op(p, head, records ? records->data : NULL, records ? records->len : 0);
+}
+void rx_patch_field(rx_patch *p, const rx_buf *record) { rx_patch_op(p, "field", record->data, record->len); }
+void rx_patch_doc(rx_patch *p, const char *markdown, size_t len) { rx_patch_op(p, "doc", markdown, len); }
+void rx_patch_base(rx_patch *p, const char *folder) { rx_patch_op(p, "base", folder, rx_line_len(folder, 4096)); }
+void rx_patch_follow(rx_patch *p, int64_t doc) { rx_buf_fmt(&p->body, "follow %lld 0\n", (long long)doc); p->n++; }
+void rx_qs_title(rx_buf *b, const char *title) { rx_rec(b, "title", title, rx_line_len(title, 200)); }
+void rx_qs_mode(rx_buf *b, const char *mode) { rx_buf_fmt(b, "mode %s 0\n", mode); }
+void rx_qs_step(rx_buf *b, int n, int of) { rx_buf_fmt(b, "step %d %d 0\n", n, of); }
+void rx_qs_placeholder(rx_buf *b, const char *text) { rx_rec(b, "placeholder", text, rx_line_len(text, 200)); }
+void rx_qs_prompt(rx_buf *b, const char *text) { rx_rec(b, "prompt", text, rx_line_len(text, 1000)); }
+void rx_qs_value(rx_buf *b, int64_t seq, const char *text) {
+    char head[48];
+    if (seq < 0) snprintf(head, sizeof head, "value -");
+    else snprintf(head, sizeof head, "value %lld", (long long)seq);
+    rx_rec(b, head, text, rx_line_len(text, 65536));
+}
+void rx_qs_flags(rx_buf *b, const char *flags) { rx_buf_fmt(b, "flags %s 0\n", flags[0] ? flags : "-"); }
+void rx_qs_msg(rx_buf *b, int64_t seq, const char *severity, const char *text) {
+    char head[64];
+    snprintf(head, sizeof head, "msg %lld %s", (long long)seq, severity);
+    rx_rec(b, head, text, rx_line_len(text, 1000));
+}
+void rx_qs_active(rx_buf *b, const char *id) { rx_rec(b, "active", id, strlen(id)); }
+void rx_qi_rec(rx_buf *out, const char *id, const char *label, int sep, const rx_buf *extra) {
+    size_t in = strlen(id), ln = rx_line_len(label, 1000), xn = extra ? extra->len : 0;
+    rx_buf_fmt(out, "%zu %zu %zu %s\n", in, ln, xn, sep ? "sep" : "item");
+    rx_buf_add(out, id, in);
+    rx_buf_add(out, label, ln);
+    if (xn) rx_buf_add(out, extra->data, xn);
+}
+void rx_qs_items(rx_buf *b, const rx_buf *records, int n) {
+    char head[32];
+    snprintf(head, sizeof head, "items %d", n);
+    rx_rec(b, head, records ? records->data : NULL, records ? records->len : 0);
+}
+int64_t rx_quick(rx_ext *ext, const rx_buf *step) {
+    rx_buf f = {NULL, 0, 0};
+    char line[64];
+    snprintf(line, sizeof line, "quick %zu", step->len);
+    int r = rx_request(ext, line, step->data, step->len, &f, NULL);
+    int64_t q = r < 0 ? -1 : (f.data ? atoll(f.data) : 0);
+    rx_buf_free(&f);
+    return q;
+}
+int rx_quick_set(rx_ext *ext, int64_t q, const rx_buf *step) {
+    char line[96];
+    snprintf(line, sizeof line, "quick-set %lld %zu", (long long)q, step->len);
+    return rx_request(ext, line, step->data, step->len, NULL, NULL);
+}
+int rx_quick_close(rx_ext *ext, int64_t q) {
+    char line[64];
+    snprintf(line, sizeof line, "quick-close %lld", (long long)q);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
 void rx_note_free(rx_note *n) { rx_buf_free(&n->msg); rx_buf_free(&n->extra); n->buttons = 0; }
 static void rx_note_body(const rx_note *n, rx_buf *b) {
     rx_buf_fmt(b, "%zu %zu\n", n->msg.len, n->extra.len);
@@ -7866,7 +8024,9 @@ static int rx_retained_dispatch(rx_ext *ext, const rx_handlers *h, void *user, c
     e.kind = k, e.argc = n - 4, e.argv = f + 4, e.body = body, e.body_len = body_len, e.key = "";
     if (n > 4) e.on = strcmp(f[4], "1") == 0, e.rev = atoll(f[4]);
     if (strcmp(k, "check") == 0 && n > 5) e.on = strcmp(f[5], "1") == 0;
-    if ((strcmp(k, "action") == 0 || strcmp(k, "discarded") == 0) && n > 5) e.key = f[5];
+    if ((strcmp(k, "action") == 0 || strcmp(k, "discarded") == 0 || strcmp(k, "change") == 0 ||
+         strcmp(k, "press") == 0 || strcmp(k, "submit") == 0) && n > 5)
+        e.key = f[5];
     if (body && body_len) {
         e.id = body, e.id_len = body_len;
         if (strcmp(k, "select") == 0) {
@@ -8371,6 +8531,8 @@ int rx_run(const char *features, const rx_handlers *h, void *user) {
             } else if (strcmp(f[1], "notify") == 0 && n >= 4 && h->note_event) {
                 if (strcmp(f[3], "pressed") == 0 && n >= 5) h->note_event(ext, atoll(f[2]), atoi(f[4]), user);
                 else if (strcmp(f[3], "closed") == 0) h->note_event(ext, atoll(f[2]), 0, user);
+            } else if (strcmp(f[1], "quick") == 0 && n >= 4 && h->quick_event) {
+                h->quick_event(ext, atoll(f[2]), f[3], n - 4, f + 4, m->body, m->body_len, user);
             } else if (strcmp(f[1], "progress") == 0 && n >= 4 && strcmp(f[3], "cancel") == 0 && h->progress_cancel) {
                 h->progress_cancel(ext, atoll(f[2]), user);
             } else if (strcmp(f[1], "test-out") == 0 && n == 5 && h->test_out) {

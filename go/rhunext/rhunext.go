@@ -366,6 +366,14 @@ func RunOnWith(r io.Reader, w io.Writer, logw io.Writer, features []string, h Ha
 				}
 			}
 			h.Event(ext, ev)
+		case "quick":
+			if ql, ok := h.(QuickListener); ok {
+				if qev, ok := parseQuickEvent(ev); ok {
+					ql.QuickEvent(ext, qev)
+					continue
+				}
+			}
+			h.Event(ext, ev)
 		case "progress":
 			if pc, ok := h.(ProgressCanceller); ok {
 				if p, ok := parseProgressCancel(ev); ok {
@@ -508,6 +516,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 0
 		} else if ev.Name == "view" && len(ev.Args) >= 3 && viewEventHasBody(ev.Args[1]) {
 			lenAt = len(ev.Args) - 1 // retained views: the last field is the body's length
+		} else if ev.Name == "quick" && len(ev.Args) >= 3 && quickEventHasBody(ev.Args[1]) {
+			lenAt = len(ev.Args) - 1 // quick input: the last field is the body's length
 		} else if ev.Name == "nb-run" && len(ev.Args) == 5 {
 			lenAt = 4 // a cell's source, at most 4 MB
 		} else if ev.Name == "run" && len(ev.Args) == 4 {

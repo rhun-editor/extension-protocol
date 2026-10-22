@@ -274,6 +274,8 @@ type host struct {
 	notes         map[int64]*noteState // notifications open (notify.go)
 	progs         map[int64]*progState // progress not ended
 	noteSeq       int64
+	quickQ        int64 // the quick input open (quick.go), 0 none
+	quickSeq      int64
 	images        map[int64]bool    // view-images handles (views.go)
 	patches       int               // vpatch requests that passed
 	secrets       map[string][]byte // secret-set values (resources.go)
@@ -496,6 +498,7 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"git-log": true, "git-show": true, "git-diff-open": true, "quickdiff-refresh": true, // source control: scm.go
 	"scm-register": true, "scm-update": true, "scm-input-set": true, // version control panels: scmpanel.go
 	"vpatch": true, "vreveal": true, "notify": true, "notify-set": true, "progress": true, "progress-set": true, "vimage": true, // retained views, notifications, progress: views.go, notify.go
+	"quick": true, "quick-set": true, // quick input: quick.go
 	"secret-set": true, "open-url": true, "external-uri": true, "find-files": true, "search-text": true, // resources: resources.go
 	"agent-sessions": true, "propose": true, "tool-call": true, "agent-ask": true, // ai: ai.go
 	"select-many": true, "show-locations": true, "diff": true, // workspace edits and the editor: editor.go
@@ -1235,6 +1238,8 @@ func (h *host) handle(msg message) {
 		h.notifyRequest(id, verb, args, msg.body, reply, rerr)
 	case "vimage", "unimage":
 		h.imageRequest(id, verb, args, msg.body, reply, rerr)
+	case "quick", "quick-set", "quick-close":
+		h.quickRequest(id, verb, args, msg.body, reply, rerr)
 	case "editor-read", "editor-dirty":
 		h.edRequest(id, verb, args, reply, rerr)
 	case "git-repo", "git-status", "git-blame", "git-log", "git-show", "git-diff-open":
