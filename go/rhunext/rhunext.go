@@ -514,6 +514,8 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			lenAt = 3
 		} else if (ev.Name == "link" || ev.Name == "found") && len(ev.Args) == 2 {
 			lenAt = 1
+		} else if ev.Name == "folders" && len(ev.Args) == 1 {
+			lenAt = 0 // workspace-folders: the folders
 		} else if ev.Name == "editor-path" && len(ev.Args) == 2 {
 			lenAt = 1 // a custom editor's new path
 		} else if ev.Name == "terminal-output" && len(ev.Args) == 3 {
@@ -636,6 +638,21 @@ func (e *Ext) readMessage(br *bufio.Reader) (*Event, error) {
 			}
 			if _, err := e.beginSource(id); err != nil {
 				ev.Args = append(ev.Args, "\x00busy")
+			}
+		}
+		// debug-resolve TYPE REQUEST NODEBUG LEN is followed by a configuration body; "0 cancel ID"
+		// ends its context
+		if len(fields) == 6 && fields[1] == "debug-resolve" {
+			n, ok := bodyLen(fields[5], MaxDebugBody)
+			if !ok {
+				return nil, fmt.Errorf("a debug-resolve length %q", fields[5])
+			}
+			ev.Body = make([]byte, n)
+			if _, err := io.ReadFull(br, ev.Body); err != nil {
+				return nil, err
+			}
+			if _, err := e.beginSource(id); err != nil {
+				return nil, err
 			}
 		}
 		// commit-message (LEN) is followed by a body; "0 cancel ID" ends its context

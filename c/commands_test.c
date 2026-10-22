@@ -76,7 +76,41 @@ static void check(const rx_buf *got, const char *want) {
     }
 }
 
+/* the shared when-clause vectors (v1.1/when-vectors.txt) */
+static void when_vectors(void) {
+    FILE *f = fopen("../v1.1/when-vectors.txt", "rb");
+    if (!f) f = fopen("v1.1/when-vectors.txt", "rb");
+    assert(f != NULL);
+    char line[1024];
+    int n = 0;
+    while (fgets(line, sizeof line, f)) {
+        size_t l = strlen(line);
+        while (l && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = 0;
+        if (!l || line[0] == '#') continue;
+        char *tab = strchr(line, '\t');
+        assert(tab != NULL);
+        *tab = 0;
+        const char *clause = tab + 1;
+        size_t at = 0;
+        const char *msg = NULL;
+        int r = rx_when_check(clause, strlen(clause), &at, &msg);
+        if (strncmp(line, "error ", 6) == 0) {
+            if (r != -1 || at != (size_t)atoi(line + 6)) {
+                fprintf(stderr, "when %s: %d at %zu (%s)\n", clause, r, at, msg ? msg : "");
+                assert(0);
+            }
+        } else if (r != 0) {
+            fprintf(stderr, "when %s: %s at %zu\n", clause, msg, at);
+            assert(0);
+        }
+        n++;
+    }
+    fclose(f);
+    assert(n >= 50);
+}
+
 int main(void) {
+    when_vectors();
     rx_buf b = {NULL, 0, 0};
     assert(rx_command_ref(&b, "run_task", "all\nx", 5) == 0);
     check(&b, "command run_task 5\nall\nx");

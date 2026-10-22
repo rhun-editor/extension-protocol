@@ -43,6 +43,15 @@ where `DIR` is the extension laid out as installed (`OWNER/NAME/extension.ini` a
 headlessly against rhun as section 10 of the spec describes:
 `rhun PROJECT --headless 1000x600 --extensions EXTS --script test.txt`.
 
+## Remote windows
+
+In a remote window (SSH, a container, WSL) an extension runs on the Linux x86-64 host by default,
+so a release that should work there carries `run.linux-x86_64` (rhun fetches that archive for the
+host when the installed folder holds another system's build), or is a script or a WebAssembly
+module. `where = local` in the manifest keeps it on the user's computer instead; it may not ask for
+`project` or `home` then. Paths in the protocol are the host's, as they are; `RHUN_REMOTE` names
+the remote, and the checker enforces the `where` rules (v1.1/v1.1.md, section "Remote windows").
+
 ## WebAssembly
 
 An extension may ship one `wasm32-wasip1` module instead of (or besides) a binary per system:
@@ -119,6 +128,24 @@ instead of the released SDK or `@latest`. For Go, use a `go.work` containing the
 repositories, then `go build -o /tmp/rhun-ext-check ./conformance/ext` from this repository.
 Pass that path as `RHUN_EXT_CHECK` to extension test scripts. Rust can use a local path dependency;
 C can include the checkout's header. Release the SDK before extensions depending on its additions.
+
+## Resources, workspaces and sign-in (1.1)
+
+Protocol 1.1 adds these, specified in [v1.1](v1.1/v1.1.md#lifecycle-idle--stop-and-feature-idle):
+
+| Feature | Rust | Go | C |
+| --- | --- | --- | --- |
+| `idle` (with `idle = stop`): stay running while busy | `Ext::busy` | `BusyContext` | `rx_busy` |
+| `secrets` (`[needs] secrets = yes`): the system keychain | `Ext::secret_get`, `secret_set`, `secret_delete`, `secret_keys` | `SecretGetContext` … | `rx_secret_get` … |
+| `uris`: virtual documents for `[provides] schemes` | `Handler::content`, `Ext::open_uri`, `Ext::content_changed` | `ContentProvider`, `OpenURIContext`, `ContentChangedContext` | `rx_handlers.content`, `rx_content_changed` |
+| `urls`: open a web page, links back to the extension | `Ext::open_url`, `external_uri`, `link`, `parse_link`; `auth::{Pkce, Loopback}` | `OpenURLContext`, `ExternalURIContext`, `LinkContext`, `ParseLink`; `NewPKCE`, `ListenLoopback` | `rx_open_url`, `rx_external_uri`, `rx_link`; `RHUNEXT_AUTH`: `rx_pkce_new`, `rx_loopback_*` |
+| `files` (`project = read`): find files by glob, search text, in batches | `Ext::find_files`, `Ext::search_text` | `FindFilesContext`, `SearchTextContext`, `CompileSearchRegex` | `rx_find_files`, `rx_search_text` |
+| `scoped-settings`: settings per workspace, folder and language | `Ext::setting_get` | `SettingGetContext`, `ParseSettingChanged` | `rx_setting_get` |
+| `workspace-folders`: several folders in a window | `parse_folders`, `Ext::folder_of` | `ParseFolders`, `FolderOfContext` | `rx_parse_folders`, `rx_folder_of` |
+
+Sign in with OAuth's authorization code flow and PKCE: listen on a loopback port, pass its
+redirect URI through `external-uri`, open the provider's page with `open-url` (rhun asks the
+user), take the code from the redirect, exchange it, and keep the token with `secret-set`.
 
 ## Language features (1.1)
 
@@ -239,7 +266,10 @@ callable commands with `RunCommand`, and answer calls with `Callee` (`CallReques
 `context-keys` sets the extension's keys for when clauses (`SetContext` / `set_context` /
 `rx_set_context`), and `status-items` adds status bar items (`SetStatusItem` with `StatusItem` /
 `set_status_item` / `rx_set_status_item`). Without `command-args` the old `Run` / `command`
-handlers keep receiving every run.
+handlers keep receiving every run. `WhenCheck` / `when::check` / `rx_when_check` compile a when
+clause as rhun does (the byte offset of an error included; `v1.1/when-vectors.txt` holds the
+shared vectors), and `rhun-ext-check` checks `[keys]`, `[menu.*]`, `[status]`, `[context]`,
+`[icons]`, `[language.*]`, the language keys of `syntax/*.syn` and `icon-themes/*.icons`.
 
 ## Test controllers
 

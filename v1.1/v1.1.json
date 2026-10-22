@@ -58,6 +58,11 @@
       "minLength": 1,
       "description": "a program found on PATH that runs the script named by 'run' (python3, node, …)"
     },
+    "where": {
+      "enum": ["workspace", "local"],
+      "default": "workspace",
+      "description": "where it runs in a remote window: on the host (workspace) or on this computer (local); a local window ignores it. where = local may not ask for project or home in [needs]"
+    },
     "requires": {
       "type": "string",
       "description": "shown when the runtime is missing or too old; not checked by rhun 0.18.0"
@@ -185,6 +190,14 @@
           "type": "string",
           "description": "Protocol 1.1: programs rhun may start for this extension as the user during a test run (test-exec): bare names, space separated, at most 16 of 64 bytes",
           "pattern": "^[A-Za-z0-9._+-]{1,64}( [A-Za-z0-9._+-]{1,64}){0,15}$"
+        },
+        "debug": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "start the extension's debug adapters as the user, outside any sandbox, after one approval per project ([debugger.TYPE] sections)"
         }
       },
       "additionalProperties": false
@@ -342,7 +355,10 @@
         },
         "agents": {
           "type": "string",
-          "enum": ["yes", "no"],
+          "enum": [
+            "yes",
+            "no"
+          ],
           "description": "yes: the extension lists agent sessions in the agents panel (feature agents)."
         },
         "agents.title": {
@@ -428,7 +444,10 @@
         },
         "^[a-z0-9_]{1,40}\\.readonly$": {
           "type": "string",
-          "enum": ["yes", "no"]
+          "enum": [
+            "yes",
+            "no"
+          ]
         }
       },
       "additionalProperties": false
@@ -516,7 +535,7 @@
     }
   },
   "patternProperties": {
-    "^(menu\\.(editor|explorer|tab|terminal|extension|editor_title|view_title|view_item|view_item_inline|history_commit|history_file|scm_resource|scm_group)|submenu\\.[a-z0-9_]{1,40})$": {
+    "^(menu\\.(editor|explorer|tab|terminal|extension|editor_title|view_title|view_item|view_item_inline|history_commit|history_file|scm_resource|scm_group|scm_title)|submenu\\.[a-z0-9_]{1,40})$": {
       "type": "object",
       "description": "[menu.LOCATION] and [submenu.NAME] (protocol 1.1): ITEM.command (a command as [keys] names it), ITEM.submenu (a [submenu.NAME]), ITEM.group, ITEM.order, ITEM.when, ITEM.args; [submenu.NAME] also has title. At most 16 items per extension per location.",
       "propertyNames": {
@@ -525,6 +544,99 @@
       "additionalProperties": {
         "type": "string"
       }
+    },
+    "^language\\.[^\\s]{1,64}$": {
+      "type": "object",
+      "description": "[language.NAME] (protocol 1.1): language keys for an existing grammar NAME (_ for a space): brackets, autoclose, autoclose_code, surround, indent_open, indent_close, indent_middle, indent_dedent_after, continue, doc_block, fold (brackets|indent), fold_markers, comment, block, ident, colon_indent (yes|no).",
+      "propertyNames": {
+        "enum": [
+          "brackets",
+          "autoclose",
+          "autoclose_code",
+          "surround",
+          "indent_open",
+          "indent_close",
+          "indent_middle",
+          "indent_dedent_after",
+          "continue",
+          "doc_block",
+          "fold",
+          "fold_markers",
+          "comment",
+          "block",
+          "ident",
+          "colon_indent"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "^debugger\\.[a-z0-9-]{1,32}$": {
+      "type": "object",
+      "description": "[debugger.TYPE]: a debug adapter rhun starts and speaks DAP to (feature debug); needs [needs] debug = yes",
+      "required": [
+        "program"
+      ],
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "languages": {
+          "type": "string",
+          "description": "grammar names, space separated"
+        },
+        "program": {
+          "type": "string",
+          "description": "names tried in order on the login PATH and in paths, or a path inside the extension's folder"
+        },
+        "paths": {
+          "type": "string"
+        },
+        "args": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "transport": {
+          "enum": [
+            "stdio",
+            "tcp"
+          ],
+          "default": "stdio"
+        },
+        "requests": {
+          "type": "string",
+          "pattern": "^\\s*(launch|attach)(\\s+(launch|attach))*\\s*$"
+        },
+        "install": {
+          "type": "string"
+        },
+        "resolve": {
+          "enum": [
+            "yes",
+            "no"
+          ],
+          "default": "no"
+        },
+        "templates": {
+          "type": "string"
+        }
+      },
+      "patternProperties": {
+        "^program\\.(linux-x86_64|macos-arm64|windows-x64)$": {
+          "type": "string"
+        },
+        "^args\\.(linux-x86_64|macos-arm64|windows-x64)$": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "^attr\\.[A-Za-z0-9_.-]+$": {
+          "type": "string",
+          "pattern": "^\\s*(string|path|int|bool|list|map|choice(\\s+[^\\s]+)+)\\s*$"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

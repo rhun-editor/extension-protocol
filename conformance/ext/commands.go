@@ -263,7 +263,8 @@ func (h *host) checkCommands() {
 		return
 	}
 	c := h.m.name + "." + h.m.commands[0]
-	for _, run := range []string{"0 run %s 1 key 4\nfast", "0 run %s 1 ref 15\nopaque\x00bytes\n:)"} {
+	for _, run := range []string{"0 run %s 1 key 4\nfast", "0 run %s 1 ref 15\nopaque\x00bytes\n:)",
+		"0 run %s 1 menu 16\nfrobnicate x y\nz", "0 run %s 1 future 2\nok"} {
 		before := len(h.requests)
 		h.activate(1)
 		h.write(fmt.Sprintf(run, c))
@@ -274,7 +275,17 @@ func (h *host) checkCommands() {
 			return
 		}
 	}
-	h.ok("takes runs with FROM and a body")
+	h.ok("takes runs with FROM and a body (an unknown target kind and FROM too)")
+	// a call of a command it does not have: an error, framed as one
+	m, ok := h.askBody(fmt.Sprintf("call %s.nosuch_command 1 checker/caller", h.m.name), []byte("x"), 10*time.Second)
+	switch f := strings.Fields(m.line); {
+	case !ok:
+		h.fail("call", "no answer to a call of a command it does not have (rhun waits 10 s, then cancels)")
+	case len(f) > 0 && f[0] == "error":
+		h.ok("refuses a call of a command it does not have")
+	default:
+		h.warn("call", "answered a call of a command it does not have: "+m.line)
+	}
 	for _, name := range h.m.commands {
 		if h.m.cmdOptions[name+".callable"] != "yes" {
 			continue

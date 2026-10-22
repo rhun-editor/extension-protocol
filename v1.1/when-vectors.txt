@@ -1,0 +1,79 @@
+# When-clause vectors (docs/extensions/v1.1.md, "When clauses"): RESULT, a tab, then the clause.
+# RESULT is 1 or 0, evaluated in the context below, or "error N": the clause does not compile and
+# N is the byte offset rhun reports. Checkers that cannot evaluate use only "error" against the
+# rest (every other line must compile). Lines starting with # and empty lines are comments.
+#
+# Context: a project with main.rs open in a text tab that has the keys; nothing else shows. The
+# published keys view = files and viewItem = file.ts. The installed extension alice/demo has the
+# [context] default mode = normal, has set count = 12 and its setting colour is blue.
+1	editorFocus
+0	!editorFocus
+1	editorFocus && resourceLang == Rust
+1	resourceLang == Rust && !findVisible
+0	resourceLang == Go || findVisible
+1	resourceExt == .rs
+1	resourceExt != .go
+1	resourceExt in '.rs .go'
+0	resourceExt not in '.rs .go'
+1	resourceExt not   in ".js .ts"
+1	resourceFilename =~ 'm*.r?'
+0	resourceFilename =~ 'm*.r'
+1	resourceFilename =~ *
+1	resourceFilename=~main.*
+1	'.rs' in '.go .rs'
+0	".rs" not in '.go .rs'
+1	tabCount == 1
+1	tabCount >= 1 && tabCount < 2
+0	tabCount > 1
+1	tabCount <= 1
+0	resourceFilename > 1
+0	resourceFilename < 1
+1	true
+0	false
+1	!false
+1	!!true
+1	true || false && false
+0	(true || false) && false
+1	!(findVisible || paletteFocus)
+1	((((((((true))))))))
+1	config.editor.word_wrap == false
+1	config.editor.font_size >= 10
+1	config.editor.line_height == 1.5
+1	view == files
+1	viewItem =~ '*.ts'
+1	viewItem in 'file.ts folder'
+0	viewFocus
+1	demo.mode == normal
+1	alice/demo.mode == normal
+1	demo.count > 10
+1	demo.count == "12"
+1	demo.setting.colour == blue
+0	demo.missing
+0	nobody.thing
+0	nobody.setting.thing
+1	debugState == inactive && inDebugMode == false
+1	isMac || isLinux || isWindows
+1	projectOpen && resourceInProject
+1	editorFocus&&tabCount==1
+error 0	resourceExtt
+error 14	editorFocus ==
+error 9	(((((((((true)))))))))
+error 0	"unclosed
+error 12	editorFocus foo
+error 0	&& editorFocus
+error 0	
+error 7	true &&
+error 5	(true
+error 14	resourceExt in
+error 16	resourceExt not foo
+error 12	editorFocus = x
+error 4	'a' == 'b'
+error 0	config.nosuch.key
+error 0	config.editor
+error 0	demo.Mode
+error 0	demo.
+error 0	.mode
+error 2	!(a)
+error 12	editorFocus !x
+error 7	true ||| false
+error 5	true &

@@ -56,6 +56,8 @@ typedef struct { rx_pos start, end; } rx_range; /* half-open */
 typedef struct rx_ext rx_ext;
 struct rx_commit_message_ask_s;                  /* source control: rx_commit_message_ask */
 struct rx_quickdiff_ask_s;                       /* and rx_quickdiff_ask */
+struct rx_debug_resolve_ask_s;                   /* debuggers: rx_debug_resolve_ask */
+struct rx_debug_config_s;                        /* and rx_debug_config */
 struct rx_invocation_s;                          /* command-args: rx_invocation */
 struct rx_call_ask_s;                            /* and rx_call_ask */
 
@@ -501,6 +503,11 @@ typedef struct {
     const char *(*editor_save)(rx_ext *ext, rx_doc cdoc, const char *kind, int64_t part, rx_buf *out, int *more, void *user);
     const char *(*editor_cmd)(rx_ext *ext, rx_doc cdoc, const char *what, void *user);
     void (*editor_event)(rx_ext *ext, rx_doc cdoc, const char *what, const char *path, void *user);
+    /* debug-resolve (feature "debug", a debugger with resolve = yes): 0 launches req's configuration
+     * unchanged; 1 launches *out (the complete configuration) instead; -1 refuses with why's text;
+     * -2 cancels quietly. */
+    int (*debug_resolve)(rx_ext *ext, const struct rx_debug_resolve_ask_s *req, struct rx_debug_config_s *out,
+                         rx_buf *why, void *user);
 } rx_handlers;
 
 /* Retained views (protocol 1.1, feature "view-tree"): views declared in the manifest's [views]
@@ -700,6 +707,23 @@ int rx_parse_link(const rx_event *event, int64_t *id, const char **link, size_t 
  * matches, skipped files, status complete, limit or partial. Folder 1 is the primary folder, 0
  * every folder; max is 1 to 100000 paths or 1 to 20000 matches; globs are relative to the folder
  * (* ** ? [..] {a,b}; without / they match the base name). */
+/* Feature scoped-settings: the value of one of its own settings in force for a folder (its id, 0
+ * for the window) and a language (a grammar name, NULL or "" for none): malloc'd, NUL-terminated
+ * (free() it), or NULL on an error. The event "0 setting-changed KEY" says a stored value changed. */
+char *rx_setting_get(rx_ext *ext, const char *key, int64_t folder, const char *lang);
+/* Feature workspace-folders: rx_parse_folders reads "0 folders LEN" (the whole list, before ready
+ * and again when it changes) into out (at most max; strings point into the event's body): the
+ * number of folders, or -1. rx_folder_of: the id of the folder path is in, 0 for none, -1 on an
+ * error. flags: 1 the primary folder, 2 trusted. */
+typedef struct {
+    int64_t id;
+    int flags;
+    char location[16];
+    const char *name, *path;
+    size_t name_len, path_len;
+} rx_folder;
+int rx_parse_folders(const rx_event *event, rx_folder *out, int max);
+int64_t rx_folder_of(rx_ext *ext, const char *path);
 #define RX_FILES_IGNORED 1       /* ignored files too: no .gitignore, no exclude setting */
 #define RX_FILES_SKIP_HIDDEN 2
 #define RX_FILES_FOLLOW_LINKS 4
@@ -808,6 +832,38 @@ int rx_parse_commit_message(int64_t id, const unsigned char *body, size_t len, r
 /* what quickdiff gets; rx_quickdiff_refresh asks rhun to ask again for a file (NULL: every file) */
 typedef struct rx_quickdiff_ask_s { int64_t id; rx_doc doc; int64_t version; } rx_quickdiff_ask;
 int rx_quickdiff_refresh(rx_ext *ext, const char *path);
+
+/* Feature "debug" ([debugger.TYPE] sections, [needs] debug = yes). A configuration is a flat list of
+ * typed leaves with dotted paths ("args.0", "env.LOG"): kind 's' string, 'n' integer (|v| < 2^53),
+ * 'b' "true"/"false", 'z' null (empty value). Entries own their path and value. */
+typedef struct { char kind; char *path; char *value; size_t value_len; } rx_debug_entry;
+typedef struct rx_debug_config_s { rx_debug_entry *entries; size_t n, cap; } rx_debug_config;
+/* the context record of a configuration body rhun sends: the active document (0: none) */
+typedef struct { rx_doc doc; rx_pos at; rx_buf path; } rx_debug_context;
+/* replaces the leaf (and anything under its path) or adds it; -1 for a bad kind, path or value */
+int rx_debug_config_set(rx_debug_config *c, char kind, const char *path, const char *value);
+void rx_debug_config_remove(rx_debug_config *c, const char *path);
+const rx_debug_entry *rx_debug_config_get(const rx_debug_config *c, const char *path);
+void rx_debug_config_free(rx_debug_config *c);
+int rx_debug_config_encode(const rx_debug_config *c, rx_buf *out);
+/* reads a configuration body and its extra records (ctx may be NULL); 0, or -1 when it does not parse */
+int rx_debug_config_parse(const unsigned char *body, size_t len, rx_debug_config *out, rx_debug_context *ctx);
+/* starts a session of one of the extension's own debuggers (the config's "type"), within 10 s of
+ * one of its commands; the session's id, or -1 (rx_error: refused, cancelled, busy, toobig ...) */
+int64_t rx_debug_start(rx_ext *ext, const char *name, const rx_debug_config *c);
+/* stops a session this extension started (as the toolbar's Stop); 0 once the stop was asked (its
+ * debug-ended follows), -1 (rx_error: refused, not a session it started) */
+int rx_debug_stop(rx_ext *ext, int64_t session);
+/* "0 debug-ended SESSION CODE": 1 with the session and code (*has_code 0 when unknown), else 0 */
+int rx_parse_debug_ended(const rx_event *ev, int64_t *session, int *code, int *has_code);
+/* what debug_resolve gets */
+typedef struct rx_debug_resolve_ask_s {
+    int64_t id;
+    const char *type, *request;     /* request: launch or attach */
+    int no_debug;
+    rx_debug_config config;
+    rx_debug_context ctx;
+} rx_debug_resolve_ask;
 /* Feature "scm": version control panels. rx_scm_register adds a sidebar section for the
  * repository at root (absolute) and returns its handle (-1 on an error); rx_scm_update replaces
  * what it shows with a body built by the appenders below, in the body's order: rx_scm_head, its
@@ -864,6 +920,10 @@ int rx_remove_context(rx_ext *ext, const char *key);
 /* 1 when the bytes show as they are on one line: UTF-8 without control characters (C0, DEL, C1),
  * bidirectional controls or zero-width characters */
 int rx_plain_text(const char *s, size_t n);
+/* When clauses (protocol 1.1, "When clauses"): 0 when the clause compiles as rhun compiles it,
+ * else -1 with the byte offset rhun reports in *offset and its reason in *msg (static). */
+int rx_when_check(const char *clause, size_t len, size_t *offset, const char **msg);
+
 /* Feature "status-items": a status bar item, at most 8 per extension (manifest items included).
  * align "left" or "right" (NULL: right); priority -1000..1000; text one line of at most 120 bytes
  * ("$(NAME)" an icon); tooltip at most 500 bytes; command one of its own (local name, NULL for
@@ -1639,7 +1699,8 @@ static int rx_has_body(const char *line) {
     if (strncmp(line, "0 edits ", 8) == 0 || strncmp(line, "0 action ", 9) == 0 ||
         strncmp(line, "0 selections ", 13) == 0 || strncmp(line, "0 nb-run ", 9) == 0 ||
         strncmp(line, "0 link ", 7) == 0 || strncmp(line, "0 test-out ", 11) == 0 ||
-        strncmp(line, "0 editor-path ", 14) == 0 || strncmp(line, "0 terminal-output ", 18) == 0)
+        strncmp(line, "0 editor-path ", 14) == 0 || strncmp(line, "0 terminal-output ", 18) == 0 ||
+        strncmp(line, "0 folders ", 10) == 0)
         return 1;
     if (strncmp(line, "0 run ", 6) == 0) return rx_nfields(line) == 6;    /* command-args */
     if (line[0] >= '1' && line[0] <= '9') {
@@ -1647,7 +1708,7 @@ static int rx_has_body(const char *line) {
          * agent-prompt (their input); tests-resolve and test-run (tests); nb-open and nb-save:
          * rx_host_body */
         static const char *const req[] = {"commit-message ", "vkids ", "vmore ", "tool ", "agent-prompt ",
-                                          "tests-resolve ", "test-run ", NULL};
+                                          "tests-resolve ", "test-run ", "debug-resolve ", NULL};
         const char *v = strchr(line, ' ');
         if (!v) return 0;
         if (strncmp(v + 1, "call ", 5) == 0) return rx_nfields(line) == 6;   /* ID call EXT.NAME DOC CALLER LEN */
@@ -1762,6 +1823,7 @@ int rx_request(rx_ext *ext, const char *verb_args, const void *body, size_t len,
                      strncmp(verb_args, "ask ", 4) == 0 || context_body ||
                      strncmp(verb_args, "secret-get ", 11) == 0 || strcmp(verb_args, "secret-keys") == 0 ||
                      strncmp(verb_args, "external-uri ", 13) == 0 || strcmp(verb_args, "link") == 0 ||
+                     strncmp(verb_args, "setting-get ", 12) == 0 ||
 
                      strcmp(verb_args, "git-repo") == 0 || strcmp(verb_args, "git-status") == 0 ||
                      strncmp(verb_args, "git-blame ", 10) == 0 || strncmp(verb_args, "git-log ", 8) == 0 ||
@@ -2251,6 +2313,75 @@ int rx_loopback_wait(rx_loopback *lb, const char *state, int timeout_ms, char **
     }
 }
 #endif /* RHUNEXT_AUTH */
+
+char *rx_setting_get(rx_ext *ext, const char *key, int64_t folder, const char *lang) {
+    if (!rx_has(ext, "scoped-settings")) {
+        snprintf(ext->error, sizeof ext->error, "unknown scoped-settings feature was not agreed");
+        return NULL;
+    }
+    if (!key || !*key || strpbrk(key, " \r\n") || strlen(key) > 200 || (lang && strlen(lang) > 200)) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid setting key");
+        return NULL;
+    }
+    char line[512], l[208];
+    snprintf(l, sizeof l, "%s", lang && *lang ? lang : "-");
+    for (char *p = l; *p; p++)
+        if (*p == ' ') *p = '_';
+    snprintf(line, sizeof line, "setting-get %s %lld %s", key, (long long)folder, l);
+    rx_buf b = {NULL, 0, 0};
+    if (rx_request(ext, line, NULL, 0, NULL, &b) < 0) {
+        rx_buf_free(&b);
+        return NULL;
+    }
+    rx_buf_add(&b, "", 1);
+    return b.data;
+}
+
+int rx_parse_folders(const rx_event *event, rx_folder *out, int max) {
+    if (!event || !event->name || strcmp(event->name, "folders") || !event->body) return -1;
+    const char *p = (const char *)event->body, *end = p + event->body_len;
+    const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+    if (!nl) return -1;
+    int n = atoi(p);
+    if (n < 0 || n > 16 || n > max) return -1;
+    p = nl + 1;
+    for (int i = 0; i < n; i++) {
+        nl = (const char *)memchr(p, '\n', (size_t)(end - p));
+        if (!nl) return -1;
+        long long id, flags, nlen, plen;
+        char loc[16], head[96];
+        size_t hl = (size_t)(nl - p);
+        if (hl >= sizeof head) return -1;
+        memcpy(head, p, hl);
+        head[hl] = 0;
+        if (sscanf(head, "%lld %15s %lld %lld %lld", &id, loc, &flags, &nlen, &plen) != 5 || nlen < 0 || plen < 0)
+            return -1;
+        p = nl + 1;
+        if (nlen + plen > end - p) return -1;
+        out[i].id = id, out[i].flags = (int)flags;
+        snprintf(out[i].location, sizeof out[i].location, "%s", loc);
+        out[i].name = p, out[i].name_len = (size_t)nlen;
+        out[i].path = p + nlen, out[i].path_len = (size_t)plen;
+        p += nlen + plen;
+    }
+    return p == end ? n : -1;
+}
+
+int64_t rx_folder_of(rx_ext *ext, const char *path) {
+    if (!rx_has(ext, "workspace-folders")) {
+        snprintf(ext->error, sizeof ext->error, "unknown workspace-folders feature was not agreed");
+        return -1;
+    }
+    if (!path || !*path || strpbrk(path, "\r\n") || strlen(path) > 4096) {
+        snprintf(ext->error, sizeof ext->error, "syntax invalid path");
+        return -1;
+    }
+    rx_buf line = {NULL, 0, 0};
+    rx_buf_fmt(&line, "folder-of %s", path);
+    int64_t v = rx_req_num(ext, line.data, NULL, 0);
+    rx_buf_free(&line);
+    return v;
+}
 
 /* ---- feature files ---- */
 
@@ -2856,6 +2987,203 @@ void rx_git_status_free(rx_git_status_list *s) { free(s->entries); rx_buf_free(&
 void rx_blame_free(rx_blame *b) { free(b->commits); free(b->runs); rx_buf_free(&b->body); memset(b, 0, sizeof *b); }
 void rx_log_free(rx_log *l) { free(l->entries); rx_buf_free(&l->body); memset(l, 0, sizeof *l); }
 
+static int rx_debug_under(const char *path, const char *prefix) {
+    size_t n = strlen(prefix);
+    return strncmp(path, prefix, n) == 0 && (path[n] == 0 || path[n] == '.');
+}
+
+void rx_debug_config_remove(rx_debug_config *c, const char *path) {
+    size_t j = 0;
+    for (size_t i = 0; i < c->n; i++) {
+        if (rx_debug_under(c->entries[i].path, path)) {
+            free(c->entries[i].path);
+            free(c->entries[i].value);
+        } else {
+            c->entries[j++] = c->entries[i];
+        }
+    }
+    c->n = j;
+}
+
+static int rx_debug_leaf_ok(char kind, const char *path, size_t plen, const char *value, size_t vlen) {
+    size_t dots = 0;
+    for (size_t i = 0; i < plen; i++) dots += path[i] == '.';
+    if (plen == 0 || plen > 256 || dots >= 16 || vlen > 65536) return 0;
+    if (kind == 's') return 1;
+    if (kind == 'z') return vlen == 0;
+    if (kind == 'b') return (vlen == 4 && !memcmp(value, "true", 4)) || (vlen == 5 && !memcmp(value, "false", 5));
+    if (kind != 'n' || vlen == 0) return 0;
+    size_t i = value[0] == '-';
+    if (i == vlen || vlen - i > 16) return 0;
+    for (; i < vlen; i++) if (value[i] < '0' || value[i] > '9') return 0;
+    long long v = strtoll(value, NULL, 10);
+    return v < (1LL << 53) && v > -(1LL << 53);
+}
+
+static int rx_debug_add(rx_debug_config *c, char kind, const char *path, size_t plen, const char *value, size_t vlen) {
+    if (c->n >= 4096) return -1;
+    if (c->n == c->cap) {
+        size_t cap = c->cap ? c->cap * 2 : 8;
+        rx_debug_entry *e = (rx_debug_entry *)realloc(c->entries, cap * sizeof *e);
+        if (!e) abort();
+        c->entries = e;
+        c->cap = cap;
+    }
+    rx_debug_entry *e = &c->entries[c->n++];
+    e->kind = kind;
+    e->path = (char *)malloc(plen + 1);
+    e->value = (char *)malloc(vlen + 1);
+    if (!e->path || !e->value) abort();
+    memcpy(e->path, path, plen);
+    e->path[plen] = 0;
+    memcpy(e->value, value, vlen);
+    e->value[vlen] = 0;
+    e->value_len = vlen;
+    return 0;
+}
+
+int rx_debug_config_set(rx_debug_config *c, char kind, const char *path, const char *value) {
+    if (!value) value = "";
+    if (!rx_debug_leaf_ok(kind, path, strlen(path), value, strlen(value))) return -1;
+    rx_debug_config_remove(c, path);
+    return rx_debug_add(c, kind, path, strlen(path), value, strlen(value));
+}
+
+const rx_debug_entry *rx_debug_config_get(const rx_debug_config *c, const char *path) {
+    for (size_t i = 0; i < c->n; i++)
+        if (strcmp(c->entries[i].path, path) == 0) return &c->entries[i];
+    return NULL;
+}
+
+void rx_debug_config_free(rx_debug_config *c) {
+    for (size_t i = 0; i < c->n; i++) {
+        free(c->entries[i].path);
+        free(c->entries[i].value);
+    }
+    free(c->entries);
+    memset(c, 0, sizeof *c);
+}
+
+int rx_debug_config_encode(const rx_debug_config *c, rx_buf *out) {
+    size_t start = out->len;
+    rx_buf_fmt(out, "%zu\n", c->n);
+    for (size_t i = 0; i < c->n; i++) {
+        const rx_debug_entry *e = &c->entries[i];
+        rx_buf_fmt(out, "%c %zu %zu\n", e->kind, strlen(e->path), e->value_len);
+        rx_buf_str(out, e->path);
+        rx_buf_add(out, e->value, e->value_len);
+    }
+    return out->len - start > (1u << 20) ? -1 : 0;
+}
+
+static int rx_debug_num(const unsigned char **p, const unsigned char *end, char stop, size_t *v) {
+    size_t n = 0;
+    int digits = 0;
+    while (*p < end && **p >= '0' && **p <= '9' && digits < 15) {
+        n = n * 10 + (size_t)(**p - '0');
+        (*p)++;
+        digits++;
+    }
+    if (!digits || *p >= end || **p != stop) return 0;
+    (*p)++;
+    *v = n;
+    return 1;
+}
+
+int rx_debug_config_parse(const unsigned char *body, size_t len, rx_debug_config *out, rx_debug_context *ctx) {
+    const unsigned char *p = body, *end = body + len;
+    size_t n, pl, vl;
+    memset(out, 0, sizeof *out);
+    if (ctx) ctx->doc = 0;
+    if (!rx_debug_num(&p, end, '\n', &n) || n > 4096) return -1;
+    for (size_t i = 0; i < n; i++) {
+        if (end - p < 2 || p[1] != ' ') goto bad;
+        char kind = (char)p[0];
+        p += 2;
+        if (!rx_debug_num(&p, end, ' ', &pl) || !rx_debug_num(&p, end, '\n', &vl)) goto bad;
+        if (pl > (size_t)(end - p) || vl > (size_t)(end - p) - pl) goto bad;
+        const char *path = (const char *)p, *value = (const char *)p + pl;
+        if (!rx_debug_leaf_ok(kind, path, pl, value, vl) || memchr(path, 0, pl)) goto bad;
+        rx_debug_add(out, kind, path, pl, value, vl);
+        p += pl + vl;
+    }
+    while (p < end) {
+        const unsigned char *nl = (const unsigned char *)memchr(p, '\n', (size_t)(end - p));
+        if (!nl) goto bad;
+        char line[128];
+        size_t ll = (size_t)(nl - p);
+        if (ll >= sizeof line) goto bad;
+        memcpy(line, p, ll);
+        line[ll] = 0;
+        p = nl + 1;
+        const char *last = strrchr(line, ' ');
+        size_t size = (size_t)strtoull(last ? last + 1 : line, NULL, 10);
+        if (size > (size_t)(end - p)) goto bad;
+        long long d, l, col;
+        unsigned long long sz;
+        if (ctx && sscanf(line, "context %lld %lld %lld %llu", &d, &l, &col, &sz) == 4) {
+            ctx->doc = d;
+            ctx->at.line = (int)l;
+            ctx->at.col = (int)col;
+            ctx->path.len = 0;
+            rx_buf_add(&ctx->path, p, size);
+        }
+        p += size;
+    }
+    return 0;
+bad:
+    rx_debug_config_free(out);
+    return -1;
+}
+
+int64_t rx_debug_start(rx_ext *ext, const char *name, const rx_debug_config *c) {
+    if (!rx_has(ext, "debug")) {
+        snprintf(ext->error, sizeof ext->error, "unknown debug was not negotiated");
+        return -1;
+    }
+    size_t nl = strlen(name);
+    if (nl == 0 || nl > 256 || strchr(name, '\n')) {
+        snprintf(ext->error, sizeof ext->error, "syntax a session name is 1 to 256 bytes on one line");
+        return -1;
+    }
+    rx_buf body = {NULL, 0, 0};
+    rx_buf_add(&body, name, nl);
+    if (rx_debug_config_encode(c, &body) < 0) {
+        rx_buf_free(&body);
+        snprintf(ext->error, sizeof ext->error, "toobig the configuration is over 1 MB");
+        return -1;
+    }
+    char line[64];
+    snprintf(line, sizeof line, "debug-start %zu %zu", nl, body.len);
+    int64_t id = rx_req_num(ext, line, body.data, body.len);
+    rx_buf_free(&body);
+    return id;
+}
+
+int rx_debug_stop(rx_ext *ext, int64_t session) {
+    if (!rx_has(ext, "debug")) {
+        snprintf(ext->error, sizeof ext->error, "unknown debug was not negotiated");
+        return -1;
+    }
+    if (session <= 0) {
+        snprintf(ext->error, sizeof ext->error, "syntax a session id is a positive number");
+        return -1;
+    }
+    char line[64];
+    snprintf(line, sizeof line, "debug-stop %lld", (long long)session);
+    return rx_request(ext, line, NULL, 0, NULL, NULL);
+}
+
+int rx_parse_debug_ended(const rx_event *ev, int64_t *session, int *code, int *has_code) {
+    if (strcmp(ev->name, "debug-ended") != 0 || ev->argc != 2) return 0;
+    long long s = atoll(ev->argv[0]);
+    if (s <= 0) return 0;
+    *session = s;
+    *has_code = strcmp(ev->argv[1], "-") != 0;
+    *code = *has_code ? atoi(ev->argv[1]) : 0;
+    return 1;
+}
+
 int rx_quickdiff_refresh(rx_ext *ext, const char *path) {
     if (!rx_has(ext, "quickdiff")) {
         snprintf(ext->error, sizeof ext->error, "unknown quickdiff was not negotiated");
@@ -3079,6 +3407,278 @@ void rx_scm_click(rx_buf *b, const char *command, const char *args, size_t args_
 void rx_scm_tip(rx_buf *b, const char *tip) {
     rx_buf_fmt(b, "tip %zu\n", strlen(tip));
     rx_buf_str(b, tip);
+}
+
+/* ---- when clauses: rhun's grammar, limits, messages and offsets (v1.1/when-vectors.txt) ---- */
+
+static const char *const rx_when_keys[] = {
+    "editorFocus", "textInputFocus", "paletteFocus", "findFocus", "explorerFocus", "agentsFocus",
+    "terminalFocus", "scmInputFocus", "settingsFocus", "findVisible", "completionVisible", "signatureVisible",
+    "snippetActive", "activeTab", "activeTabPinned", "tabCount", "resourceLang", "resourceExt",
+    "resourceFilename", "resourceDirname", "resourcePath", "resourceScheme", "resourceInProject", "editorReadonly",
+    "editorDirty", "editorHasSelection", "editorHasMultipleSelections", "editorProviders", "vimMode", "sidebarVisible",
+    "agentsVisible", "terminalVisible", "projectOpen", "projectPath", "gitRepo", "gitBranch",
+    "gitChanges", "isLinux", "isMac", "isWindows", "isWayland", "targetKind",
+    "explorerResourceIsFolder", "explorerResourceIsRoot", "tabKind", "viewFocus", "view", "viewItem",
+    "debugState", "inDebugMode", "debugType", "gitTrusted", "scmProvider", "scmResourceGroup",
+    "scmResourceStatus", "notebookFocus", "notebookCellEditing", "notebookCellType", "notebookKernelState", "remoteName",
+    "remoteHost",
+    NULL};
+static const char *const rx_when_settings[] = {
+    "ui.follow_system", "ui.theme", "ui.dark_theme", "ui.light_theme",
+    "ui.scale", "ui.font_size", "ui.font", "ui.file_icons",
+    "ui.sidebar", "ui.sidebar_width", "ui.agents_panel", "ui.agents_width",
+    "ui.tooltips", "ui.auto_hide_scrollbars", "ui.decorations", "ui.scroll_sensitivity",
+    "ui.fast_scroll_sensitivity", "editor.font_size", "editor.font", "editor.line_height",
+    "editor.tab_width", "editor.insert_spaces", "editor.line_numbers", "editor.highlight_line",
+    "editor.animate_disk_changes", "editor.match_brackets", "editor.indent_guides", "editor.word_wrap",
+    "editor.whitespace", "editor.cursor_blink", "editor.smooth_caret", "editor.auto_pairs",
+    "editor.multi_cursor_paste", "editor.multi_cursor_modifier", "editor.scroll_past_end", "editor.vim_mode",
+    "editor.complete_replace", "editor.complete_commit_characters", "editor.lightbulb", "editor.format_on_type",
+    "editor.format_on_paste", "editor.folding", "files.trim_trailing_whitespace", "files.final_newline",
+    "files.format_on_save", "files.format_on_save_timeout", "files.code_actions_on_save", "files.code_actions_on_save_timeout",
+    "files.restore_session", "files.restore_project", "files.exclude", "agents.claude",
+    "agents.codex", "agents.grok", "agents.opencode", "terminal.shell",
+    "terminal.font_size", "terminal.font", "terminal.line_height", "terminal.scrollback",
+    "terminal.height", "git.enabled", "git.commit_ai", "git.commit_model",
+    "git.ai_setup", "extensions.secrets", "updates.check", "updates.check_now",
+    "updates.extensions", "updates.check_extensions", "debug.show_on_start", "debug.keys_in_terminal",
+    "debug.console_lines", "remote.agent_binary", "testing.gutter",
+    NULL};
+
+typedef struct {
+    const unsigned char *s;
+    size_t n, p, ops, depth, at;
+    const char *err;
+} rx_wp;
+
+static void rx_w_fail_at(rx_wp *w, size_t at, const char *m) {
+    if (!w->err) w->err = m, w->at = at;
+}
+static void rx_w_fail(rx_wp *w, const char *m) { rx_w_fail_at(w, w->p, m); }
+static void rx_w_ws(rx_wp *w) {
+    while (w->p < w->n && (w->s[w->p] == ' ' || w->s[w->p] == '\t')) w->p++;
+}
+static unsigned char rx_w_at(rx_wp *w, size_t i) { return i < w->n ? w->s[i] : 0; }
+static void rx_w_emit(rx_wp *w) {
+    if (w->ops >= 64) rx_w_fail(w, "too many operations (64 at most)");
+    else w->ops++;
+}
+static int rx_w_wordbyte(unsigned char c) {
+    return c == '_' || c == '.' || c == '/' || c == '-' || (c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z');
+}
+static size_t rx_w_word(rx_wp *w) {
+    size_t s = w->p;
+    while (w->p < w->n && rx_w_wordbyte(w->s[w->p])) w->p++;
+    return w->p - s;
+}
+static int rx_w_is(rx_wp *w, size_t s, size_t n, const char *word) {
+    return n == strlen(word) && memcmp(w->s + s, word, n) == 0;
+}
+static size_t rx_w_bare(rx_wp *w) {
+    size_t s = w->p;
+    while (w->p < w->n) {
+        unsigned char c = w->s[w->p];
+        if (!(strchr("_-./:*?+#@$", c) && c) && !((c >= '0' && c <= '9') || ((c | 0x20) >= 'a' && (c | 0x20) <= 'z'))) break;
+        w->p++;
+    }
+    return w->p - s;
+}
+static int rx_w_utf8(const unsigned char *s, size_t n) {
+    for (size_t i = 0; i < n;) {
+        unsigned c = s[i];
+        size_t k = c < 0x80 ? 0 : (c & 0xe0) == 0xc0 ? 1 : (c & 0xf0) == 0xe0 ? 2 : (c & 0xf8) == 0xf0 ? 3 : 9;
+        if (k == 9 || i + k >= n) return 0;
+        uint32_t v = k ? c & (0x3f >> k) : c;
+        for (size_t j = 1; j <= k; j++) {
+            if ((s[i + j] & 0xc0) != 0x80) return 0;
+            v = v << 6 | (s[i + j] & 0x3f);
+        }
+        static const uint32_t least[4] = {0, 0x80, 0x800, 0x10000};
+        if (v < least[k] || v > 0x10ffff || (v >= 0xd800 && v <= 0xdfff)) return 0;
+        i += k + 1;
+    }
+    return 1;
+}
+static void rx_w_quoted(rx_wp *w) {
+    unsigned char q = w->s[w->p];
+    size_t open = w->p, i = w->p + 1;
+    for (; i < w->n && w->s[i] != q; i++)
+        if (w->s[i] < 0x20 || w->s[i] == 0x7f) return rx_w_fail_at(w, open, "unclosed quote");
+    if (i >= w->n) return rx_w_fail_at(w, open, "unclosed quote");
+    if (!rx_w_utf8(w->s + open + 1, i - open - 1)) return rx_w_fail_at(w, open, "a quoted value that is not UTF-8");
+    w->p = i + 1;
+}
+static int rx_w_listed(const char *const *list, const unsigned char *s, size_t n) {
+    for (; *list; list++)
+        if (strlen(*list) == n && memcmp(*list, s, n) == 0) return 1;
+    return 0;
+}
+static void rx_w_key(rx_wp *w, size_t start, size_t n) {
+    const unsigned char *k = w->s + start;
+    int ok = 0;
+    if (n > 7 && memcmp(k, "config.", 7) == 0) {
+        const unsigned char *r = k + 7;
+        size_t rn = n - 7;
+        const unsigned char *d = (const unsigned char *)memchr(r, '.', rn);
+        ok = d && d > r && (size_t)(d - r) + 1 < rn && rx_w_listed(rx_when_settings, r, rn);
+    } else {
+        const unsigned char *d = (const unsigned char *)memchr(k, '.', n);
+        if (!d) {
+            ok = rx_w_listed(rx_when_keys, k, n);
+        } else if (d > k && (size_t)(d - k) + 1 < n) {
+            const unsigned char *r = d + 1;
+            size_t rn = n - (size_t)(r - k);
+            if (rn > 8 && memcmp(r, "setting.", 8) == 0) {
+                r += 8, rn -= 8;
+                ok = rn && rn <= 64;
+                for (size_t i = 0; ok && i < rn; i++) ok = r[i] == '_' || (r[i] >= '0' && r[i] <= '9') || (r[i] >= 'a' && r[i] <= 'z');
+            } else {
+                ok = rn && rn <= 40 && r[0] >= 'a' && r[0] <= 'z';
+                for (size_t i = 1; ok && i < rn; i++) ok = r[i] == '_' || (r[i] >= '0' && r[i] <= '9') || ((r[i] | 0x20) >= 'a' && (r[i] | 0x20) <= 'z');
+            }
+        }
+    }
+    if (ok) rx_w_emit(w);
+    else rx_w_fail_at(w, start, "unknown key");
+}
+static void rx_w_or(rx_wp *w);
+static int rx_w_in(rx_wp *w) {
+    size_t s = w->p, n = rx_w_word(w);
+    if (rx_w_is(w, s, n, "in")) return 1;
+    if (rx_w_is(w, s, n, "not")) {
+        rx_w_ws(w);
+        size_t a = w->p, m = rx_w_word(w);
+        if (rx_w_is(w, a, m, "in")) return 2;
+        w->p = a;
+        rx_w_fail(w, "expected in or not in");
+        return 0;
+    }
+    w->p = s;
+    return 0;
+}
+static void rx_w_list(rx_wp *w) {
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p);
+    if (a == '\'' || a == '"') {
+        rx_w_quoted(w);
+        if (!w->err) rx_w_emit(w);
+        return;
+    }
+    size_t s = w->p, n = rx_w_word(w);
+    if (!n) return rx_w_fail(w, "expected a key or a quoted list");
+    rx_w_key(w, s, n);
+}
+static void rx_w_value(rx_wp *w) {
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p);
+    if (a == '\'' || a == '"') rx_w_quoted(w);
+    else if (!rx_w_bare(w)) return rx_w_fail(w, "expected a value");
+    if (!w->err) rx_w_emit(w);
+}
+static void rx_w_tail(rx_wp *w) {
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p), b = rx_w_at(w, w->p + 1);
+    int two;
+    if (a == '=') {
+        if (b != '=' && b != '~') return rx_w_fail(w, "expected == != < <= > >= =~ in or not in");
+        two = 1;
+    } else if (a == '!') {
+        if (b != '=') return rx_w_fail(w, "expected == != < <= > >= =~ in or not in");
+        two = 1;
+    } else if (a == '<' || a == '>') {
+        two = b == '=';
+    } else {
+        if (rx_w_in(w)) {
+            rx_w_list(w);
+            rx_w_emit(w);
+        }
+        return;
+    }
+    w->p += two ? 2 : 1;
+    rx_w_value(w);
+    rx_w_emit(w);
+}
+static void rx_w_unary(rx_wp *w) {
+    if (w->err) return;
+    rx_w_ws(w);
+    unsigned char a = rx_w_at(w, w->p), b = rx_w_at(w, w->p + 1);
+    if (a == '!') {
+        if (b == '=') return rx_w_fail(w, "expected a key, true, false, ! or (");
+        w->p++;
+        if (++w->depth > 8) return rx_w_fail(w, "nested too deeply (8 levels at most)");
+        rx_w_unary(w);
+        w->depth--;
+        rx_w_emit(w);
+    } else if (a == '(') {
+        w->p++;
+        if (++w->depth > 8) return rx_w_fail(w, "nested too deeply (8 levels at most)");
+        rx_w_or(w);
+        if (w->err) return;
+        w->depth--;
+        rx_w_ws(w);
+        if (rx_w_at(w, w->p) != ')') return rx_w_fail(w, "expected )");
+        w->p++;
+    } else if (a == '\'' || a == '"') {
+        rx_w_quoted(w);
+        if (w->err) return;
+        rx_w_emit(w);
+        rx_w_ws(w);
+        if (!rx_w_in(w)) return rx_w_fail(w, "expected in or not in");
+        rx_w_list(w);
+        rx_w_emit(w);
+    } else {
+        size_t s = w->p, n = rx_w_word(w);
+        if (!n) return rx_w_fail(w, "expected a key, true, false, ! or (");
+        if (rx_w_is(w, s, n, "true") || rx_w_is(w, s, n, "false")) return rx_w_emit(w);
+        rx_w_key(w, s, n);
+        if (!w->err) rx_w_tail(w);
+    }
+}
+static void rx_w_and(rx_wp *w) {
+    rx_w_unary(w);
+    while (!w->err) {
+        rx_w_ws(w);
+        if (rx_w_at(w, w->p) != '&' || rx_w_at(w, w->p + 1) != '&') return;
+        w->p += 2;
+        rx_w_unary(w);
+        rx_w_emit(w);
+    }
+}
+static void rx_w_or(rx_wp *w) {
+    rx_w_and(w);
+    while (!w->err) {
+        rx_w_ws(w);
+        if (rx_w_at(w, w->p) != '|' || rx_w_at(w, w->p + 1) != '|') return;
+        w->p += 2;
+        rx_w_and(w);
+        rx_w_emit(w);
+    }
+}
+
+int rx_when_check(const char *clause, size_t len, size_t *offset, const char **msg) {
+    rx_wp w;
+    memset(&w, 0, sizeof w);
+    w.s = (const unsigned char *)clause;
+    w.n = len;
+    if (len > 512) {
+        w.err = "too long (512 bytes at most)", w.at = 512;
+    } else {
+        rx_w_ws(&w);
+        if (w.p >= w.n) {
+            w.err = "empty clause", w.at = 0;
+        } else {
+            rx_w_or(&w);
+            if (!w.err) {
+                rx_w_ws(&w);
+                if (w.p < w.n) rx_w_fail(&w, "expected && or ||");
+            }
+        }
+    }
+    if (!w.err) return 0;
+    if (offset) *offset = w.at;
+    if (msg) *msg = w.err;
+    return -1;
 }
 
 int rx_cmd(rx_ext *ext, const char *name) {
@@ -6661,6 +7261,38 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
                 ok = 1;
             }
             rx_buf_free(&out);
+        }
+    } else if (strcmp(verb, "debug-resolve") == 0 && n == 6 && h->debug_resolve && rx_has(ext, "debug")) {
+        rx_debug_resolve_ask req;
+        memset(&req, 0, sizeof req);
+        req.type = f[2];
+        req.request = f[3];
+        req.no_debug = strcmp(f[4], "1") == 0;
+        if (rx_positive_num(f[0], 2147483647, &req.id) && req.id > 0 &&
+            (strcmp(f[3], "launch") == 0 || strcmp(f[3], "attach") == 0) &&
+            rx_debug_config_parse(data, data_len, &req.config, &req.ctx) == 0) {
+            rx_debug_config out;
+            memset(&out, 0, sizeof out);
+            rx_buf why = {NULL, 0, 0};
+            int r = h->debug_resolve(ext, &req, &out, &why, user);
+            ok = 1;
+            if (r == 1 && rx_debug_config_encode(&out, &body) < 0) {
+                e.fail = "toobig";
+                snprintf(e.why, sizeof e.why, "the configuration is over 1 MB");
+            } else if (r == -2) {
+                e.fail = "cancelled";
+                snprintf(e.why, sizeof e.why, "the launch was cancelled");
+            } else if (r < 0) {
+                e.fail = "refused";
+                size_t w = 0;
+                for (size_t i = 0; i < why.len && w + 1 < sizeof e.why; i++)
+                    e.why[w++] = why.data[i] == '\n' || why.data[i] == '\r' ? ' ' : why.data[i];
+                e.why[w] = 0;
+            }
+            rx_debug_config_free(&out);
+            rx_debug_config_free(&req.config);
+            rx_buf_free(&req.ctx.path);
+            rx_buf_free(&why);
         }
     } else if (strcmp(verb, "commit-message") == 0 && n == 3 && h->commit_message && rx_has(ext, "commit-message")) {
         rx_commit_message_ask req;

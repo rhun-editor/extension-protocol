@@ -5,13 +5,19 @@
 //! manifest's `[needs] tests`) and streams its output back.
 //!
 //! Lines and columns here are one-based, as the feature's bodies carry them.
+//!
+//! Without threads (`wasm32-wasip1`) the same calls work: rhun hears `ok` for a `test-run`
+//! before [`Handler::run_tests`](crate::Handler::run_tests) is called, so the run may happen inside
+//! it (a refusal ends the run errored); reading a [`TestStream`] or waiting for a [`TestProcess`]
+//! reads rhun's input until there is something, and [`TestReporter`] sends from the calls that
+//! use it (at most every 100 ms, and on [`TestReporter::flush`] and [`TestReporter::close`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{Error, Ext, Feature, Pos, Range};
 
@@ -549,11 +555,11 @@ struct Stream {
 }
 
 impl Stream {
-    /// Adds bytes, waiting while the stream holds 1 MiB (rhun's back-pressure reaches the program
-    /// through its pipe); a closed stream drops them.
-    fn put(&self, b: &[u8]) {
+    /// Adds bytes, waiting while the stream holds 1 MiB when `wait` (the reader thread: rhun's
+    /// back-pressure reaches the program through its pipe); a closed stream drops them.
+    fn put(&self, b: &[u8], wait: bool) {
         let mut s = self.m.lock().unwrap();
-        while s.buf.len() >= MAX_OUT_QUEUE && !s.closed {
+        while wait && s.buf.len() >= MAX_OUT_QUEUE && !s.closed {
             s = self.cv.wait(s).unwrap();
         }
         if !s.closed {
@@ -570,19 +576,30 @@ impl Stream {
 
 /// What one process wrote to its standard output or error, as rhun reads it.
 #[derive(Clone)]
-pub struct TestStream(Arc<Stream>);
+pub struct TestStream {
+    s: Arc<Stream>,
+    /// without threads: the connection, read here until there is something
+    ext: Option<Ext>,
+}
 
 impl Read for TestStream {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        let mut s = self.0.m.lock().unwrap();
+        let mut s = self.s.m.lock().unwrap();
         while s.buf.is_empty() && !s.closed {
-            s = self.0.cv.wait(s).unwrap();
+            match &self.ext {
+                Some(ext) => {
+                    drop(s);
+                    ext.pump();
+                    s = self.s.m.lock().unwrap();
+                }
+                None => s = self.s.cv.wait(s).unwrap(),
+            }
         }
         let n = out.len().min(s.buf.len());
         for (o, b) in out.iter_mut().zip(s.buf.drain(..n)) {
             *o = b;
         }
-        self.0.cv.notify_all();
+        self.s.cv.notify_all();
         Ok(n)
     }
 }
@@ -621,13 +638,13 @@ fn proc_for(procs: &Procs, ex: u64) -> Arc<Proc> {
     procs.lock().unwrap().entry(ex).or_default().clone()
 }
 
-/// `0 test-out EXEC STREAM LEN` + bytes, on the reading thread.
-pub(crate) fn test_out(procs: &Procs, ex: u64, stream: &str, body: &[u8]) {
+/// `0 test-out EXEC STREAM LEN` + bytes, on the reading thread (`wait`), or read inline.
+pub(crate) fn test_out(procs: &Procs, ex: u64, stream: &str, body: &[u8], wait: bool) {
     let p = proc_for(procs, ex);
     if stream == "err" {
-        p.err.put(body);
+        p.err.put(body, wait);
     } else {
-        p.out.put(body);
+        p.out.put(body, wait);
     }
 }
 
@@ -657,6 +674,7 @@ pub struct TestProcess {
     pub stdout: TestStream,
     pub stderr: TestStream,
     p: Arc<Proc>,
+    ext: Option<Ext>,
 }
 
 impl TestProcess {
@@ -665,7 +683,14 @@ impl TestProcess {
     pub fn wait(&self) -> String {
         let mut s = self.p.st.lock().unwrap();
         while s.code.is_none() {
-            s = self.p.cv.wait(s).unwrap();
+            match &self.ext {
+                Some(ext) => {
+                    drop(s);
+                    ext.pump();
+                    s = self.p.st.lock().unwrap();
+                }
+                None => s = self.p.cv.wait(s).unwrap(),
+            }
         }
         s.code.clone().unwrap_or_default()
     }
@@ -779,11 +804,23 @@ impl Ext {
                 m.remove(&ex);
             }
         }
+        let inline = if self.threadless() {
+            Some(self.clone())
+        } else {
+            None
+        };
         Ok(TestProcess {
             exec: ex,
-            stdout: TestStream(p.out.clone()),
-            stderr: TestStream(p.err.clone()),
+            stdout: TestStream {
+                s: p.out.clone(),
+                ext: inline.clone(),
+            },
+            stderr: TestStream {
+                s: p.err.clone(),
+                ext: inline.clone(),
+            },
             p,
+            ext: inline,
         })
     }
 }
@@ -844,6 +881,8 @@ pub struct TestReporter {
     shared: Arc<ReporterShared>,
     kick: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
+    /// without threads: when it last sent
+    last: Option<Mutex<Instant>>,
 }
 
 impl TestReporter {
@@ -855,6 +894,14 @@ impl TestReporter {
             queue: Mutex::new(Vec::new()),
             err: Mutex::new(None),
         });
+        if ext.threadless() {
+            return TestReporter {
+                shared,
+                kick: None,
+                thread: None,
+                last: Some(Mutex::new(Instant::now())),
+            };
+        }
         let (kick, rx) = channel::<()>();
         let s = shared.clone();
         let thread = thread::spawn(move || loop {
@@ -870,12 +917,26 @@ impl TestReporter {
             shared,
             kick: Some(kick),
             thread: Some(thread),
+            last: None,
         }
     }
 
     /// Queues results.
     pub fn add(&self, r: TestResult) {
         self.shared.queue.lock().unwrap().push(Entry::Result(r));
+        self.due();
+    }
+
+    /// Without threads: sends what is queued when 100 ms passed since it last did.
+    fn due(&self) {
+        if let Some(last) = &self.last {
+            let now = Instant::now();
+            let send = now.duration_since(*last.lock().unwrap()) >= Duration::from_millis(100);
+            if send {
+                *last.lock().unwrap() = now;
+                self.shared.flush();
+            }
+        }
     }
 
     /// Queues items to add under `parent` (a subtest found while running), sent before the
@@ -887,6 +948,7 @@ impl TestReporter {
                 .lock()
                 .unwrap()
                 .push(Entry::Items(parent.to_string(), items));
+            self.due();
         }
     }
 
@@ -909,6 +971,9 @@ impl TestReporter {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+        if self.last.take().is_some() {
+            self.shared.flush();
+        }
     }
 }
 
@@ -919,6 +984,21 @@ impl Drop for TestReporter {
 }
 
 // ---- requests from rhun
+
+/// Without threads, a refused run: its reason as the run's error, then its end.
+pub(crate) fn end_refused(ext: &Ext, run: u64, e: &Error) {
+    let r = TestResult {
+        state: Some(TestState::Errored),
+        messages: vec![TestMessage::new(if e.text.is_empty() {
+            e.code.clone()
+        } else {
+            e.text.clone()
+        })],
+        ..TestResult::default()
+    };
+    let _ = ext.report_tests(run, &[r]);
+    let _ = ext.end_test_run(run);
+}
 
 pub(crate) fn parse_test_run(fields: &[String], body: &[u8]) -> Option<TestRun> {
     // RUN PROFILE N LEN

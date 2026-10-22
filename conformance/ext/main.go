@@ -50,12 +50,15 @@ type manifest struct {
 	needs                       map[string]string
 	subscribe                   map[string]string
 	provides                    map[string]string
-	views                       map[string]string // [views] KEY.FIELD -> value (views.go)
-	top                         map[string]string // top-level keys of later features (idle, runs)
-	tools                       []string          // [tools] names (protocol 1.1)
-	pack                        string            // a pack's members: OWNER/NAME, space separated
-	cmdOptions                  map[string]string // [command-options] NAME.FIELD -> value
-	statusItems                 int               // [status] items
+	views                       map[string]string            // [views] KEY.FIELD -> value (views.go)
+	top                         map[string]string            // top-level keys of later features (idle, runs)
+	tools                       []string                     // [tools] names (protocol 1.1)
+	pack                        string                       // a pack's members: OWNER/NAME, space separated
+	where                       string                       // remote windows: workspace (the default) or local
+	cmdOptions                  map[string]string            // [command-options] NAME.FIELD -> value
+	statusItems                 int                          // [status] items
+	debuggers                   []string                     // [debugger.TYPE] types, in manifest order (debug.go)
+	debugger                    map[string]map[string]string // type -> key -> value
 }
 
 // packProblem says what is wrong with a manifest's pack list, or "": at most 16 names, each
@@ -76,6 +79,24 @@ func packProblem(m *manifest) string {
 		}
 	}
 	return ""
+}
+
+// whereProblem(m): remote windows: where it runs is workspace (the default) or local, and an
+// extension on this computer may not ask for the host's project or home there
+func whereProblem(m *manifest) string {
+	switch m.where {
+	case "", "workspace":
+		return ""
+	case "local":
+		if p := m.needs["project"]; p != "" && p != "no" {
+			return "where = local cannot go with project in [needs]"
+		}
+		if m.needs["home"] == "read" {
+			return "where = local cannot go with home in [needs]"
+		}
+		return ""
+	}
+	return fmt.Sprintf("where = %s is not workspace or local", m.where)
 }
 
 func readManifest(dir string) (*manifest, error) {
@@ -133,6 +154,8 @@ func readManifest(dir string) (*manifest, error) {
 				m.top[k] = v
 			case k == "pack":
 				m.pack = v
+			case k == "where":
+				m.where = v
 			}
 		case "settings":
 			key, field, ok := strings.Cut(k, ".")
@@ -177,6 +200,17 @@ func readManifest(dir string) (*manifest, error) {
 			if item, _, _ := strings.Cut(k, "."); !statusSeen[item] {
 				statusSeen[item] = true
 				m.statusItems++
+			}
+		default:
+			if t, ok := strings.CutPrefix(section, "debugger."); ok {
+				if m.debugger == nil {
+					m.debugger = map[string]map[string]string{}
+				}
+				if m.debugger[t] == nil {
+					m.debugger[t] = map[string]string{}
+					m.debuggers = append(m.debuggers, t)
+				}
+				m.debugger[t][k] = v
 			}
 		}
 	}
@@ -227,21 +261,22 @@ type host struct {
 	marks    int      // diagnostics lines in the last diagnostics request
 	exited   chan error
 
-	features    map[string]bool // section 12: agreed after hello
-	views       map[int64]bool  // views it opened
-	nextView    int64
-	pictures    int               // draw requests that passed
-	hostSeq     int64             // the last id of a request the checker sent
-	hostReqs    map[int64]string  // those waiting for an answer
-	hostAnswers map[int64]message // and the answers
-	saveScope   *saveScope
-	rviews      map[int64]*rview     // retained views it was given (views.go)
-	notes       map[int64]*noteState // notifications open (notify.go)
-	progs       map[int64]*progState // progress not ended
-	noteSeq     int64
-	images      map[int64]bool    // view-images handles (views.go)
-	patches     int               // vpatch requests that passed
-	secrets     map[string][]byte // secret-set values (resources.go)
+	features      map[string]bool // section 12: agreed after hello
+	views         map[int64]bool  // views it opened
+	nextView      int64
+	pictures      int               // draw requests that passed
+	hostSeq       int64             // the last id of a request the checker sent
+	debugSessions int64             // debuggers: sessions debug-start "started" (debug.go)
+	hostReqs      map[int64]string  // those waiting for an answer
+	hostAnswers   map[int64]message // and the answers
+	saveScope     *saveScope
+	rviews        map[int64]*rview     // retained views it was given (views.go)
+	notes         map[int64]*noteState // notifications open (notify.go)
+	progs         map[int64]*progState // progress not ended
+	noteSeq       int64
+	images        map[int64]bool    // view-images handles (views.go)
+	patches       int               // vpatch requests that passed
+	secrets       map[string][]byte // secret-set values (resources.go)
 
 	warnedConsent bool               // said once that a disk change needs the user's consent
 	diffs         map[int64]string   // the diff tabs it opened: "LEFT RIGHT TITLE"
@@ -468,7 +503,8 @@ var bodyVerbs = map[string]bool{"replace": true, "insert": true, "toast": true, 
 	"query-part": true, "query-progress": true, "file-diagnostics": true, // language features: query.go, langfeat.go
 	"run-command": true, "status-item": true, // commands.go
 	"test-items": true, "test-remove": true, "test-update": true, "test-coverage": true, "test-exec": true, // test controllers: tests.go
-	"terminal-open": true, "terminal-input": true, "tasks-set": true, "task-run": true} // terminals and tasks: terminals.go
+	"terminal-open": true, "terminal-input": true, "tasks-set": true, "task-run": true, // terminals and tasks: terminals.go
+	"debug-start": true} // debuggers: debug.go
 
 // reader is the one goroutine that reads the extension's output: a line, then its body when the
 // verb has one, so nothing else ever touches the stream.
@@ -1208,6 +1244,10 @@ func (h *host) handle(msg message) {
 	case "terminal-open", "terminal-stop", "terminal-restart", "terminal-close", "terminal-show", "terminal-input",
 		"terminal-screen", "tasks-set", "task-start", "task-run":
 		h.termRequest(id, verb, args, msg, reply, rerr)
+	case "debug-start":
+		h.debugStart(id, args, msg, reply, rerr)
+	case "debug-stop":
+		h.debugStop(id, args, reply, rerr)
 	case "vpatch", "vshow", "vreveal", "vtab":
 		h.retainedRequest(id, verb, args, msg.body, reply, rerr)
 	case "select-many", "reveal", "show-locations", "diff", "diff-close":
@@ -1536,13 +1576,14 @@ func main() {
 			provider = true
 		}
 	}
-	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) {
+	if len(m.commands) == 0 && !provider && !(m.pack != "" && programless) && len(m.debuggers) == 0 {
 		h.fail("manifest", "no [commands] and no [provides]: the extension can never be started on a command or for a file")
 	}
 	// the rules of v1/v1.json
 	schemaFails := 0
 	bad := func(why string) { schemaFails++; h.fail("manifest schema", why) }
 	resourcesManifest(m, bad)
+	scopedSettingsManifest(m, bad, func(why string) { h.warn("settings", why) })
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`).MatchString(m.name) {
 		bad(fmt.Sprintf("name %q is not [a-z0-9][a-z0-9-]*", m.name))
 	}
@@ -1559,8 +1600,14 @@ func main() {
 			bad(fmt.Sprintf("run.%s: not a target (linux-x86_64, macos-arm64, windows-x64, wasm32-wasip1)", t))
 		}
 	}
-	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) {
+	if len(m.run) == 0 && (m.runtime == "" || m.script == "") && !(m.pack != "" && programless) && len(m.debuggers) == 0 {
 		bad("no run.TARGET entry and no runtime with run")
+	}
+	for _, why := range debuggerProblems(dir, m) {
+		bad(why)
+	}
+	if why := whereProblem(m); why != "" {
+		bad(why)
 	}
 	for _, w := range strings.Fields(m.on) {
 		if w != "startup" && w != "command" && w != "project" && !strings.HasPrefix(w, "lang:") && !strings.HasPrefix(w, "open:") {
@@ -1629,6 +1676,8 @@ func main() {
 			ok = true
 		case "git": // source control: the project's Git data through rhun
 			ok = v == "none" || v == "read"
+		case "debug": // debuggers: adapters run as the user after one approval
+			ok = v == "no" || v == "yes"
 		case "kernels": // notebooks: programs rhun starts as the user (nb-exec)
 			ok = v != ""
 		case "tests":
@@ -1662,8 +1711,9 @@ func main() {
 		for field := range f {
 			switch field {
 			case "type", "default", "title", "description", "min", "max", "options":
+			case "scope", "languages": // scoped-settings (resources.go)
 			default:
-				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options)", key, field))
+				bad(fmt.Sprintf("[settings] %s.%s: not a field (type, default, title, description, min, max, options, scope, languages)", key, field))
 			}
 		}
 		switch f["type"] {
@@ -1678,6 +1728,7 @@ func main() {
 	if schemaFails == 0 {
 		h.ok("manifest follows v1.json")
 	}
+	h.checkContributions()
 	if m.pack != "" && programless {
 		h.ok("a pack without a program: nothing to start")
 		report(h)
@@ -1698,6 +1749,11 @@ func main() {
 	}
 	h.active = 1
 
+	// an extension that only declares debuggers has no program to start
+	if len(m.run) == 0 && m.runtime == "" && len(m.debuggers) > 0 {
+		h.ok(fmt.Sprintf("declares %d debuggers and no program: nothing to start", len(m.debuggers)))
+		report(h)
+	}
 	// 1. start, hello, ready and catch-up; the extension must not speak before ready
 	if err := h.start(); err != nil {
 		h.fail("start", err.Error())
@@ -1706,6 +1762,7 @@ func main() {
 	if !h.expectHello() {
 		report(h)
 	}
+	h.sendFolders()
 	h.write("0 ready " + h.project + "\n")
 	h.sendSettings()
 	h.catchUp()
@@ -1860,6 +1917,7 @@ func main() {
 	h.rtcmds = nil
 	if err := h.start(); err == nil {
 		if h.expectHello() {
+			h.sendFolders()
 			h.write("0 ready " + h.project + "\n")
 			h.sendSettings()
 			h.catchUp()

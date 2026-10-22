@@ -29,7 +29,8 @@ const (
 )
 
 // ScmAction is a command of the extension with an icon (a tree icon name such as "check" or
-// "refresh", or "" for none), its ARGS (the body of "0 run EXT.NAME DOC ref LEN", with
+// "refresh", or "" for none; a group's or resource's action with an icon is also a button on its
+// row while the row is hovered), its ARGS (the body of "0 run EXT.NAME DOC ref LEN", with
 // command-args agreed) and a label ("" shows the command's title).
 type ScmAction struct {
 	Icon    string
@@ -40,7 +41,8 @@ type ScmAction struct {
 
 // ScmResource is a changed file: its path relative to the root, a status letter (M, A, D, ?, …),
 // a color (added, modified, deleted, conflict, untracked, ignored, or "" for none), the command
-// its click runs (Click.Command "" opens the file; Click.Icon and Click.Label are not used), its
+// its click runs (Click.Command "": a diff of the file against its quick-diff base, else the
+// file; Click.Icon and Click.Label are not used), its
 // menu's actions, and a tooltip (at most 1000 bytes).
 type ScmResource struct {
 	Path    string
