@@ -3648,9 +3648,9 @@ static void rx_w_quoted(rx_wp *w) {
     unsigned char q = w->s[w->p];
     size_t open = w->p, i = w->p + 1;
     for (; i < w->n && w->s[i] != q; i++)
-        if (w->s[i] < 0x20 || w->s[i] == 0x7f) return rx_w_fail_at(w, open, "unclosed quote");
-    if (i >= w->n) return rx_w_fail_at(w, open, "unclosed quote");
-    if (!rx_w_utf8(w->s + open + 1, i - open - 1)) return rx_w_fail_at(w, open, "a quoted value that is not UTF-8");
+        if (w->s[i] < 0x20 || w->s[i] == 0x7f) { rx_w_fail_at(w, open, "unclosed quote"); return; }
+    if (i >= w->n) { rx_w_fail_at(w, open, "unclosed quote"); return; }
+    if (!rx_w_utf8(w->s + open + 1, i - open - 1)) { rx_w_fail_at(w, open, "a quoted value that is not UTF-8"); return; }
     w->p = i + 1;
 }
 static int rx_w_listed(const char *const *list, const unsigned char *s, size_t n) {
@@ -3710,14 +3710,14 @@ static void rx_w_list(rx_wp *w) {
         return;
     }
     size_t s = w->p, n = rx_w_word(w);
-    if (!n) return rx_w_fail(w, "expected a key or a quoted list");
+    if (!n) { rx_w_fail(w, "expected a key or a quoted list"); return; }
     rx_w_key(w, s, n);
 }
 static void rx_w_value(rx_wp *w) {
     rx_w_ws(w);
     unsigned char a = rx_w_at(w, w->p);
     if (a == '\'' || a == '"') rx_w_quoted(w);
-    else if (!rx_w_bare(w)) return rx_w_fail(w, "expected a value");
+    else if (!rx_w_bare(w)) { rx_w_fail(w, "expected a value"); return; }
     if (!w->err) rx_w_emit(w);
 }
 static void rx_w_tail(rx_wp *w) {
@@ -3725,10 +3725,10 @@ static void rx_w_tail(rx_wp *w) {
     unsigned char a = rx_w_at(w, w->p), b = rx_w_at(w, w->p + 1);
     int two;
     if (a == '=') {
-        if (b != '=' && b != '~') return rx_w_fail(w, "expected == != < <= > >= =~ in or not in");
+        if (b != '=' && b != '~') { rx_w_fail(w, "expected == != < <= > >= =~ in or not in"); return; }
         two = 1;
     } else if (a == '!') {
-        if (b != '=') return rx_w_fail(w, "expected == != < <= > >= =~ in or not in");
+        if (b != '=') { rx_w_fail(w, "expected == != < <= > >= =~ in or not in"); return; }
         two = 1;
     } else if (a == '<' || a == '>') {
         two = b == '=';
@@ -3748,33 +3748,33 @@ static void rx_w_unary(rx_wp *w) {
     rx_w_ws(w);
     unsigned char a = rx_w_at(w, w->p), b = rx_w_at(w, w->p + 1);
     if (a == '!') {
-        if (b == '=') return rx_w_fail(w, "expected a key, true, false, ! or (");
+        if (b == '=') { rx_w_fail(w, "expected a key, true, false, ! or ("); return; }
         w->p++;
-        if (++w->depth > 8) return rx_w_fail(w, "nested too deeply (8 levels at most)");
+        if (++w->depth > 8) { rx_w_fail(w, "nested too deeply (8 levels at most)"); return; }
         rx_w_unary(w);
         w->depth--;
         rx_w_emit(w);
     } else if (a == '(') {
         w->p++;
-        if (++w->depth > 8) return rx_w_fail(w, "nested too deeply (8 levels at most)");
+        if (++w->depth > 8) { rx_w_fail(w, "nested too deeply (8 levels at most)"); return; }
         rx_w_or(w);
         if (w->err) return;
         w->depth--;
         rx_w_ws(w);
-        if (rx_w_at(w, w->p) != ')') return rx_w_fail(w, "expected )");
+        if (rx_w_at(w, w->p) != ')') { rx_w_fail(w, "expected )"); return; }
         w->p++;
     } else if (a == '\'' || a == '"') {
         rx_w_quoted(w);
         if (w->err) return;
         rx_w_emit(w);
         rx_w_ws(w);
-        if (!rx_w_in(w)) return rx_w_fail(w, "expected in or not in");
+        if (!rx_w_in(w)) { rx_w_fail(w, "expected in or not in"); return; }
         rx_w_list(w);
         rx_w_emit(w);
     } else {
         size_t s = w->p, n = rx_w_word(w);
-        if (!n) return rx_w_fail(w, "expected a key, true, false, ! or (");
-        if (rx_w_is(w, s, n, "true") || rx_w_is(w, s, n, "false")) return rx_w_emit(w);
+        if (!n) { rx_w_fail(w, "expected a key, true, false, ! or ("); return; }
+        if (rx_w_is(w, s, n, "true") || rx_w_is(w, s, n, "false")) { rx_w_emit(w); return; }
         rx_w_key(w, s, n);
         if (!w->err) rx_w_tail(w);
     }
