@@ -7953,7 +7953,7 @@ static void rx_answer(rx_ext *ext, const rx_handlers *h, void *user, char **f, i
         req.r.end.line = atoi(f[6]);
         req.r.end.col = atoi(f[7]);
         req.rgba = (uint32_t)strtoul(f[8], NULL, 16);
-        if ((ok = h->color_edit(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, caps & 1, (caps & 2) != 0);
+        if ((ok = h->color_edit(ext, &req, &e, user)) != 0) rx_wedit_finish_caps(&e, &body, caps & 1, (caps & 2) != 0, NULL);
     } else {
         rx_answer_ai(ext, h, user, f, n, data, data_len, &ok, &body);
     }
