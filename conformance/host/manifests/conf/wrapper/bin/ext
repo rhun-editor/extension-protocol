@@ -1,2 +1,2 @@
 #!/bin/sh
-exec python3 "EXT_PY_LOCAL"
+exec python3 "EXT_PY_LOCAL" "$@"
