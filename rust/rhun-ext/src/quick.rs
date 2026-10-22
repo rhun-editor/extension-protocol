@@ -208,7 +208,6 @@ impl Step {
         } else {
             flags
                 .iter()
-                .take(6)
                 .map(|f| f.word())
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -391,6 +390,23 @@ mod tests {
         assert_eq!(
             s.encode(),
             b"flags multi back 0\nmsg 4 error 5\ntakenflags - 0\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn all_seven_flags() {
+        let s = Step::new().flags(&[
+            Flag::Multi,
+            Flag::Back,
+            Flag::Busy,
+            Flag::NoFilter,
+            Flag::MatchDesc,
+            Flag::MatchDetail,
+            Flag::Password,
+        ]);
+        assert_eq!(
+            s.encode(),
+            b"flags multi back busy nofilter match-desc match-detail password 0\n".to_vec()
         );
     }
 }
