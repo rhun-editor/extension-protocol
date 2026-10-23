@@ -137,6 +137,14 @@
           ],
           "default": "none"
         },
+        "audio": {
+          "enum": [
+            "no",
+            "yes"
+          ],
+          "default": "no",
+          "description": "local audio devices and services, with platform-specific access (rhun 0.18.2 and later)"
+        },
         "network": {
           "enum": [
             "no",

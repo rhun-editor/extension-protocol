@@ -138,6 +138,11 @@ func (h *host) viewRequest(id int64, verb string, args []string, body []byte, re
 		}
 		v, _ := strconv.ParseInt(args[0], 10, 64)
 		if rv := h.rviews[v]; !h.views[v] && (rv == nil || rv.vkind != "picture") {
+			if h.closingViews[v] > 0 {
+				h.closingViews[v]--
+				rerr("noview", "no such view")
+				return
+			}
 			h.fail("views", fmt.Sprintf("draw names view %s, which is not open", args[0]))
 			rerr("noview", "no such view")
 			return
@@ -482,7 +487,11 @@ func (h *host) checkFeatures() {
 			return
 		}
 		h.ok(fmt.Sprintf("its %d views take size, metrics and pointer events (%d pictures drawn)", len(h.views), h.pictures))
+		if h.closingViews == nil {
+			h.closingViews = make(map[int64]int)
+		}
 		for v := range h.views {
+			h.closingViews[v] = 1
 			h.write(fmt.Sprintf("0 view %d closed\n", v))
 			delete(h.views, v)
 		}
