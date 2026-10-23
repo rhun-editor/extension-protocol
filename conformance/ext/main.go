@@ -263,6 +263,7 @@ type host struct {
 
 	features      map[string]bool // section 12: agreed after hello
 	views         map[int64]bool  // views it opened
+	closingViews  map[int64]int   // allow one synchronous draw already in flight at close
 	nextView      int64
 	pictures      int               // draw requests that passed
 	hostSeq       int64             // the last id of a request the checker sent
@@ -1416,9 +1417,10 @@ func dash(s string) string {
 	return strings.ReplaceAll(s, " ", "_")
 }
 
-// serve reads the extension's lines until it has been quiet for `quiet`, handling requests.
+// serve handles requests until quiet, or for at most two seconds when a picture keeps drawing.
 func (h *host) serve(quiet time.Duration) {
-	for {
+	deadline := time.Now().Add(2 * time.Second) // animated views never become quiet
+	for time.Now().Before(deadline) {
 		m, err := h.readMessage(quiet)
 		if err != nil {
 			return
@@ -1678,7 +1680,7 @@ func main() {
 			ok = v == "none" || v == "read" || v == "write"
 		case "home":
 			ok = v == "none" || v == "read"
-		case "network", "secrets":
+		case "network", "secrets", "audio":
 			ok = v == "no" || v == "yes"
 		case "terminal": // no, yes = suggest, run, input, output (terminals and tasks)
 			ok = v == "no" || terminalLevel(v) > 0
